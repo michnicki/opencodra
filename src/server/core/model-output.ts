@@ -1,4 +1,4 @@
-import { fileReviewModelOutputSchema, parsedReviewCommentSchema, type ParsedReviewComment } from '@shared/schema';
+import { fileReviewModelOutputSchema, parsedReviewCommentSchema, summaryModelOutputSchema, type ParsedReviewComment } from '@shared/schema';
 import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPositions } from './diff';
 import type { FileDiff } from './diff';
 import { jsonrepair } from 'jsonrepair';
@@ -113,4 +113,26 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
     verdict: parsed.file_verdict,
     fileSummary: fileSummary,
   };
+}
+
+export function parseSummaryResponse(raw: string): string {
+  const extracted = extractJson(raw);
+  const preprocessed = preprocessJson(extracted);
+
+  let repaired = preprocessed;
+  try {
+    repaired = jsonrepair(preprocessed);
+  } catch (e) {
+    // Fall back to original preprocessed text if repair fails
+  }
+
+  try {
+    const parsedJson = JSON.parse(repaired);
+    const validated = summaryModelOutputSchema.parse(parsedJson);
+    return validated[0]?.summary || 'Review completed with no summary provided.';
+  } catch (error) {
+    // If it's not valid JSON or doesn't match the schema, return the raw text as a fallback
+    // This handles cases where the model might still ignore the JSON constraint
+    return raw.trim() || 'Review completed with no summary provided.';
+  }
 }

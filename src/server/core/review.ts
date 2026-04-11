@@ -6,7 +6,7 @@ import { insertFileReview, getFileReviewsForJob } from '@server/db/file-reviews'
 import { completeJob, failJob, getJobForProcessing, markJobRunning, updateJobCheckRun, updateJobFileCount, updateJobStep } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 import { GitHubClient } from './github';
-import { parseFileReviewResponse } from './model-output';
+import { parseFileReviewResponse, parseSummaryResponse } from './model-output';
 import { buildFileReviewPrompts } from '@server/prompts/file-review';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '@server/prompts/summary';
 import { reviewWithGemma } from '@server/models/gemma';
@@ -345,11 +345,13 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     totalOutputTokens += summaryResponse.outputTokens;
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
 
+    const parsedSummary = parseSummaryResponse(summaryResponse.rawText);
+
     await updateJobStep(env, job.id, 'Completing', { status: 'running' });
     const review = await github.createReview(job.owner, job.repo, job.pr_number, {
       commitSha: pr.head.sha,
       event: toReviewEvent(verdictSummary.verdict),
-      body: summaryResponse.rawText,
+      body: parsedSummary,
       comments: reviewedComments,
     });
 
@@ -397,7 +399,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       commentCount: reviewedComments.length,
       totalInputTokens,
       totalOutputTokens,
-      summaryMarkdown: summaryResponse.rawText,
+      summaryMarkdown: parsedSummary,
       reviewId: review.id,
       summaryModel: summaryResponse.modelUsed,
     });

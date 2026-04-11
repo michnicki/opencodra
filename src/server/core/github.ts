@@ -1,6 +1,49 @@
 import type { ParsedReviewComment } from '@shared/schema';
 import type { AppBindings } from '@server/env';
 import { withTimeout } from '@server/core/timeout';
+import { logger } from '@server/core/logger';
+
+export class GitHubError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly body: string,
+    public readonly path: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GitHubError';
+  }
+}
+
+async function withRetry<T>(
+  operation: string,
+  fn: () => Promise<T>,
+  maxRetries = 2,
+): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      attempt++;
+      const isRetryable =
+        (error instanceof GitHubError && (error.status === 429 || error.status >= 500)) ||
+        error.name === 'TimeoutError' ||
+        error.message.includes('timeout');
+
+      if (!isRetryable || attempt > maxRetries) {
+        throw error;
+      }
+
+      const delay = Math.pow(2, attempt) * 1000;
+      logger.warn(`Retrying GitHub operation ${operation} (attempt ${attempt}/${maxRetries}) in ${delay}ms`, {
+        status: error instanceof GitHubError ? error.status : undefined,
+        error: error.message,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
 
 export type GitHubInstallation = {
   id: number;
@@ -107,75 +150,92 @@ export class GitHubClient {
     private readonly installationId: string,
   ) {}
 
-  async getInstallationToken() {
+  async getInstallationToken(): Promise<string> {
     const cached = await readCachedInstallationToken(this.env, this.installationId);
     if (cached?.token) {
       return cached.token;
     }
 
-    const jwt = await createGitHubJwt(this.env.GITHUB_APP_ID, this.env.APP_PRIVATE_KEY);
+    return withRetry('getInstallationToken', async () => {
+      const jwt = await createGitHubJwt(this.env.GITHUB_APP_ID, this.env.APP_PRIVATE_KEY);
 
-    const response = await withTimeout('GitHub installation token', GITHUB_TIMEOUT_MS, (signal) =>
-      fetch(`https://api.github.com/app/installations/${this.installationId}/access_tokens`, {
-        method: 'POST',
-        signal,
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${jwt}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
-        },
-      }),
-    );
+      const response = await withTimeout('GitHub installation token', GITHUB_TIMEOUT_MS, (signal) =>
+        fetch(`https://api.github.com/app/installations/${this.installationId}/access_tokens`, {
+          method: 'POST',
+          signal,
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${jwt}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
+          },
+        }),
+      );
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub installation token request failed with ${response.status}: ${errText}`);
-    }
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          '/app/installations/.../access_tokens',
+          `GitHub installation token request failed with ${response.status}: ${errText}`,
+        );
+      }
 
-    const data = (await response.json()) as { token: string; expires_at: string };
-    await writeCachedInstallationToken(this.env, this.installationId, {
-      token: data.token,
-      expiresAt: data.expires_at,
+      const data = (await response.json()) as { token: string; expires_at: string };
+      await writeCachedInstallationToken(this.env, this.installationId, {
+        token: data.token,
+        expiresAt: data.expires_at,
+      });
+
+      return data.token;
     });
-
-    return data.token;
   }
 
-  static async listInstallations(env: Pick<AppBindings, 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME'>): Promise<GitHubInstallation[]> {
-    const jwt = await createGitHubJwt(env.GITHUB_APP_ID, env.APP_PRIVATE_KEY);
-    const response = await withTimeout('GitHub list installations', GITHUB_TIMEOUT_MS, (signal) =>
-      fetch('https://api.github.com/app/installations', {
-        signal,
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${jwt}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': env.BOT_USERNAME ?? 'codra-bot',
-        },
-      }),
-    );
+  static async listInstallations(
+    env: Pick<AppBindings, 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME'>,
+  ): Promise<GitHubInstallation[]> {
+    return withRetry('listInstallations', async () => {
+      const jwt = await createGitHubJwt(env.GITHUB_APP_ID, env.APP_PRIVATE_KEY);
+      const response = await withTimeout('GitHub list installations', GITHUB_TIMEOUT_MS, (signal) =>
+        fetch('https://api.github.com/app/installations', {
+          signal,
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${jwt}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': env.BOT_USERNAME ?? 'codra-bot',
+          },
+        }),
+      );
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub list installations failed with ${response.status}: ${errText}`);
-    }
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          '/app/installations',
+          `GitHub list installations failed with ${response.status}: ${errText}`,
+        );
+      }
 
-    return (await response.json()) as GitHubInstallation[];
+      return (await response.json()) as GitHubInstallation[];
+    });
   }
 
   async listRepositories(): Promise<GitHubRepository[]> {
-    const response = await this.request('/installation/repositories');
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub list repositories failed with ${response.status}: ${errText}`);
-    }
-
-    const data = (await response.json()) as { repositories: GitHubRepository[] };
-    return data.repositories;
+    return withRetry('listRepositories', async () => {
+      const response = await this.requestAndCheck('/installation/repositories');
+      const data = (await response.json()) as { repositories: GitHubRepository[] };
+      return data.repositories;
+    });
   }
 
-  private async request(path: string, init: RequestInit = {}, accept = 'application/vnd.github+json') {
+  private async request(
+    path: string,
+    init: RequestInit = {},
+    accept = 'application/vnd.github+json',
+  ): Promise<Response> {
     const token = await this.getInstallationToken();
 
     return withTimeout(`GitHub ${init.method ?? 'GET'} ${path}`, GITHUB_TIMEOUT_MS, (signal) =>
@@ -193,96 +253,122 @@ export class GitHubClient {
     );
   }
 
-  async getPullRequest(owner: string, repo: string, pullNumber: number) {
-    const response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`);
+  private async requestAndCheck(
+    path: string,
+    init: RequestInit = {},
+    accept = 'application/vnd.github+json',
+  ): Promise<Response> {
+    const response = await this.request(path, init, accept);
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`GitHub pull request fetch failed with ${response.status}: ${errText}`);
+      throw new GitHubError(
+        response.status,
+        errText,
+        path,
+        `GitHub API ${init.method ?? 'GET'} ${path} failed with ${response.status}: ${errText}`,
+      );
     }
+    return response;
+  }
 
-    return (await response.json()) as PullRequestRecord;
+  async getPullRequest(owner: string, repo: string, pullNumber: number) {
+    return withRetry(`getPullRequest ${owner}/${repo}#${pullNumber}`, async () => {
+      const response = await this.requestAndCheck(`/repos/${owner}/${repo}/pulls/${pullNumber}`);
+      return (await response.json()) as PullRequestRecord;
+    });
   }
 
   async getPullRequestDiff(owner: string, repo: string, pullNumber: number) {
-    const response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`, {}, 'application/vnd.github.v3.diff');
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub diff fetch failed with ${response.status}: ${errText}`);
-    }
-
-    return response.text();
+    return withRetry(`getPullRequestDiff ${owner}/${repo}#${pullNumber}`, async () => {
+      const response = await this.requestAndCheck(
+        `/repos/${owner}/${repo}/pulls/${pullNumber}`,
+        {},
+        'application/vnd.github.v3.diff',
+      );
+      return response.text();
+    });
   }
 
   async getRepoFileOrNull(owner: string, repo: string, path: string) {
-    const response = await this.request(`/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`);
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub repo file fetch failed with ${response.status}: ${errText}`);
-    }
+    return withRetry(`getRepoFileOrNull ${owner}/${repo}/${path}`, async () => {
+      const response = await this.request(`/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`);
+      if (response.status === 404) {
+        return null;
+      }
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          path,
+          `GitHub repo file fetch failed with ${response.status}: ${errText}`,
+        );
+      }
 
-    const data = (await response.json()) as { content?: string; encoding?: string };
-    if (!data.content) {
-      return null;
-    }
+      const data = (await response.json()) as { content?: string; encoding?: string };
+      if (!data.content) {
+        return null;
+      }
 
-    return data.encoding === 'base64' ? atob(data.content.replace(/\n/g, '')) : data.content;
+      return data.encoding === 'base64' ? atob(data.content.replace(/\n/g, '')) : data.content;
+    });
   }
 
-  async createCheckRun(owner: string, repo: string, input: { headSha: string; title: string; summary: string; detailsUrl?: string }) {
-    const response = await this.request(`/repos/${owner}/${repo}/check-runs`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: 'Codra',
-        head_sha: input.headSha,
-        status: 'in_progress',
-        details_url: input.detailsUrl,
-        output: {
-          title: input.title,
-          summary: input.summary,
+  async createCheckRun(
+    owner: string,
+    repo: string,
+    input: { headSha: string; title: string; summary: string; detailsUrl?: string },
+  ) {
+    return withRetry(`createCheckRun ${owner}/${repo}`, async () => {
+      const response = await this.requestAndCheck(`/repos/${owner}/${repo}/check-runs`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
         },
-      }),
+        body: JSON.stringify({
+          name: 'Codra',
+          head_sha: input.headSha,
+          status: 'in_progress',
+          details_url: input.detailsUrl,
+          output: {
+            title: input.title,
+            summary: input.summary,
+          },
+        }),
+      });
+
+      return (await response.json()) as { id: number };
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub check run creation failed with ${response.status}: ${errText}`);
-    }
-
-    return (await response.json()) as { id: number };
   }
 
   async updateCheckRun(
     owner: string,
     repo: string,
     checkRunId: number,
-    input: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' },
+    input: {
+      title: string;
+      summary: string;
+      status?: 'in_progress' | 'completed';
+      conclusion?: 'success' | 'neutral' | 'failure';
+    },
   ) {
-    const response = await this.request(`/repos/${owner}/${repo}/check-runs/${checkRunId}`, {
-      method: 'PATCH',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        status: input.status ?? 'in_progress',
-        conclusion: input.conclusion,
-        completed_at: input.status === 'completed' ? new Date().toISOString() : undefined,
-        output: {
-          title: input.title,
-          summary: input.summary,
+    return withRetry(`updateCheckRun ${owner}/${repo} ${checkRunId}`, async () => {
+      await this.requestAndCheck(`/repos/${owner}/${repo}/check-runs/${checkRunId}`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
         },
-      }),
+        body: JSON.stringify({
+          status: input.status ?? 'in_progress',
+          conclusion: input.conclusion,
+          completed_at: input.status === 'completed' ? new Date().toISOString() : undefined,
+          output: {
+            title: input.title,
+            summary: input.summary,
+          },
+        }),
+      });
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub check run update failed with ${response.status}: ${errText}`);
-    }
   }
 
   async createReview(
@@ -296,93 +382,128 @@ export class GitHubClient {
       comments: ParsedReviewComment[];
     },
   ) {
-    const body = {
-      commit_id: input.commitSha,
-      event: input.event,
-      body: input.body,
-      comments: input.comments
-        .filter((comment) => comment.position)
-        .map((comment) => ({
-          path: comment.path,
-          position: comment.position,
-          body: comment.body,
-        })),
-    };
+    return withRetry(`createReview ${owner}/${repo}#${pullNumber}`, async () => {
+      const body = {
+        commit_id: input.commitSha,
+        event: input.event,
+        body: input.body,
+        comments: input.comments
+          .filter((comment) => comment.position)
+          .map((comment) => ({
+            path: comment.path,
+            position: comment.position,
+            body: comment.body,
+          })),
+      };
 
-    let response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (response.status === 422 && body.comments.length > 0) {
-      response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`, {
+      let response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          commit_id: input.commitSha,
-          event: input.event,
-          body: input.body,
-          comments: [],
-        }),
+        body: JSON.stringify(body),
       });
-    }
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`GitHub review creation failed with ${response.status}: ${errText}`);
-    }
+      if (response.status === 422 && body.comments.length > 0) {
+        logger.warn(`GitHub review creation failed with 422, retrying without inline comments`, {
+          owner,
+          repo,
+          pullNumber,
+        });
+        response = await this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            commit_id: input.commitSha,
+            event: input.event,
+            body: input.body,
+            comments: [],
+          }),
+        });
+      }
 
-    return (await response.json()) as { id: number };
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          `/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`,
+          `GitHub review creation failed with ${response.status}: ${errText}`,
+        );
+      }
+
+      return (await response.json()) as { id: number };
+    });
   }
 
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
-    const listResponse = await this.request(`/repos/${owner}/${repo}/labels/${encodeURIComponent(name)}`);
-    if (listResponse.ok) {
-      return;
-    }
-    if (listResponse.status !== 404) {
-      throw new Error(`GitHub label lookup failed with ${listResponse.status}`);
-    }
+    return withRetry(`ensureLabel ${owner}/${repo} ${name}`, async () => {
+      const listResponse = await this.request(`/repos/${owner}/${repo}/labels/${encodeURIComponent(name)}`);
+      if (listResponse.ok) {
+        return;
+      }
+      if (listResponse.status !== 404) {
+        const errText = await listResponse.text();
+        throw new GitHubError(
+          listResponse.status,
+          errText,
+          name,
+          `GitHub label lookup failed with ${listResponse.status}: ${errText}`,
+        );
+      }
 
-    const createResponse = await this.request(`/repos/${owner}/${repo}/labels`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ name, color }),
+      const createResponse = await this.request(`/repos/${owner}/${repo}/labels`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ name, color }),
+      });
+
+      if (!createResponse.ok && createResponse.status !== 422) {
+        const errText = await createResponse.text();
+        throw new GitHubError(
+          createResponse.status,
+          errText,
+          name,
+          `GitHub label creation failed with ${createResponse.status}: ${errText}`,
+        );
+      }
     });
-
-    if (!createResponse.ok && createResponse.status !== 422) {
-      throw new Error(`GitHub label creation failed with ${createResponse.status}`);
-    }
   }
 
   async addIssueLabels(owner: string, repo: string, issueNumber: number, labels: string[]) {
-    const response = await this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/labels`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ labels }),
+    return withRetry(`addIssueLabels ${owner}/${repo}#${issueNumber}`, async () => {
+      await this.requestAndCheck(`/repos/${owner}/${repo}/issues/${issueNumber}/labels`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ labels }),
+      });
     });
-
-    if (!response.ok) {
-      throw new Error(`GitHub label update failed with ${response.status}`);
-    }
   }
 
   async removeIssueLabel(owner: string, repo: string, issueNumber: number, label: string) {
-    const response = await this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, {
-      method: 'DELETE',
-    });
+    return withRetry(`removeIssueLabel ${owner}/${repo}#${issueNumber} ${label}`, async () => {
+      const response = await this.request(
+        `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+        {
+          method: 'DELETE',
+        },
+      );
 
-    if (!response.ok && response.status !== 404) {
-      throw new Error(`GitHub label removal failed with ${response.status}`);
-    }
+      if (!response.ok && response.status !== 404) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          label,
+          `GitHub label removal failed with ${response.status}: ${errText}`,
+        );
+      }
+    });
   }
 }
