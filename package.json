@@ -1,0 +1,41 @@
+{
+  "name": "codra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && npm run cf-typegen",
+    "cf-typegen": "wrangler types ./src/server/worker-env.d.ts",
+    "deploy": "npm run build && wrangler deploy",
+    "dev": "concurrently -k -n CLIENT,WORKER -c cyan,green \"npm:dev:client\" \"npm:dev:worker\"",
+    "dev:client": "vite build --watch --mode development",
+    "dev:worker": "wrangler dev",
+    "start": "npm run dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.14.3",
+    "@types/node": "^25.6.0",
+    "@types/picomatch": "^4.0.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4",
+    "wrangler": "^4.81.1"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "hono": "^4.12.12",
+    "picomatch": "^4.0.4",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-router-dom": "^7.14.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
+  }
+}
