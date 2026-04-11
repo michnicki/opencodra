@@ -1,4 +1,5 @@
 import type {
+  DlqResponse,
   JobDetailResponse,
   JobsResponse,
   LoginPayload,
@@ -6,6 +7,7 @@ import type {
   RepoConfigsResponse,
   RetryJobResponse,
   StatsResponse,
+  SyncReposResponse,
 } from '@shared/api';
 
 async function request<T>(input: string, init?: RequestInit) {
@@ -75,5 +77,25 @@ export const api = {
   },
   getStats() {
     return request<StatsResponse>('/api/stats');
+  },
+  syncRepos() {
+    return request<SyncReposResponse>('/api/repos/sync', {
+      method: 'POST',
+    });
+  },
+  getDlqMessages(limit = 20) {
+    return request<DlqResponse>(`/api/dlq?limit=${limit}`);
+  },
+  replayDlqMessages(leaseIds: string[]) {
+    return request<{ replayedCount: number }>('/api/dlq/replay', {
+      method: 'POST',
+      body: JSON.stringify({ lease_ids: leaseIds }),
+    });
+  },
+  purgeDlqMessages(leaseIds: string[]) {
+    return request<{ purged: number }>('/api/dlq/purge', {
+      method: 'POST',
+      body: JSON.stringify({ lease_ids: leaseIds }),
+    });
   },
 };

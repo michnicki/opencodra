@@ -13,7 +13,7 @@ type JobRow = {
   commit_sha: string;
   base_sha: string;
   trigger: 'auto' | 'mention' | 'retry';
-  status: 'queued' | 'running' | 'done' | 'failed';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded';
   config_snapshot: { review?: RepoConfig['review'] } | null;
   check_run_id: number | null;
   created_at: string;
@@ -417,4 +417,63 @@ export async function updateJobStep(
   }
 
   await queryRows(env, 'UPDATE jobs SET steps = $2 WHERE id = $1', [jobId, JSON.stringify(steps)]);
+}
+
+/**
+ * Marks every job that has been stuck in 'running' for longer than
+ * `thresholdMinutes` as failed. This prevents phantom running jobs that were
+ * left behind by a crashed or OOM-killed worker invocation.
+ *
+ * Returns the number of rows updated.
+ */
+export async function recoverStaleJobs(
+  env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
+  thresholdMinutes = 20,
+): Promise<number> {
+  const rows = await queryRows<{ id: string }>(env, `
+    UPDATE jobs
+    SET status     = 'failed',
+        finished_at = now(),
+        error_msg  = 'Job timed out: worker crashed or was evicted.'
+    WHERE status = 'running'
+      AND started_at < now() - ($1 || ' minutes')::interval
+    RETURNING id
+  `, [String(thresholdMinutes)]);
+
+  return rows.length;
+}
+
+/**
+ * Marks older 'queued' or 'running' jobs for the same Pull Request as superseded.
+ * This should be called when a new job is created for a PR.
+ */
+export async function supersedeOlderJobs(
+  env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
+  input: {
+    installationId: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    newJobId: string;
+  },
+): Promise<number> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `
+      UPDATE jobs
+      SET status = 'superseded',
+          finished_at = now(),
+          error_msg = 'Superseded by a newer commit or job.'
+      WHERE installation_id = $1
+        AND owner = $2
+        AND repo = $3
+        AND pr_number = $4
+        AND id != $5
+        AND status IN ('queued', 'running')
+      RETURNING id
+    `,
+    [input.installationId, input.owner, input.repo, input.prNumber, input.newJobId],
+  );
+
+  return rows.length;
 }

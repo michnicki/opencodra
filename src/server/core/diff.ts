@@ -24,6 +24,8 @@ export type FileDiff = {
   isBinary: boolean;
   lineCount: number;
   hunks: DiffHunk[];
+  isTruncated?: boolean;
+  originalLineCount?: number;
 };
 
 const defaultSkipMatchers = ['**/*.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/*.min.js'].map((pattern) =>
@@ -205,6 +207,30 @@ export function findPositionForLine(file: FileDiff, lineNumber: number) {
   return undefined;
 }
 
+export function findClosestValidLine(file: FileDiff, targetLine: number): number | undefined {
+  const validLines = Array.from(getValidNewLines(file)).sort((a, b) => a - b);
+  if (validLines.length === 0) return undefined;
+
+  // Find the closest line in the diff
+  let closest = validLines[0];
+  let minDiff = Math.abs(targetLine - closest);
+
+  for (const line of validLines) {
+    const diff = Math.abs(targetLine - line);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = line;
+    }
+  }
+
+  // If the closest line is too far away (e.g. > 10 lines), maybe don't use it?
+  // But for now, returning the closest is better than nothing if the model was close.
+  // Actually, let's limit it to a reasonable range to avoid confusing placement.
+  if (minDiff > 20) return undefined;
+
+  return closest;
+}
+
 export function filterReviewableFiles(files: FileDiff[], config: RepoConfig['review']) {
   const customMatchers = config.skip_files.map((pattern) => picomatch(pattern, { dot: true }));
 
@@ -214,4 +240,30 @@ export function filterReviewableFiles(files: FileDiff[], config: RepoConfig['rev
     .filter((file) => !customMatchers.some((matcher) => matcher(file.path)))
     .sort((left, right) => Number(left.isNew) - Number(right.isNew) || left.path.localeCompare(right.path))
     .slice(0, config.max_files);
+}
+
+export function truncateFileDiff(file: FileDiff, maxLines: number): FileDiff {
+  if (file.lineCount <= maxLines) {
+    return file;
+  }
+
+  let currentLines = 0;
+  const keptHunks: DiffHunk[] = [];
+
+  for (const hunk of file.hunks) {
+    if (currentLines + hunk.lines.length > maxLines && keptHunks.length > 0) {
+      break;
+    }
+    keptHunks.push(hunk);
+    currentLines += hunk.lines.length;
+    if (currentLines > maxLines) break;
+  }
+
+  return {
+    ...file,
+    hunks: keptHunks,
+    lineCount: currentLines,
+    isTruncated: true,
+    originalLineCount: file.lineCount,
+  };
 }

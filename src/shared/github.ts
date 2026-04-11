@@ -1,7 +1,7 @@
 export type GitHubWebhookEventName = 'pull_request' | 'issue_comment';
 
 export type PullRequestWebhookPayload = {
-  action: 'opened' | 'synchronize' | 'ready_for_review';
+  action: 'opened' | 'synchronize' | 'ready_for_review' | 'reopened' | 'closed';
   installation?: { id: number };
   repository: {
     owner: { login: string };

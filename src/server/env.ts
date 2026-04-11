@@ -26,10 +26,13 @@ export interface AppBindings {
   DASHBOARD_PASSWORD: string;
   BOT_USERNAME: string;
   ENVIRONMENT: string;
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
 }
 
 export interface AppVariables {
   sessionToken: string | null;
+  requestId: string;
 }
 
 export type AppEnv = {

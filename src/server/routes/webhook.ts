@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
-import type { GitHubWebhookEventName, GitHubWebhookPayload } from '@shared/github';
+import type { GitHubWebhookEventName, GitHubWebhookPayload, PullRequestWebhookPayload } from '@shared/github';
 import type { AppEnv } from '@server/env';
 import { extractReviewRequest } from '@server/core/review';
 import { verifyGitHubWebhookSignature } from '@server/core/verify';
 import { jsonError } from '@server/core/http';
 import { GitHubClient } from '@server/core/github';
 import { loadRepoConfig } from '@server/core/config';
-import { findExistingJobForHead, insertJob } from '@server/db/jobs';
+import { findExistingJobForHead, insertJob, supersedeOlderJobs } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 
 export function createWebhookRouter() {
@@ -60,6 +60,16 @@ export function createWebhookRouter() {
     });
 
     if (!extracted) {
+      if (eventName === 'pull_request') {
+        const prPayload = payload as PullRequestWebhookPayload;
+        if (prPayload.action === 'closed' && repoConfig.parsedJson.review.labels !== false) {
+          const labels = repoConfig.parsedJson.review.labels;
+          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p1);
+          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p2);
+          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p3);
+          return c.json({ ok: true, cleaned: true }, 200);
+        }
+      }
       return c.json({ ok: true, ignored: true }, 202);
     }
 
@@ -103,6 +113,15 @@ export function createWebhookRouter() {
       configSnapshot: repoConfig.parsedJson,
     });
 
+    // Supersede any older pending/running jobs for this PR
+    await supersedeOlderJobs(c.env, {
+      installationId: resolved.installationId,
+      owner: resolved.owner,
+      repo: resolved.repo,
+      prNumber: resolved.prNumber,
+      newJobId: job.id,
+    });
+
     await c.env.REVIEW_QUEUE.send({
       jobId: job.id,
       deliveryId,
@@ -112,6 +131,7 @@ export function createWebhookRouter() {
       prNumber: resolved.prNumber,
       commitSha: resolved.commitSha,
       trigger: resolved.trigger,
+      requestId: c.get('requestId'),
     });
 
     return c.json({ ok: true, jobId: job.id }, 202);

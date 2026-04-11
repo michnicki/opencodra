@@ -1,6 +1,8 @@
-type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+import { Badge, type BadgeProps } from '@client/components/ui/badge';
 
-function getTone(value: string): BadgeTone {
+type BadgeVariant = NonNullable<BadgeProps['variant']>;
+
+function getTone(value: string): BadgeVariant {
   switch (value) {
     case 'done':
     case 'approve':
@@ -12,11 +14,18 @@ function getTone(value: string): BadgeTone {
     case 'failed':
     case 'request_changes':
       return 'danger';
+    case 'queued':
+    case 'superseded':
+      return 'neutral';
     default:
       return 'neutral';
   }
 }
 
 export function StatusBadge({ label }: { label: string }) {
-  return <span className={`badge ${getTone(label)}`}>{label.replace(/_/g, ' ')}</span>;
+  return (
+    <Badge variant={getTone(label)} className="capitalize">
+      {label.replace(/_/g, ' ')}
+    </Badge>
+  );
 }

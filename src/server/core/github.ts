@@ -1,5 +1,20 @@
 import type { ParsedReviewComment } from '@shared/schema';
 import type { AppBindings } from '@server/env';
+import { withTimeout } from '@server/core/timeout';
+
+export type GitHubInstallation = {
+  id: number;
+};
+
+export type GitHubRepository = {
+  name: string;
+  owner: {
+    login: string;
+  };
+};
+
+/** Default timeout for every GitHub API call (30 s). */
+const GITHUB_TIMEOUT_MS = 30_000;
 
 type InstallationTokenCacheRecord = {
   token: string;
@@ -99,15 +114,19 @@ export class GitHubClient {
     }
 
     const jwt = await createGitHubJwt(this.env.GITHUB_APP_ID, this.env.APP_PRIVATE_KEY);
-    const response = await fetch(`https://api.github.com/app/installations/${this.installationId}/access_tokens`, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${jwt}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
-      },
-    });
+
+    const response = await withTimeout('GitHub installation token', GITHUB_TIMEOUT_MS, (signal) =>
+      fetch(`https://api.github.com/app/installations/${this.installationId}/access_tokens`, {
+        method: 'POST',
+        signal,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${jwt}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
+        },
+      }),
+    );
 
     if (!response.ok) {
       const errText = await response.text();
@@ -123,20 +142,55 @@ export class GitHubClient {
     return data.token;
   }
 
+  static async listInstallations(env: Pick<AppBindings, 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME'>): Promise<GitHubInstallation[]> {
+    const jwt = await createGitHubJwt(env.GITHUB_APP_ID, env.APP_PRIVATE_KEY);
+    const response = await withTimeout('GitHub list installations', GITHUB_TIMEOUT_MS, (signal) =>
+      fetch('https://api.github.com/app/installations', {
+        signal,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${jwt}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': env.BOT_USERNAME ?? 'codra-bot',
+        },
+      }),
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`GitHub list installations failed with ${response.status}: ${errText}`);
+    }
+
+    return (await response.json()) as GitHubInstallation[];
+  }
+
+  async listRepositories(): Promise<GitHubRepository[]> {
+    const response = await this.request('/installation/repositories');
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`GitHub list repositories failed with ${response.status}: ${errText}`);
+    }
+
+    const data = (await response.json()) as { repositories: GitHubRepository[] };
+    return data.repositories;
+  }
+
   private async request(path: string, init: RequestInit = {}, accept = 'application/vnd.github+json') {
     const token = await this.getInstallationToken();
-    const response = await fetch(`https://api.github.com${path}`, {
-      ...init,
-      headers: {
-        Accept: accept,
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
-        ...(init.headers ?? {}),
-      },
-    });
 
-    return response;
+    return withTimeout(`GitHub ${init.method ?? 'GET'} ${path}`, GITHUB_TIMEOUT_MS, (signal) =>
+      fetch(`https://api.github.com${path}`, {
+        ...init,
+        signal,
+        headers: {
+          Accept: accept,
+          Authorization: `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': this.env.BOT_USERNAME ?? 'codra-bot',
+          ...(init.headers ?? {}),
+        },
+      }),
+    );
   }
 
   async getPullRequest(owner: string, repo: string, pullNumber: number) {
@@ -319,6 +373,16 @@ export class GitHubClient {
 
     if (!response.ok) {
       throw new Error(`GitHub label update failed with ${response.status}`);
+    }
+  }
+
+  async removeIssueLabel(owner: string, repo: string, issueNumber: number, label: string) {
+    const response = await this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`GitHub label removal failed with ${response.status}`);
     }
   }
 }

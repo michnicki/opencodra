@@ -1,3 +1,4 @@
+import { logger } from './logger';
 import type { GitHubWebhookEventName, GitHubWebhookPayload, IssueCommentWebhookPayload, PullRequestWebhookPayload } from '@shared/github';
 import { defaultRepoConfig, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
 import type { AppBindings } from '@server/env';
@@ -6,7 +7,7 @@ import { completeJob, failJob, getJobForProcessing, markJobRunning, updateJobChe
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 import { GitHubClient } from './github';
 import { parseFileReviewResponse } from './model-output';
-import { buildFileReviewPrompt, FILE_REVIEW_SYSTEM_PROMPT } from '@server/prompts/file-review';
+import { buildFileReviewPrompts } from '@server/prompts/file-review';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '@server/prompts/summary';
 import { reviewWithGemma } from '@server/models/gemma';
 import { reviewWithKimi } from '@server/models/kimi';
@@ -59,7 +60,7 @@ function summarizeVerdict(comments: ParsedReviewComment[], hasFailures: boolean)
 }
 
 function shouldTriggerFromPullRequest(action: PullRequestWebhookPayload['action'], config: RepoConfig['review']) {
-  return config.on.includes(action);
+  return (config.on as string[]).includes(action);
 }
 
 export type ReviewRequest = {
@@ -139,8 +140,19 @@ export function extractReviewRequest(input: {
 export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) {
   const job = await getJobForProcessing(env, message.jobId);
   if (!job) {
+    logger.warn(`Job not found for processing: ${message.jobId}`);
     return;
   }
+
+  if (job.status === 'superseded') {
+    logger.info(`Job ${job.id} is superseded, skipping processing.`);
+    return;
+  }
+
+  logger.info(`Starting review job: ${job.owner}/${job.repo} PR #${job.pr_number}`, { 
+    jobId: job.id,
+    deliveryId: message.deliveryId 
+  });
 
   const github = new GitHubClient(env, job.installation_id);
   let checkRunId = job.check_run_id;
@@ -188,6 +200,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     }
 
     for (const [index, file] of files.entries()) {
+      // Periodic check for supersession
+      const currentJob = await getJobForProcessing(env, job.id);
+      if (currentJob?.status === 'superseded') {
+        throw new Error('JOB_SUPERSEDED');
+      }
+
       const existing = existingReviews.find((r) => r.file_path === file.path && r.file_status === 'done');
 
       if (existing) {
@@ -230,7 +248,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       const startedAt = Date.now();
 
       try {
-        const userPrompt = buildFileReviewPrompt({
+        const { systemPrompt, userPrompt } = buildFileReviewPrompts({
           file,
           prTitle: pr.title,
           prDescription: pr.body,
@@ -238,8 +256,8 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
         });
         const response =
           file.lineCount >= config.review.large_file_threshold_lines
-            ? await reviewWithKimi(env, { systemPrompt: FILE_REVIEW_SYSTEM_PROMPT, userPrompt })
-            : await reviewWithGemma(env, { systemPrompt: FILE_REVIEW_SYSTEM_PROMPT, userPrompt });
+            ? await reviewWithKimi(env, { systemPrompt, userPrompt })
+            : await reviewWithGemma(env, { systemPrompt, userPrompt });
 
         totalInputTokens += response.inputTokens;
         totalOutputTokens += response.outputTokens;
@@ -304,6 +322,13 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'running' });
     const hasFailures = fileSummaries.some((f) => f.verdict === 'failed');
     const verdictSummary = summarizeVerdict(reviewedComments, hasFailures);
+
+    // Final check before generating summary and posting review
+    const finalJobCheck = await getJobForProcessing(env, job.id);
+    if (finalJobCheck?.status === 'superseded') {
+      throw new Error('JOB_SUPERSEDED');
+    }
+
     const summaryResponse = await reviewWithGemma(env, {
       systemPrompt: SUMMARY_SYSTEM_PROMPT,
       userPrompt: buildSummaryPrompt({
@@ -329,12 +354,22 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     });
 
     if (config.review.labels !== false) {
+      const labels = config.review.labels;
       const labelMap = {
-        request_changes: { name: config.review.labels.p1, color: 'b42318' },
-        comment: { name: config.review.labels.p2, color: 'f79009' },
-        approve: { name: config.review.labels.p3, color: '027a48' },
+        request_changes: { name: labels.p1, color: 'b42318' },
+        comment: { name: labels.p2, color: 'f79009' },
+        approve: { name: labels.p3, color: '027a48' },
       } as const;
       const label = labelMap[verdictSummary.verdict];
+
+      // Remove other verdict labels if they exist
+      const allPotentialLabels = [labels.p1, labels.p2, labels.p3];
+      for (const l of allPotentialLabels) {
+        if (l !== label.name) {
+          await github.removeIssueLabel(job.owner, job.repo, job.pr_number, l);
+        }
+      }
+
       await github.ensureLabel(job.owner, job.repo, label.name, label.color);
       await github.addIssueLabels(job.owner, job.repo, job.pr_number, [label.name]);
     }
@@ -367,8 +402,15 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       summaryModel: summaryResponse.modelUsed,
     });
     await updateJobStep(env, job.id, 'Completing', { status: 'done' });
+    logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.pr_number}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown review failure';
+    if (message === 'JOB_SUPERSEDED') {
+      logger.info(`Job ${job.id} was superseded during execution, stopping.`);
+      return;
+    }
+
+    logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.pr_number}`, error);
     await failJob(env, job.id, message);
     
     // Update any running step to failed

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const reviewTriggers = ['auto', 'mention', 'retry'] as const;
-export const jobStatuses = ['queued', 'running', 'done', 'failed'] as const;
+export const jobStatuses = ['queued', 'running', 'done', 'failed', 'superseded'] as const;
 export const fileStatuses = ['pending', 'done', 'skipped', 'failed'] as const;
 export const reviewVerdicts = ['approve', 'comment', 'request_changes'] as const;
 export const reviewSeverities = ['error', 'warning', 'suggestion', 'nitpick'] as const;
@@ -56,7 +56,7 @@ export const labelsSchema = z.union([
 ]);
 
 export const reviewConfigSchema = z.object({
-  on: z.array(z.enum(['opened', 'synchronize', 'ready_for_review', 'reopened'])).default(['opened', 'synchronize', 'ready_for_review', 'reopened']),
+  on: z.array(z.enum(['opened', 'synchronize', 'ready_for_review', 'reopened', 'closed'])).default(['opened', 'synchronize', 'ready_for_review', 'reopened']),
   ignore_drafts: z.boolean().default(true),
   mention_trigger: z.union([z.literal(false), z.string().min(1)]).default('@codra-app'),
   skip_files: z
@@ -64,6 +64,8 @@ export const reviewConfigSchema = z.object({
     .default(['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**']),
   max_files: z.number().int().min(1).max(100).default(15),
   large_file_threshold_lines: z.number().int().min(1).max(5_000).default(200),
+  max_diff_lines_per_file: z.number().int().min(1).max(5_000).default(800),
+  max_total_diff_chars: z.number().int().min(1).max(500_000).default(150_000),
   focus: z.array(z.enum(reviewCategories)).default([...reviewCategories]),
   custom_rules: z.array(z.string().min(1)).default([]),
   labels: labelsSchema.default({
@@ -92,6 +94,8 @@ export const repoConfigSchema = z.object({
     skip_files: ['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**'],
     max_files: 15,
     large_file_threshold_lines: 200,
+    max_diff_lines_per_file: 800,
+    max_total_diff_chars: 150_000,
     focus: [...reviewCategories],
     custom_rules: [],
     labels: {
@@ -116,6 +120,7 @@ export const reviewJobMessageSchema = z.object({
   prNumber: z.number().int().positive(),
   commitSha: z.string().min(1),
   trigger: z.enum(reviewTriggers),
+  requestId: z.string().optional(),
 });
 
 export const jobSummarySchema = z.object({
@@ -234,6 +239,7 @@ export const statsSchema = z.object({
 export type ParsedReviewComment = z.infer<typeof parsedReviewCommentSchema>;
 export type FileReviewModelOutput = z.infer<typeof fileReviewModelOutputSchema>;
 export type RepoConfig = z.infer<typeof repoConfigSchema>;
+import type { GitHubWebhookEventName, GitHubWebhookPayload, PullRequestWebhookPayload } from '@shared/github';
 export type ReviewJobMessage = z.infer<typeof reviewJobMessageSchema>;
 export type JobSummary = z.infer<typeof jobSummarySchema>;
 export type FileReviewRecord = z.infer<typeof fileReviewRecordSchema>;
