@@ -466,6 +466,22 @@ export function JobDetailPage() {
                   </summary>
 
                   <div className="border-t border-border/40 px-5 pb-5 pt-4">
+                    {/* File-level error */}
+                    {file.fileStatus === 'failed' && file.errorMessage && (
+                      <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3">
+                        <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-red-700">Review error</p>
+                        <p className="font-mono text-xs text-red-600 break-all">{file.errorMessage}</p>
+                      </div>
+                    )}
+
+                    {/* File summary (when review succeeded) */}
+                    {file.fileStatus === 'done' && file.fileSummary && (
+                      <div className="mb-4 rounded-xl border border-border/50 bg-muted/30 px-4 py-3">
+                        <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Model summary</p>
+                        <p className="text-sm text-foreground/90 leading-relaxed">{file.fileSummary}</p>
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-2 gap-4 mb-5">
                       <div>
                         <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">

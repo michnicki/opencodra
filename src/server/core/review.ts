@@ -231,19 +231,21 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       });
 
       const startedAt = Date.now();
+      const { systemPrompt, userPrompt } = buildFileReviewPrompts({
+        file,
+        prTitle: pr.title,
+        prDescription: pr.body,
+        config: config.review,
+      });
+      let rawModelOutput: string | null = null;
 
       try {
-        const { systemPrompt, userPrompt } = buildFileReviewPrompts({
-          file,
-          prTitle: pr.title,
-          prDescription: pr.body,
-          config: config.review,
-        });
         const response =
           file.lineCount >= config.review.large_file_threshold_lines
             ? await reviewWithKimi(env, { systemPrompt, userPrompt })
             : await reviewWithGemma(env, { systemPrompt, userPrompt });
 
+        rawModelOutput = response.rawText;
         totalInputTokens += response.inputTokens;
         totalOutputTokens += response.outputTokens;
 
@@ -290,8 +292,8 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
           fileStatus: 'failed',
           modelUsed: file.lineCount >= config.review.large_file_threshold_lines ? '@cf/moonshotai/kimi-k2.5' : env.GEMINI_MODEL || 'gemma-4-31b-it',
           diffLineCount: file.lineCount,
-          diffInput: null,
-          rawAiOutput: null,
+          diffInput: userPrompt,
+          rawAiOutput: rawModelOutput,
           parsedComments: [],
           inputTokens: null,
           outputTokens: null,
