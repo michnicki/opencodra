@@ -1,0 +1,68 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "codra",
+  "main": "./src/server/index.ts",
+  "compatibility_date": "2026-04-11",
+  "account_id": "eeb50f45732850f36cc8a506a49c4654",
+  "routes": [
+    { "pattern": "codra.devarshi.dev", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true
+    }
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "APP_KV",
+      "id": "f5f88c23f1f14342b2ec2c733470921b",
+      "preview_id": "9f2cdc0fdf8d4c868ae2754f66b839b8"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "REVIEW_QUEUE",
+        "queue": "codra-review-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "codra-review-jobs",
+        "dead_letter_queue": "codra-review-diq",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3
+      }
+    ]
+  },
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/",
+      "/login",
+      "/jobs/*",
+      "/repos*",
+      "/stats*",
+      "/api/*",
+      "/auth/*",
+      "/webhook*"
+    ]
+  },
+  "vars": {
+    "BOT_USERNAME": "codra-app",
+    "ENVIRONMENT": "production",
+    "GEMINI_MODEL": "gemma-4-31b-it"
+  }
+}
