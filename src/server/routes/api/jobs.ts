@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { defaultRepoConfig, repoConfigSchema } from '@shared/schema';
+import { defaultRepoConfig, jobsQuerySchema, repoConfigSchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
 import { getJobDetail, getJobForProcessing, insertJob, listJobs, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
@@ -10,15 +10,7 @@ export function createJobsRouter() {
 
   app.get('/', async (c) => {
     const rawQuery = c.req.query();
-    const query = repoConfigSchema.pick({}).extend({
-      owner: z.string().optional(),
-      repo: z.string().optional(),
-      status: z.string().optional(),
-      verdict: z.string().optional(),
-      search: z.string().optional(),
-      limit: z.coerce.number().int().min(1).max(100).default(20),
-      offset: z.coerce.number().int().min(0).default(0),
-    }).parse(rawQuery);
+    const query = jobsQuerySchema.parse(rawQuery);
 
     const result = await listJobs(c.env, query as any);
     return c.json(result);

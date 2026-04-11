@@ -8,7 +8,7 @@ export const reviewSeverities = ['error', 'warning', 'suggestion', 'nitpick'] as
 export const reviewCategories = ['security', 'bugs', 'performance', 'correctness', 'quality'] as const;
 
 export const dateStringSchema = z.union([z.string(), z.date()]).transform((d) => (d instanceof Date ? d.toISOString() : d));
-export const coerceNumberSchema = z.union([z.number(), z.string()]).transform((v) => Number(v));
+export const coerceNumberSchema = z.coerce.number();
 
 export const jobStepSchema = z.object({
   name: z.string(),
@@ -45,6 +45,12 @@ export const fileReviewModelOutputSchema = z.object({
   file_verdict: z.enum(reviewVerdicts).default('approve'),
   file_summary: z.string().default('No summary provided.'),
 });
+
+export const summaryModelOutputSchema = z.array(
+  z.object({
+    summary: z.string().min(1),
+  }),
+);
 
 export const labelsSchema = z.union([
   z.literal(false),
