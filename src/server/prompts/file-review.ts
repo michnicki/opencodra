@@ -39,7 +39,7 @@ export function buildFileReviewPrompts(input: {
     `Custom rules:\n${rules}`,
     '',
     'Return JSON in this shape:',
-    `{"comments":[{"line":42,"position":12,"side":"RIGHT","severity":"warning","category":"quality","title":"Short title","body":"Markdown explanation","code_suggestion":"optional replacement"}],"file_verdict":"comment","file_summary":"One-sentence summary."}`,
+    `{"comments":[{"line":42,"position":12,"side":"RIGHT","severity":"warning","category":"quality","title":"Short title","body":"Markdown explanation","code_suggestion":"optional replacement"}],"file_verdict":"comment","file_summary":"2-3 sentence technical summary of findings. Be specific: mention what is wrong, where, and why it matters. If nothing is wrong, write a single short sentence."}`,
     '',
     'Unified diff:',
     renderFileDiff(input.file),
