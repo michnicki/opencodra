@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
 import { StatusBadge } from '@client/components/StatusBadge';
+import { Skeleton } from '@client/components/Skeleton';
+import { EmptyState } from '@client/components/EmptyState';
+import { Button } from '@client/components/ui/button';
+import { Input } from '@client/components/ui/input';
+import { Card, CardContent } from '@client/components/ui/card';
+import { Inbox, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { JobSummary } from '@shared/schema';
 
 export function JobsPage() {
@@ -54,28 +60,34 @@ export function JobsPage() {
 
   const totalPages = Math.ceil(total / limit);
 
+  const selectClass =
+    'h-9 rounded-xl border border-input bg-card/60 px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring';
+
   return (
-    <section className="page">
-      <header className="page-header">
+    <section className="flex flex-col gap-6">
+      {/* Header */}
+      <header className="flex items-end justify-between">
         <div>
-          <div className="eyebrow">Overview</div>
-          <h1>Recent review jobs</h1>
+          <p className="text-xs font-semibold uppercase tracking-widest text-accent">Overview</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-foreground">Recent review jobs</h1>
         </div>
       </header>
 
-      <div className="filters-row">
-        <div className="field search">
-          <label className="eyebrow">Search PRs</label>
-          <input
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3">
+        <div className="flex flex-col gap-1 flex-[2] min-w-[160px]">
+          <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Search PRs</label>
+          <Input
             type="text"
-            placeholder="Title or #number..."
+            placeholder="Title or #number…"
             value={filters.search}
             onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))}
           />
         </div>
-        <div className="field">
-          <label className="eyebrow">Status</label>
+        <div className="flex flex-col gap-1 min-w-[140px]">
+          <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
           <select
+            className={selectClass}
             value={filters.status}
             onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value, page: 1 }))}
           >
@@ -86,9 +98,10 @@ export function JobsPage() {
             <option value="failed">Failed</option>
           </select>
         </div>
-        <div className="field">
-          <label className="eyebrow">Verdict</label>
+        <div className="flex flex-col gap-1 min-w-[160px]">
+          <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Verdict</label>
           <select
+            className={selectClass}
             value={filters.verdict}
             onChange={(e) => setFilters((f) => ({ ...f, verdict: e.target.value, page: 1 }))}
           >
@@ -100,68 +113,118 @@ export function JobsPage() {
         </div>
       </div>
 
-      {error ? <div className="error-box">{error}</div> : null}
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      )}
 
-      <div className="panel table-panel">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Repo</th>
-              <th>PR</th>
-              <th>Trigger</th>
-              <th>Status</th>
-              <th>Verdict</th>
-              <th>Files</th>
-              <th>Tokens</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && jobs.length === 0 ? (
-              <tr><td colSpan={8} style={{ textAlign: 'center' }}>Loading jobs...</td></tr>
-            ) : jobs.length === 0 ? (
-              <tr><td colSpan={8} style={{ textAlign: 'center' }}>No jobs found matching criteria.</td></tr>
-            ) : (
-              jobs.map((job) => (
-                <tr key={job.id}>
-                  <td>
-                    <Link to={`/jobs/${job.id}`}>{job.owner}/{job.repo}</Link>
-                  </td>
-                  <td>
-                    <strong>#{job.prNumber}</strong> {job.prTitle ?? 'Untitled PR'}
-                  </td>
-                  <td><span className="badge neutral">{job.trigger}</span></td>
-                  <td><StatusBadge label={job.status} /></td>
-                  <td>{job.verdict ? <StatusBadge label={job.verdict} /> : <span className="muted">—</span>}</td>
-                  <td>{job.fileCount}</td>
-                  <td>{(job.totalInputTokens + job.totalOutputTokens).toLocaleString()}</td>
-                  <td className="muted">{new Date(job.createdAt).toLocaleDateString()}</td>
+      {/* Table */}
+      <Card className="overflow-hidden">
+        <CardContent className="p-0">
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border/60 bg-muted/30">
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Repo</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">PR</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Trigger</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Verdict</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Files</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Tokens</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Created</th>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-
-        {totalPages > 1 && (
-          <div className="pagination">
-            <button
-              className="ghost-button"
-              disabled={filters.page === 1}
-              onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))}
-            >
-              Previous
-            </button>
-            <span className="muted">Page {filters.page} of {totalPages}</span>
-            <button
-              className="ghost-button"
-              disabled={filters.page === totalPages}
-              onClick={() => setFilters((f) => ({ ...f, page: f.page + 1 }))}
-            >
-              Next
-            </button>
+              </thead>
+              <tbody>
+                {loading && jobs.length === 0
+                  ? Array.from({ length: 5 }).map((_, i) => (
+                      <tr key={i} className="border-b border-border/40">
+                        <td className="px-4 py-3"><Skeleton width={100} /></td>
+                        <td className="px-4 py-3"><Skeleton width="80%" /></td>
+                        <td className="px-4 py-3"><Skeleton width={60} /></td>
+                        <td className="px-4 py-3"><Skeleton width={70} /></td>
+                        <td className="px-4 py-3"><Skeleton width={70} /></td>
+                        <td className="px-4 py-3"><Skeleton width={30} /></td>
+                        <td className="px-4 py-3"><Skeleton width={60} /></td>
+                        <td className="px-4 py-3"><Skeleton width={90} /></td>
+                      </tr>
+                    ))
+                  : jobs.map((job) => (
+                      <tr
+                        key={job.id}
+                        className="border-b border-border/40 transition-colors hover:bg-muted/20"
+                      >
+                        <td className="px-4 py-3 font-medium">
+                          <Link
+                            to={`/jobs/${job.id}`}
+                            className="text-accent hover:underline underline-offset-2"
+                          >
+                            {job.owner}/{job.repo}
+                          </Link>
+                        </td>
+                        <td className="px-4 py-3 max-w-[260px]">
+                          <span className="font-semibold text-foreground">#{job.prNumber}</span>{' '}
+                          <span className="text-muted-foreground truncate">{job.prTitle ?? 'Untitled PR'}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="inline-flex items-center rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground capitalize">
+                            {job.trigger}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3"><StatusBadge label={job.status} /></td>
+                        <td className="px-4 py-3">
+                          {job.verdict ? <StatusBadge label={job.verdict} /> : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums">{job.fileCount}</td>
+                        <td className="px-4 py-3 tabular-nums text-muted-foreground">
+                          {(job.totalInputTokens + job.totalOutputTokens).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
+                          {new Date(job.createdAt).toLocaleDateString()}
+                        </td>
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
           </div>
-        )}
-      </div>
+
+          {!loading && jobs.length === 0 && (
+            <EmptyState
+              icon={<Inbox />}
+              title="No jobs found"
+              description={
+                filters.search || filters.status || filters.verdict
+                  ? "We couldn't find any jobs matching your current filters. Try adjusting them."
+                  : 'There are no review jobs yet. Link a repository or open a PR to get started.'
+              }
+              className="rounded-none border-0"
+            />
+          )}
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 border-t border-border/40 px-4 py-3">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={filters.page === 1}
+                onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))}
+              >
+                <ChevronLeft size={14} /> Previous
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                Page {filters.page} of {totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={filters.page === totalPages}
+                onClick={() => setFilters((f) => ({ ...f, page: f.page + 1 }))}
+              >
+                Next <ChevronRight size={14} />
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </section>
   );
 }

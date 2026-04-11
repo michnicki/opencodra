@@ -7,6 +7,7 @@ import { JobsPage } from './pages/Jobs';
 import { JobDetailPage } from './pages/JobDetail';
 import { ReposPage } from './pages/Repos';
 import { StatsPage } from './pages/Stats';
+import { HealthPage } from './pages/Health';
 import './app.css';
 
 const router = createBrowserRouter([
@@ -22,6 +23,7 @@ const router = createBrowserRouter([
       { path: 'jobs/:id', element: <JobDetailPage /> },
       { path: 'repos', element: <ReposPage /> },
       { path: 'stats', element: <StatsPage /> },
+      { path: 'health', element: <HealthPage /> },
     ],
   },
   {

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { defaultRepoConfig, repoConfigSchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
-import { getJobDetail, getJobForProcessing, insertJob, listJobs } from '@server/db/jobs';
+import { getJobDetail, getJobForProcessing, insertJob, listJobs, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
 
 export function createJobsRouter() {
@@ -53,6 +53,15 @@ export function createJobsRouter() {
       baseRef: source.base_ref,
       configSnapshot: repoConfigSchema.parse(source.config_snapshot ?? defaultRepoConfig),
       retryOfJobId: source.id,
+    });
+
+    // Supersede any older pending/running jobs for this PR
+    await supersedeOlderJobs(c.env, {
+      installationId: source.installation_id,
+      owner: source.owner,
+      repo: source.repo,
+      prNumber: source.pr_number,
+      newJobId: job.id,
     });
 
     await c.env.REVIEW_QUEUE.send({

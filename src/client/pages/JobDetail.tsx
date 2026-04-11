@@ -2,31 +2,110 @@ import { useEffect, useState, useRef } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
 import { StatusBadge } from '@client/components/StatusBadge';
-import type { JobDetail } from '@shared/schema';
+import { Skeleton } from '@client/components/Skeleton';
+import { Button } from '@client/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@client/components/ui/card';
+import { Badge } from '@client/components/ui/badge';
+import { cn } from '@client/lib/utils';
+import type { JobDetail, ParsedReviewComment } from '@shared/schema';
+import { reviewSeverities, reviewCategories } from '@shared/schema';
+import {
+  ExternalLink, RotateCcw, ChevronRight, AlertCircle,
+  FileText, AlertTriangle, Lightbulb, Sparkles,
+  Bug, Zap, Shield, Code2, Star,
+} from 'lucide-react';
 
+// ── Severity icon mapping ───────────────────────────────────────────────
+const severityConfig: Record<string, { icon: React.ElementType; bg: string; border: string; text: string; iconColor: string }> = {
+  error:      { icon: AlertCircle, bg: 'bg-red-50',    border: 'border-red-200',   text: 'text-red-700',   iconColor: 'text-red-500' },
+  warning:    { icon: AlertTriangle, bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', iconColor: 'text-amber-500' },
+  suggestion: { icon: Lightbulb,  bg: 'bg-blue-50',   border: 'border-blue-200',  text: 'text-blue-700',  iconColor: 'text-blue-500' },
+  nitpick:    { icon: Sparkles,   bg: 'bg-muted/60',  border: 'border-border/60', text: 'text-muted-foreground', iconColor: 'text-muted-foreground' },
+};
+
+const categoryConfig: Record<string, { icon: React.ElementType; color: string }> = {
+  security:    { icon: Shield,    color: 'text-red-500' },
+  performance: { icon: Zap,       color: 'text-blue-500' },
+  bugs:        { icon: Bug,       color: 'text-amber-500' },
+  correctness: { icon: Code2,     color: 'text-emerald-600' },
+  quality:     { icon: Star,      color: 'text-purple-500' },
+};
+
+// ── Comment card ────────────────────────────────────────────────────────
+function CommentCard({ comment, filePath }: { comment: ParsedReviewComment; filePath: string }) {
+  const sev = severityConfig[comment.severity] ?? severityConfig.nitpick;
+  const cat = categoryConfig[comment.category ?? ''];
+  const SevIcon = sev.icon;
+  const CatIcon = cat?.icon ?? FileText;
+
+  return (
+    <article
+      className={cn(
+        'rounded-xl border p-4 transition-shadow hover:shadow-md',
+        sev.bg, sev.border,
+      )}
+    >
+      {/* Header row */}
+      <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <SevIcon size={15} className={cn('shrink-0', sev.iconColor)} />
+          <span className="font-semibold text-sm text-foreground leading-snug">{comment.title}</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className={`severity-tag ${comment.severity}`}>{comment.severity}</span>
+        </div>
+      </div>
+
+      {/* Meta: file · category · line */}
+      <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1 font-mono bg-card/60 px-1.5 py-0.5 rounded text-foreground/70">
+          <FileText size={10} /> {filePath}
+        </span>
+        {comment.category && (
+          <span className={cn('flex items-center gap-1', cat?.color ?? 'text-muted-foreground')}>
+            <CatIcon size={11} />
+            {comment.category}
+          </span>
+        )}
+        {comment.line != null && (
+          <span className="text-muted-foreground">line {comment.line}</span>
+        )}
+      </div>
+
+      {/* Body */}
+      <p className="text-sm text-foreground/90 leading-relaxed whitespace-pre-wrap">{comment.body}</p>
+
+      {/* Code suggestion */}
+      {comment.codeSuggestion && (
+        <div className="mt-3">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            Suggested fix
+          </p>
+          <pre className="code-block text-xs">{comment.codeSuggestion}</pre>
+        </div>
+      )}
+    </article>
+  );
+}
+
+// ── Main page ────────────────────────────────────────────────────────────
 export function JobDetailPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const [job, setJob] = useState<JobDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-
   const [isRetrying, setIsRetrying] = useState(false);
   const pollInterval = useRef<number | null>(null);
+  const [viewBy, setViewBy] = useState<'files' | 'severity' | 'category'>('files');
 
   const fetchJob = async (silent = false) => {
     try {
       const response = await api.getJob(id);
       setJob(response.job);
       setError(null);
-      
-      // Stop polling if job is finished
-      if (response.job.status === 'done' || response.job.status === 'failed') {
-        stopPolling();
-      }
+      if (response.job.status === 'done' || response.job.status === 'failed') stopPolling();
     } catch (loadError) {
-      if (!silent) {
-        setError(loadError instanceof Error ? loadError.message : 'Failed to load job.');
-      }
+      if (!silent) setError(loadError instanceof Error ? loadError.message : 'Failed to load job.');
     }
   };
 
@@ -42,17 +121,10 @@ export function JobDetailPage() {
     }
   };
 
+  useEffect(() => { fetchJob(); return () => stopPolling(); }, [id]);
   useEffect(() => {
-    fetchJob();
-    return () => stopPolling();
-  }, [id]);
-
-  useEffect(() => {
-    if (job && (job.status === 'queued' || job.status === 'running')) {
-      startPolling();
-    } else {
-      stopPolling();
-    }
+    if (job && (job.status === 'queued' || job.status === 'running')) startPolling();
+    else stopPolling();
   }, [job?.status]);
 
   const handleRetry = async () => {
@@ -68,10 +140,44 @@ export function JobDetailPage() {
     }
   };
 
+  // ── Loading skeleton ──
   if (!job) {
     return (
-      <section className="page">
-        <div className="panel">{error ?? 'Loading job...'}</div>
+      <section className="flex flex-col gap-6">
+        {error && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+        )}
+        <header className="flex items-start justify-between">
+          <div className="space-y-2">
+            <Skeleton width={120} height="0.75rem" />
+            <Skeleton width={280} height="2rem" />
+            <Skeleton width={200} height="0.9rem" />
+          </div>
+          <Skeleton width={100} height="2.25rem" borderRadius={12} />
+        </header>
+        <div className="grid grid-cols-2 gap-4">
+          <Card><CardContent className="p-5 space-y-3">
+            <Skeleton width="50%" height="1.2rem" />
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="space-y-1">
+                <Skeleton width={60} height="0.65rem" />
+                <Skeleton width={100} height="1rem" />
+              </div>
+            ))}
+          </CardContent></Card>
+          <Card><CardContent className="p-5 space-y-3">
+            <Skeleton width="50%" height="1.2rem" />
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center justify-between rounded-xl bg-muted/30 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <Skeleton width={12} height={12} borderRadius="50%" />
+                  <Skeleton width={120} height="0.9rem" />
+                </div>
+                <Skeleton width={40} height="0.75rem" />
+              </div>
+            ))}
+          </CardContent></Card>
+        </div>
       </section>
     );
   }
@@ -79,203 +185,359 @@ export function JobDetailPage() {
   const finishedFilesCount = job.files.filter((f) => f.fileStatus === 'done').length;
   const totalFilesCount = job.fileCount || 0;
   const progressPercent = totalFilesCount > 0 ? Math.round((finishedFilesCount / totalFilesCount) * 100) : 0;
+  const allComments = job.files.flatMap((f) => f.parsedComments);
+
+  // Severity counts
+  const sevCounts = Object.fromEntries(
+    reviewSeverities.map((s) => [s, allComments.filter((c) => c.severity === s).length]),
+  );
 
   return (
-    <section className="page">
-      <header className="page-header split">
+    <section className="flex flex-col gap-6">
+      {/* Page header */}
+      <header className="flex items-start justify-between gap-4">
         <div>
-          <div className="eyebrow">
-            <Link to="/jobs" style={{ textDecoration: 'none', color: 'inherit' }}>
-              Jobs
-            </Link>{' '}
-            / {job.owner}/{job.repo}
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <Link to="/jobs" className="hover:text-accent transition-colors">Jobs</Link>
+            <ChevronRight size={12} />
+            <span>{job.owner}/{job.repo}</span>
           </div>
-          <h1>PR #{job.prNumber}</h1>
-          <p className="muted">{job.prTitle ?? 'Untitled pull request'}</p>
+          <h1 className="mt-1.5 text-2xl font-bold tracking-tight text-foreground">
+            <a
+              href={`https://github.com/${job.owner}/${job.repo}/pull/${job.prNumber}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 hover:text-accent transition-colors"
+            >
+              PR #{job.prNumber}
+              <ExternalLink size={18} className="text-muted-foreground" />
+            </a>
+          </h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">{job.prTitle ?? 'Untitled pull request'}</p>
         </div>
 
-        <div className="actions">
-          <button
-            className={`primary-button ${job.status === 'failed' ? 'danger' : ''}`}
-            type="button"
-            disabled={isRetrying || job.status === 'running' || job.status === 'queued'}
-            onClick={handleRetry}
-          >
-            {isRetrying ? 'Starting...' : job.status === 'failed' ? 'Retry job' : 'Re-run job'}
-          </button>
-        </div>
+        <Button
+          variant={job.status === 'failed' ? 'destructive' : 'default'}
+          disabled={isRetrying || job.status === 'running' || job.status === 'queued'}
+          onClick={handleRetry}
+          className="shrink-0 gap-2"
+        >
+          <RotateCcw size={14} />
+          {isRetrying ? 'Starting…' : job.status === 'failed' ? 'Retry job' : 'Re-run job'}
+        </Button>
       </header>
 
-      {error ? <div className="error-box">{error}</div> : null}
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      )}
 
+      {/* Progress bar (running/queued only) */}
       {(job.status === 'running' || job.status === 'queued') && (
-        <div className="panel progress-panel">
-          <div className="progress-header">
-            <strong>{job.status === 'queued' ? 'Queued...' : 'Reviewing files...'}</strong>
-            <span>
-              {finishedFilesCount} / {totalFilesCount} files
+        <div className="rounded-xl bg-primary p-4 text-primary-foreground">
+          <div className="mb-2 flex items-center justify-between text-sm">
+            <span className="font-medium">
+              {job.status === 'queued' ? 'Queued…' : 'Reviewing files…'}
             </span>
+            <span className="opacity-80">{finishedFilesCount} / {totalFilesCount} files</span>
           </div>
-          <div className="progress-bar-bg">
-            <div className="progress-bar-fill" style={{ width: `${progressPercent}%` }}></div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-white/20">
+            <div
+              className="h-full rounded-full bg-white transition-all duration-500"
+              style={{ width: `${progressPercent}%` }}
+            />
           </div>
         </div>
       )}
 
-      <div className="grid two">
-        <div className="panel">
-          <h2>Job details</h2>
-          <dl className="meta-grid">
-            <div>
-              <dt>Status</dt>
-              <dd>
-                <StatusBadge label={job.status} />
-              </dd>
-            </div>
-            <div>
-              <dt>Verdict</dt>
-              <dd>{job.verdict ? <StatusBadge label={job.verdict} /> : <span className="muted">—</span>}</dd>
-            </div>
-            <div>
-              <dt>Trigger</dt>
-              <dd>
-                <span className="badge neutral" style={{ textTransform: 'capitalize' }}>{job.trigger}</span>
-              </dd>
-            </div>
-            <div>
-              <dt>Tokens</dt>
-              <dd>{(job.totalInputTokens + job.totalOutputTokens).toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt>Commit</dt>
-              <dd>
-                <code className="text-sm">{job.commitSha.slice(0, 7)}</code>
-              </dd>
-            </div>
-            {job.retryOfJobId && (
+      {/* Job meta + Steps */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Details */}
+        <Card>
+          <CardHeader><CardTitle>Job details</CardTitle></CardHeader>
+          <CardContent className="pt-0">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-4">
+              {[
+                { label: 'Status',  value: <StatusBadge label={job.status} /> },
+                { label: 'Verdict', value: job.verdict ? <StatusBadge label={job.verdict} /> : <span className="text-muted-foreground">—</span> },
+                { label: 'Trigger', value: <Badge variant="neutral" className="capitalize">{job.trigger}</Badge> },
+                { label: 'Tokens',  value: <span className="font-mono text-sm">{(job.totalInputTokens + job.totalOutputTokens).toLocaleString()}</span> },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
               <div>
-                <dt>Retry of</dt>
+                <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Commit</dt>
                 <dd>
-                  <Link to={`/jobs/${job.retryOfJobId}`} className="muted text-sm">
-                    {job.retryOfJobId.slice(0, 8)}...
-                  </Link>
+                  <a
+                    href={`https://github.com/${job.owner}/${job.repo}/commit/${job.commitSha}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-xs text-accent hover:underline"
+                  >
+                    {job.commitSha.slice(0, 7)}
+                    <ExternalLink size={11} />
+                  </a>
                 </dd>
               </div>
-            )}
-            <div>
-              <dt>Created</dt>
-              <dd className="muted text-sm">{new Date(job.createdAt).toLocaleString()}</dd>
-            </div>
-          </dl>
+              {job.reviewId && (
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Review</dt>
+                  <dd>
+                    <a
+                      href={`https://github.com/${job.owner}/${job.repo}/pull/${job.prNumber}#pullrequestreview-${job.reviewId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-accent hover:underline"
+                    >
+                      View on GitHub <ExternalLink size={11} />
+                    </a>
+                  </dd>
+                </div>
+              )}
+              {job.retryOfJobId && (
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Retry of</dt>
+                  <dd>
+                    <Link to={`/jobs/${job.retryOfJobId}`} className="font-mono text-xs text-muted-foreground hover:underline">
+                      {job.retryOfJobId.slice(0, 8)}…
+                    </Link>
+                  </dd>
+                </div>
+              )}
+              <div className="col-span-2">
+                <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Created</dt>
+                <dd className="text-sm text-muted-foreground">{new Date(job.createdAt).toLocaleString()}</dd>
+              </div>
+            </dl>
 
-          {job.errorMessage && (
-            <div className="error-message-block">
-              <h3 style={{ marginTop: 0, fontSize: '1rem' }}>Error</h3>
-              <p style={{ margin: 0, fontSize: '0.9rem' }}>{job.errorMessage}</p>
+            {job.errorMessage && (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3">
+                <p className="mb-1 text-xs font-semibold text-red-700 uppercase tracking-wider">Error</p>
+                <p className="text-sm text-red-600">{job.errorMessage}</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Steps */}
+        <Card>
+          <CardHeader><CardTitle>Progress steps</CardTitle></CardHeader>
+          <CardContent className="pt-0">
+            {(job.steps ?? []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No detailed steps available yet.</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {(job.steps ?? []).map((step, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between rounded-xl border border-border/40 bg-muted/20 px-4 py-2.5"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`step-dot ${step.status}`} />
+                      <span className="text-sm font-medium text-foreground">{step.name}</span>
+                    </div>
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {step.status === 'running'
+                        ? 'Processing…'
+                        : step.finishedAt && step.startedAt
+                        ? `${((new Date(step.finishedAt).getTime() - new Date(step.startedAt).getTime()) / 1000).toFixed(1)}s`
+                        : '—'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Summary */}
+      {job.summaryMarkdown && (
+        <Card>
+          <CardHeader><CardTitle>Summary</CardTitle></CardHeader>
+          <CardContent className="pt-0">
+            <pre className="code-block whitespace-pre-wrap font-sans text-sm leading-relaxed">{job.summaryMarkdown}</pre>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Review findings overview */}
+      {allComments.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Review findings</CardTitle></CardHeader>
+          <CardContent className="pt-0">
+            <div className="flex flex-wrap gap-3">
+              {reviewSeverities.map((sev) => {
+                const count = sevCounts[sev];
+                if (!count) return null;
+                const cfg = severityConfig[sev];
+                const Icon = cfg?.icon ?? AlertCircle;
+                return (
+                  <div
+                    key={sev}
+                    className={cn(
+                      'flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm',
+                      cfg?.bg, cfg?.border,
+                    )}
+                  >
+                    <Icon size={13} className={cfg?.iconColor} />
+                    <span className={cn('font-medium capitalize', cfg?.text)}>{sev}</span>
+                    <span className={cn('font-bold', cfg?.text)}>{count}</span>
+                  </div>
+                );
+              })}
+              {reviewCategories.map((cat) => {
+                const count = allComments.filter((c) => c.category === cat).length;
+                if (!count) return null;
+                const cfg = categoryConfig[cat];
+                const CatIcon = cfg?.icon ?? FileText;
+                return (
+                  <div
+                    key={cat}
+                    className="flex items-center gap-2 rounded-full border border-border/50 bg-muted/40 px-3 py-1.5 text-sm"
+                  >
+                    <CatIcon size={13} className={cfg?.color} />
+                    <span className="font-medium text-foreground capitalize">{cat}</span>
+                    <span className="font-bold text-foreground">{count}</span>
+                  </div>
+                );
+              })}
             </div>
-          )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Findings list with view toggle */}
+      <div>
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-lg font-bold text-foreground">Findings</h2>
+            {job.status === 'running' && <span className="pulsing-dot" />}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">View by</span>
+            <div className="flex rounded-xl bg-secondary p-1 gap-0.5">
+              {(['files', 'severity', 'category'] as const).map((view) => (
+                <button
+                  key={view}
+                  onClick={() => setViewBy(view)}
+                  className={cn(
+                    'rounded-lg px-3 py-1.5 text-xs font-semibold capitalize transition-all',
+                    viewBy === view
+                      ? 'bg-card text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {view}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <div className="panel">
-          <h2>Progress steps</h2>
-          <div className="step-list">
-            {(job.steps ?? []).length === 0 ? (
-              <div className="muted">No detailed steps available yet.</div>
+        {viewBy === 'files' ? (
+          <div className="flex flex-col gap-3">
+            {job.files.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border/60 bg-card/30 p-12 text-center text-sm text-muted-foreground">
+                No files reviewed yet.
+              </div>
             ) : (
-              (job.steps ?? []).map((step, idx) => (
-                <div key={idx} className="step-item">
-                  <div className="step-info">
-                    <div className={`step-dot ${step.status}`} />
-                    <strong>{step.name}</strong>
-                  </div>
-                  <div className="step-time">
-                    {step.status === 'running' ? (
-                      'Processing...'
-                    ) : step.finishedAt && step.startedAt ? (
-                      `${((new Date(step.finishedAt).getTime() - new Date(step.startedAt).getTime()) / 1000).toFixed(1)}s`
-                    ) : (
-                      '—'
+              job.files.map((file) => (
+                <details key={file.id} className="group rounded-2xl border border-border/60 bg-card/80 shadow-sm backdrop-blur-sm">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 [&::-webkit-details-marker]:hidden">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChevronRight size={15} className="shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+                      <span className="font-mono text-sm font-medium text-foreground truncate">{file.filePath}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <StatusBadge label={file.fileStatus} />
+                      <StatusBadge label={file.verdict ?? 'comment'} />
+                      {file.parsedComments.length > 0 && (
+                        <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-bold text-primary-foreground">
+                          {file.parsedComments.length}
+                        </span>
+                      )}
+                    </div>
+                  </summary>
+
+                  <div className="border-t border-border/40 px-5 pb-5 pt-4">
+                    <div className="grid grid-cols-2 gap-4 mb-5">
+                      <div>
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                          Prompt / diff
+                        </p>
+                        <pre className="code-block max-h-72">{file.diffInput ?? 'No prompt saved.'}</pre>
+                      </div>
+                      <div>
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                          Raw model output
+                        </p>
+                        <pre className="code-block max-h-72">{file.rawAiOutput ?? 'No raw output saved.'}</pre>
+                      </div>
+                    </div>
+
+                    {file.parsedComments.length > 0 && (
+                      <div>
+                        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                          Inline comments ({file.parsedComments.length})
+                        </p>
+                        <div className="flex flex-col gap-3">
+                          {file.parsedComments.map((comment, index) => (
+                            <CommentCard key={`${file.id}-${index}`} comment={comment} filePath={file.filePath} />
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
+                </details>
               ))
             )}
           </div>
-        </div>
-      </div>
-
-      {job.summaryMarkdown && (
-        <div className="panel">
-          <h2>Summary</h2>
-          <div className="code-block" style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
-            {job.summaryMarkdown}
-          </div>
-        </div>
-      )}
-
-      <div className="stack">
-        <div className="section-header">
-          <h2>File reviews ({job.files.length})</h2>
-          {job.status === 'running' && <span className="pulsing-dot"></span>}
-        </div>
-
-        {job.files.length === 0 ? (
-          <div className="panel muted" style={{ textAlign: 'center', padding: '40px' }}>
-            No files reviewed yet.
-          </div>
         ) : (
-          job.files.map((file) => (
-            <details key={file.id} className="panel">
-              <summary className="summary-row">
-                <span style={{ fontWeight: 600 }}>{file.filePath}</span>
-                <span className="summary-meta">
-                  <StatusBadge label={file.fileStatus} />
-                  <StatusBadge label={file.verdict ?? 'comment'} />
-                </span>
-              </summary>
+          <div className="flex flex-col gap-4">
+            {(viewBy === 'severity' ? reviewSeverities : reviewCategories).map((groupName) => {
+              const comments = job.files.flatMap((f) =>
+                f.parsedComments
+                  .filter((c) => (viewBy === 'severity' ? c.severity === groupName : c.category === groupName))
+                  .map((c) => ({ ...c, filePath: f.filePath })),
+              );
+              if (comments.length === 0) return null;
 
-              <div className="grid two" style={{ marginTop: '20px' }}>
-                <div>
-                  <h3>Prompt / diff</h3>
-                  <pre className="code-block" style={{ fontSize: '0.75rem', maxHeight: '300px' }}>
-                    {file.diffInput ?? 'No prompt saved.'}
-                  </pre>
-                </div>
-                <div>
-                  <h3>Raw model output</h3>
-                  <pre className="code-block" style={{ fontSize: '0.75rem', maxHeight: '300px' }}>
-                    {file.rawAiOutput ?? 'No raw output saved.'}
-                  </pre>
-                </div>
-              </div>
+              const sev = viewBy === 'severity' ? severityConfig[groupName] : null;
+              const cat = viewBy === 'category' ? categoryConfig[groupName] : null;
+              const GroupIcon = sev?.icon ?? cat?.icon ?? FileText;
 
-              <div className="comments-list" style={{ marginTop: '20px' }}>
-                <h4 style={{ marginBottom: '12px' }}>Inline comments ({file.parsedComments.length})</h4>
-                {file.parsedComments.map((comment, index) => (
-                  <article key={`${file.id}-${index}`} className="comment-card">
-                    <div className="comment-header">
-                      <span className="comment-title">{comment.title}</span>
-                      <span className={`severity-tag ${comment.severity}`}>{comment.severity}</span>
+              return (
+                <Card key={groupName}>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <GroupIcon
+                        size={15}
+                        className={sev?.iconColor ?? cat?.color ?? 'text-muted-foreground'}
+                      />
+                      <CardTitle className="capitalize">{groupName}</CardTitle>
+                      <span className="ml-1 rounded-full bg-primary px-2 py-0.5 text-xs font-bold text-primary-foreground">
+                        {comments.length}
+                      </span>
                     </div>
-                    <div className="muted" style={{ fontSize: '0.85rem', marginBottom: '8px' }}>
-                      {comment.category} • line {comment.line ?? 'n/a'}
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <div className="flex flex-col gap-3">
+                      {comments.map((comment, index) => (
+                        <CommentCard
+                          key={`${groupName}-${index}`}
+                          comment={comment}
+                          filePath={comment.filePath}
+                        />
+                      ))}
                     </div>
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{comment.body}</div>
-                    {comment.codeSuggestion && (
-                      <div style={{ marginTop: '12px' }}>
-                        <div className="eyebrow" style={{ marginBottom: '4px' }}>
-                          Suggestion
-                        </div>
-                        <pre className="code-block" style={{ fontSize: '0.8rem' }}>
-                          {comment.codeSuggestion}
-                        </pre>
-                      </div>
-                    )}
-                  </article>
-                ))}
-              </div>
-            </details>
-          ))
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
         )}
       </div>
     </section>

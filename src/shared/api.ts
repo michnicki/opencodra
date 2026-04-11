@@ -32,3 +32,22 @@ export type RepoConfigResponse = {
 export type StatsResponse = {
   stats: StatsPayload;
 };
+
+export type SyncReposResponse = {
+  ok: boolean;
+  synced: string[];
+};
+
+export type DlqMessage = {
+  lease_id: string;
+  body: unknown;
+  metadata: {
+    attempts: number;
+    timestamp: string;
+  };
+};
+
+export type DlqResponse = {
+  messages: DlqMessage[];
+  count: number;
+};
