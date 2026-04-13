@@ -8,7 +8,9 @@ ALTER TABLE file_reviews
 
 -- Add to the overall job review
 ALTER TABLE jobs
-  ADD COLUMN IF NOT EXISTS overall_confidence_score REAL;
+  ADD COLUMN IF NOT EXISTS overall_confidence_score REAL,
+  ADD COLUMN IF NOT EXISTS overall_correctness      TEXT;
 
--- Add an index for searching by correctness if needed
+-- Add indexes for searching by correctness if needed
 CREATE INDEX IF NOT EXISTS file_reviews_correctness_idx ON file_reviews (overall_correctness);
+CREATE INDEX IF NOT EXISTS jobs_correctness_idx ON jobs (overall_correctness);
