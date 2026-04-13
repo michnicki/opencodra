@@ -154,6 +154,7 @@ export const jobSummarySchema = z.object({
   finishedAt: dateStringSchema.nullable(),
   errorMessage: z.string().nullable(),
   overallConfidenceScore: z.number().nullable().optional(),
+  overallCorrectness: z.string().nullable().optional(),
   steps: z.array(jobStepSchema).default([]),
 });
 

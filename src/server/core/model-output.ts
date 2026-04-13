@@ -50,11 +50,15 @@ function preprocessJson(json: string): string {
 }
 
 function withSuggestion(body: string, codeSuggestion?: string) {
-  if (!codeSuggestion) {
-    return body;
-  }
-
-  return `${body}\n\n\`\`\`suggestion\n${codeSuggestion}\n\`\`\``;
+  if (!codeSuggestion) return body;
+  
+  // Clean suggestion: remove existing fences if model added them, and trim
+  const cleanSuggestion = codeSuggestion.replace(/```suggestion\n?|```/g, '').trim();
+  
+  // Clean body: remove any trailing redundant suggestion blocks if the model double-outputted
+  const cleanBody = body.split('```suggestion')[0].trim();
+  
+  return `${cleanBody}\n\n\`\`\`suggestion\n${cleanSuggestion}\n\`\`\``;
 }
 
 export function parseFileReviewResponse(raw: string, file: FileDiff): {
@@ -145,14 +149,36 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
       };
       const severity = finding.priority !== undefined ? priorityMap[finding.priority] || 'P2' : 'P2';
 
+      const cleanText = (text: string) => {
+        let current = text.trim();
+        let prev = '';
+        // Multi-pass cleaning to catch nested or consecutive tags
+        while (current !== prev) {
+          prev = current;
+          current = current
+            .replace(/^([\u{1F300}-\u{1F9FF}]|\[QUALITY\]|\[SECURITY\]|\[BUG\]|\[P[0-3]\]|\[NIT\]|QUALITY|SECURITY|BUG|P[0-3]|NIT|[:\-\s\uFE0F]|[^\w\s])+/giu, '')
+            .trim();
+        }
+        return current;
+      };
+
+      const title = cleanText(finding.title);
+      let body = cleanText(finding.body);
+      
+      // If the body starts with the title or a similar variant, strip it
+      const bodyPrefix = cleanText(body.split('\n')[0]);
+      if (bodyPrefix.toLowerCase().startsWith(title.toLowerCase()) || title.toLowerCase().startsWith(bodyPrefix.toLowerCase())) {
+        body = cleanText(body.slice(body.split('\n')[0].length));
+      }
+
       return parsedReviewCommentSchema.parse({
         path: file.path,
         line: line,
         position,
         severity,
         category: 'quality', // Default for now
-        title: finding.title.replace(/^\[QUALITY\]\s*/i, ''),
-        body: withSuggestion(finding.body, finding.code_suggestion),
+        title,
+        body: withSuggestion(body, finding.code_suggestion),
         codeSuggestion: finding.code_suggestion,
       });
     })

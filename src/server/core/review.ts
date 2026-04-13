@@ -13,24 +13,25 @@ import { reviewWithGemma } from '@server/models/gemma';
 import { reviewWithKimi } from '@server/models/kimi';
 
 function severityIcon(severity: ParsedReviewComment['severity']) {
+  const baseUrl = 'https://codra.devarshi.dev/icons';
   switch (severity) {
     case 'P0':
-      return '🔥';
+      return `<img src="${baseUrl}/p0-icon.svg" width="23" height="20" alt="P0" />`;
     case 'P1':
-      return '🔴';
+      return `<img src="${baseUrl}/p1-icon.svg" width="23" height="20" alt="P1" />`;
     case 'P2':
-      return '🟡';
+      return `<img src="${baseUrl}/p2-icon.svg" width="23" height="20" alt="P2" />`;
     case 'P3':
-      return '🔵';
+      return `<img src="${baseUrl}/p3-icon.svg" width="23" height="20" alt="P3" />`;
     case 'nit':
-      return '⚪';
+      return `<img src="${baseUrl}/nit-icon.svg" width="23" height="20" alt="nit" />`;
     default:
       return '⚪';
   }
 }
 
 function formatInlineComment(comment: ParsedReviewComment) {
-  return `${severityIcon(comment.severity)} ${comment.title}\n\n${comment.body}`;
+  return `${severityIcon(comment.severity)} **${comment.title}**\n\n${comment.body}`;
 }
 
 function toReviewEvent(verdict: 'approve' | 'comment') {
@@ -47,6 +48,44 @@ function summarizeVerdict(comments: ParsedReviewComment[], hasFailures: boolean)
   }
 
   return { verdict: 'approve' as const, errors: 0, warnings: 0 };
+}
+
+function formatReviewOverview(rawSummary: string, commitSha: string, botUsername: string) {
+  // Strip legacy headers if present
+  let content = rawSummary.replace(/^(✅ \*\*Approved\*\*|💬 \*\*Comments posted\*\*)\n\n/, '').trim();
+  
+  if (!content) {
+    content = 'All reviewed files passed technical checks.';
+  }
+
+  const shortSha = commitSha.slice(0, 10);
+  
+  return `### 💡 Codra Review
+
+Here are some automated review suggestions for this pull request.
+
+**Reviewed commit:** \`${shortSha}\`
+
+<details>
+<summary>ℹ️ About Codra in GitHub</summary>
+
+<br/>
+
+[Your team has set up Codra to review pull requests in this repo](https://codra.devarshi.dev/repos). Reviews are triggered when you:
+
+- **Open** a pull request for review
+- **Mark** a draft as ready
+- **Comment** "@${botUsername} review"
+
+If Codra has suggestions, it will comment; otherwise it will react with 👍.
+
+Codra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
+
+</details>
+
+---
+
+${content}`;
 }
 
 function shouldTriggerFromPullRequest(action: PullRequestWebhookPayload['action'], config: RepoConfig['review']) {
@@ -333,12 +372,13 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
 
     const parsedSummary = parseSummaryResponse(summaryResponse.rawText);
+    const formattedSummary = formatReviewOverview(parsedSummary, pr.head.sha, env.BOT_USERNAME);
 
     await updateJobStep(env, job.id, 'Completing', { status: 'running' });
     const review = await github.createReview(job.owner, job.repo, job.pr_number, {
       commitSha: pr.head.sha,
       event: toReviewEvent(verdictSummary.verdict),
-      body: parsedSummary,
+      body: formattedSummary,
       comments: reviewedComments.map(c => ({
         path: c.path,
         position: c.position,
@@ -379,7 +419,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       commentCount: reviewedComments.length,
       totalInputTokens,
       totalOutputTokens,
-      summaryMarkdown: parsedSummary,
+      summaryMarkdown: formattedSummary,
       reviewId: review.id,
       summaryModel: summaryResponse.modelUsed,
     });

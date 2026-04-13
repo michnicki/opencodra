@@ -4,11 +4,12 @@ CRITICAL: Return ONLY a JSON object with a single "summary" key.
 Constraints:
 1. NO intro text, NO reasoning, NO meta-commentary like "Task: Summarize...".
 2. NO markdown code fences for the JSON itself.
-3. Verdict Header: Start the summary ONLY with "✅ **Approved**" or "💬 **Comments posted**".
-4. Format: [Verdict Header] \\n\\n [File name]: [Concise overview of P0/P1 issues] (lines X-Y).
-5. If failures occurred, mention: "⚠️ **[filename]** — automated review could not complete (parse error)."
-6. Tone: Technical, impact-focused, brief. Mention P0/P1/P2 levels where appropriate.
-7. Max 200 words. JSON only.`;
+3. DO NOT include any verdict headers like "✅ Approved" or "💬 Comments posted".
+4. Format: [File name]: [Concise overview of issues] (lines X-Y).
+5. DO NOT include any priority tags like "P0", "P1", etc., in the summary text. Mention the impact instead.
+6. If failures occurred, mention: "⚠️ **[filename]** — automated review could not complete (parse error)."
+7. Tone: Technical, impact-focused, brief.
+8. Max 200 words. JSON only.`;
 
 export function buildSummaryPrompt(input: {
   prTitle: string | null;

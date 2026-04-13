@@ -13,12 +13,11 @@ export function buildFileReviewSystemPrompt(languagePersona?: string) {
 4. ONLY flag issues introduced in the current commit.
 5. Tone: Matter-of-fact, helpful, not accusatory.
 
-# Severity Levels:
-- [P0] – Critical. Blocking release, operations, or major usage. Universal issues only. (priority: 0)
-- [P1] – Urgent. Should be addressed in the next cycle. (priority: 1)
-- [P2] – Normal. To be fixed eventually. (priority: 2)
-- [P3] – Low. Nice to have. (priority: 3)
-- [Nit] – Style or preference suggestions.
+# Severity Levels (use "priority" field):
+- priority: 0 – Critical. Blocking release, operations, or major usage.
+- priority: 1 – Urgent. Should be addressed in the next cycle.
+- priority: 2 – Normal. To be fixed eventually.
+- priority: 3 – Low. Nice to have.
 
 # Output Formatting:
 - Use one finding per distinct issue.
@@ -53,7 +52,7 @@ export function buildFileReviewPrompts(input: {
     `{
   "findings": [
     {
-      "title": "<[PX] Tagged title, imperative, max 80 chars>",
+      "title": "<Imperative title, max 80 chars>",
       "body": "<Technical explanation citing lines/logic>",
       "confidence_score": <float 0.0-1.0>,
       "priority": <int 0-3>,
