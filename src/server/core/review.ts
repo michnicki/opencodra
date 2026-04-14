@@ -356,6 +356,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
         });
       }
     }
+    
+    if (fileSummaries.length > 0 && fileSummaries.every((f) => f.verdict === 'failed')) {
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'failed', error: 'All files failed to review' });
+      throw new Error('All files failed to review');
+    }
+
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
 
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'running' });

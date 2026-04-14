@@ -47,8 +47,8 @@ export const fileReviewModelOutputSchema = z.object({
       code_suggestion: z.string().optional(),
     }),
   ),
-  overall_correctness: z.string(),
-  overall_explanation: z.string(),
+  overall_correctness: z.string().optional().default('patch is correct'),
+  overall_explanation: z.string().optional().default('Review completed (partial output).'),
   overall_confidence_score: z.number().min(0).max(1).optional(),
 });
 

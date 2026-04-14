@@ -3,8 +3,8 @@ import type { AppBindings } from '@server/env';
 import type { ModelResponse } from './gemma';
 import { TimeoutError } from '@server/core/timeout';
 
-/** Max wall-clock time allowed for a single Kimi/Workers-AI call (120 s). */
-const KIMI_TIMEOUT_MS = 120_000;
+/** Max wall-clock time allowed for a single Kimi/Workers-AI call (600 s). */
+const KIMI_TIMEOUT_MS = 600_000;
 
 export async function reviewWithKimi(
   env: Pick<AppBindings, 'AI'>,
