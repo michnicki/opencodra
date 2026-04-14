@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@client/lib/api';
-import { Skeleton } from '@client/components/Skeleton';
-import { EmptyState } from '@client/components/EmptyState';
+import { Skeleton } from '@client/components/skeleton';
+import { EmptyState } from '@client/components/empty-state';
 import { Button } from '@client/components/ui/button';
 import { REPO_CONFIG_FILENAME } from '@shared/config';
 import { GitBranch, Settings, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react';

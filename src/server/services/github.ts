@@ -1,0 +1,43 @@
+import { GitHubClient, type GitHubReviewComment } from '../core/github';
+import type { AppBindings } from '../env';
+
+export class GitHubService {
+  private client: GitHubClient;
+
+  constructor(env: AppBindings, installationId: string) {
+    this.client = new GitHubClient(env, installationId);
+  }
+
+  async getPullRequest(owner: string, repo: string, prNumber: number) {
+    return this.client.getPullRequest(owner, repo, prNumber);
+  }
+
+  async getPullRequestDiff(owner: string, repo: string, prNumber: number) {
+    return this.client.getPullRequestDiff(owner, repo, prNumber);
+  }
+
+  async createCheckRun(owner: string, repo: string, params: { headSha: string; title: string; summary: string }) {
+    return this.client.createCheckRun(owner, repo, params);
+  }
+
+  async updateCheckRun(owner: string, repo: string, checkRunId: number, params: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' }) {
+    return this.client.updateCheckRun(owner, repo, checkRunId, params);
+  }
+
+  async createReview(owner: string, repo: string, prNumber: number, params: { commitSha: string; event: 'APPROVE' | 'COMMENT'; body: string; comments: GitHubReviewComment[] }) {
+    return this.client.createReview(owner, repo, prNumber, params);
+  }
+
+  async ensureLabel(owner: string, repo: string, name: string, color: string) {
+    return this.client.ensureLabel(owner, repo, name, color);
+  }
+
+  async addIssueLabels(owner: string, repo: string, prNumber: number, labels: string[]) {
+    return this.client.addIssueLabels(owner, repo, prNumber, labels);
+  }
+
+  async removeIssueLabel(owner: string, repo: string, prNumber: number, label: string) {
+    return this.client.removeIssueLabel(owner, repo, prNumber, label);
+  }
+}
+

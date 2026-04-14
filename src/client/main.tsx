@@ -1,13 +1,13 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom';
-import { AppShell } from './components/AppShell';
-import { LoginPage } from './pages/Login';
-import { JobsPage } from './pages/Jobs';
-import { JobDetailPage } from './pages/JobDetail';
-import { ReposPage } from './pages/Repos';
-import { StatsPage } from './pages/Stats';
-import { HealthPage } from './pages/Health';
+import { AppShell } from './components/app-shell';
+import { LoginPage } from './pages/login';
+import { JobsPage } from './pages/jobs';
+import { JobDetailPage } from './pages/job-detail';
+import { ReposPage } from './pages/repos';
+import { StatsPage } from './pages/stats';
+import { HealthPage } from './pages/health';
 import './app.css';
 
 const router = createBrowserRouter([

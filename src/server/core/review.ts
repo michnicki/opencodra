@@ -5,98 +5,11 @@ import type { AppBindings } from '@server/env';
 import { insertFileReview, getFileReviewsForJob } from '@server/db/file-reviews';
 import { completeJob, failJob, getJobForProcessing, markJobRunning, updateJobCheckRun, updateJobFileCount, updateJobStep } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
-import { GitHubClient } from './github';
-import { parseFileReviewResponse, parseSummaryResponse } from './model-output';
-import { buildFileReviewPrompts } from '@server/prompts/file-review';
-import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '@server/prompts/summary';
-import { reviewWithGemma } from '@server/models/gemma';
-import { reviewWithKimi } from '@server/models/kimi';
 
-function severityIcon(severity: ParsedReviewComment['severity']) {
-  const baseUrl = 'https://codra.devarshi.dev/icons';
-  const img = (name: string, alt: string) =>
-    `<img src="${baseUrl}/${name}-icon.svg" width="20" height="20" alt="${alt}" style="vertical-align:middle" />`;
-  switch (severity) {
-    case 'P0':  return img('p0',  'P0');
-    case 'P1':  return img('p1',  'P1');
-    case 'P2':  return img('p2',  'P2');
-    case 'P3':  return img('p3',  'P3');
-    case 'nit': return img('nit', 'nit');
-    default:    return '⚪';
-  }
-}
-
-/** Strip leading emoji / legacy tag prefixes from a string (same logic as model-output cleanText). */
-function stripLeadingTags(text: string): string {
-  let current = text.trim();
-  let prev = '';
-  while (current !== prev) {
-    prev = current;
-    current = current
-      .replace(/^([\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}]|\[QUALITY\]|\[SECURITY\]|\[BUG\]|\[P[0-3]\]|\[NIT\]|QUALITY|SECURITY|BUG|P[0-3]|NIT|[:\-\s\uFE0F]|[^\w\s])+/giu, '')
-      .trim();
-  }
-  return current;
-}
-
-function formatInlineComment(comment: ParsedReviewComment) {
-  // Clean the body: strip any residual prefix tags, then remove a leading line
-  // that duplicates the title (can happen with stale DB records).
-  let body = stripLeadingTags(comment.body);
-  const firstLine = body.split('\n')[0].trim();
-  const cleanFirstLine = stripLeadingTags(firstLine);
-  if (
-    cleanFirstLine.toLowerCase().startsWith(comment.title.toLowerCase()) ||
-    comment.title.toLowerCase().startsWith(cleanFirstLine.toLowerCase())
-  ) {
-    body = body.slice(firstLine.length).replace(/^[\n\r]+/, '');
-  }
-
-  return `${severityIcon(comment.severity)} <strong>${comment.title}</strong>\n\n${body}`;
-}
-
-function toReviewEvent(verdict: 'approve' | 'comment') {
-  return verdict === 'approve' ? 'APPROVE' as const : 'COMMENT' as const;
-}
-
-function summarizeVerdict(comments: ParsedReviewComment[], hasFailures: boolean) {
-  const p0 = comments.filter((c) => c.severity === 'P0').length;
-  const p1 = comments.filter((c) => c.severity === 'P1').length;
-  const p2 = comments.filter((c) => c.severity === 'P2').length;
-
-  if (p0 > 0 || p1 > 0 || hasFailures || p2 > 0) {
-    return { verdict: 'comment' as const, errors: p0 + p1, warnings: p2 };
-  }
-
-  return { verdict: 'approve' as const, errors: 0, warnings: 0 };
-}
-
-function formatReviewOverview(commitSha: string, botUsername: string) {
-  const shortSha = commitSha.slice(0, 10);
-  
-  return `### 💡 Codra Review
-
-Here are some automated review suggestions for this pull request.
-
-**Reviewed commit:** \`${shortSha}\`
-
-<details>
-<summary>ℹ️ About Codra in GitHub</summary>
-
-<br/>
-
-[Your team has set up Codra to review pull requests in this repo](https://codra.devarshi.dev/repos). Reviews are triggered when you:
-
-- **Open** a pull request for review
-- **Mark** a draft as ready
-- **Comment** "@${botUsername} review"
-
-If Codra has suggestions, it will comment; otherwise it will react with 👍.
-
-Codra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
-
-</details>`;
-}
+import { GitHubService } from '../services/github';
+import { ModelService } from '../services/model';
+import { FormatterService } from '../services/formatter';
+import { TokenTracker } from './token-tracker';
 
 function shouldTriggerFromPullRequest(action: PullRequestWebhookPayload['action'], config: RepoConfig['review']) {
   return (config.on as string[]).includes(action);
@@ -193,7 +106,11 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     deliveryId: message.deliveryId 
   });
 
-  const github = new GitHubClient(env, job.installation_id);
+  const github = new GitHubService(env, job.installation_id);
+  const tracker = new TokenTracker();
+  const model = new ModelService(env, tracker);
+  const formatter = new FormatterService();
+
   let checkRunId = job.check_run_id;
 
   try {
@@ -223,8 +140,6 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'running' });
     const reviewedComments: ParsedReviewComment[] = [];
     const fileSummaries: Array<{ path: string; summary: string; verdict: string }> = [];
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
 
     // Get existing reviews for this job OR the job it's a retry of
     const currentJobReviews = await getFileReviewsForJob(env, job.id);
@@ -254,8 +169,10 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
           summary: existing.file_summary ?? '',
           verdict: existing.verdict ?? 'comment',
         });
-        totalInputTokens += existing.input_tokens ?? 0;
-        totalOutputTokens += existing.output_tokens ?? 0;
+        
+        if (existing.model_used && (existing.input_tokens || existing.output_tokens)) {
+          tracker.record(existing.model_used, existing.input_tokens ?? 0, existing.output_tokens ?? 0);
+        }
 
         // If this review was from a parent job, insert it into the current job for record keeping
         if (!currentJobReviews.some((r) => r.file_path === file.path)) {
@@ -285,30 +202,19 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       });
 
       const startedAt = Date.now();
-      const { systemPrompt, userPrompt } = buildFileReviewPrompts({
-        file,
-        prTitle: pr.title,
-        prDescription: pr.body,
-        config: config.review,
-      });
-      let rawModelOutput: string | null = null;
-
       try {
-        const response =
-          file.lineCount >= config.review.large_file_threshold_lines
-            ? await reviewWithKimi(env, { systemPrompt, userPrompt })
-            : await reviewWithGemma(env, { systemPrompt, userPrompt });
+        const response = await model.reviewFile({
+          file,
+          prTitle: pr.title ?? null,
+          prDescription: pr.body ?? null,
+          config: config.review,
+        });
 
-        rawModelOutput = response.rawText;
-        totalInputTokens += response.inputTokens;
-        totalOutputTokens += response.outputTokens;
-
-        const parsed = parseFileReviewResponse(response.rawText, file);
-        reviewedComments.push(...parsed.comments);
+        reviewedComments.push(...response.parsed.comments);
         fileSummaries.push({
           path: file.path,
-          summary: parsed.fileSummary,
-          verdict: parsed.verdict,
+          summary: response.parsed.fileSummary,
+          verdict: response.parsed.verdict,
         });
 
         await insertFileReview(env, {
@@ -317,21 +223,21 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
           fileStatus: 'done',
           modelUsed: response.modelUsed,
           diffLineCount: file.lineCount,
-          diffInput: userPrompt,
+          diffInput: response.userPrompt,
           rawAiOutput: response.rawText,
-          parsedComments: parsed.comments,
+          parsedComments: response.parsed.comments,
           inputTokens: response.inputTokens,
           outputTokens: response.outputTokens,
           durationMs: Date.now() - startedAt,
-          verdict: parsed.verdict,
-          fileSummary: parsed.fileSummary,
-          overallCorrectness: parsed.overallCorrectness,
-          confidenceScore: parsed.confidenceScore,
+          verdict: response.parsed.verdict,
+          fileSummary: response.parsed.fileSummary,
+          overallCorrectness: response.parsed.overallCorrectness,
+          confidenceScore: response.parsed.confidenceScore,
           errorMessage: null,
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown file review error';
-        logger.error(`File review failed for ${file.path}`, { error, rawOutput: rawModelOutput });
+        logger.error(`File review failed for ${file.path}`, { error });
         fileSummaries.push({
           path: file.path,
           summary: `Review failed: ${errorMessage}`,
@@ -344,8 +250,8 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
           fileStatus: 'failed',
           modelUsed: file.lineCount >= config.review.large_file_threshold_lines ? '@cf/moonshotai/kimi-k2.5' : env.GEMINI_MODEL || 'gemma-4-31b-it',
           diffLineCount: file.lineCount,
-          diffInput: userPrompt,
-          rawAiOutput: rawModelOutput,
+          diffInput: '', // userPrompt was inside try
+          rawAiOutput: null,
           parsedComments: [],
           inputTokens: null,
           outputTokens: null,
@@ -366,7 +272,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
 
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'running' });
     const hasFailures = fileSummaries.some((f) => f.verdict === 'failed');
-    const verdictSummary = summarizeVerdict(reviewedComments, hasFailures);
+    const verdictSummary = formatter.summarizeVerdict(reviewedComments, hasFailures);
 
     // Final check before generating summary and posting review
     const finalJobCheck = await getJobForProcessing(env, job.id);
@@ -374,30 +280,25 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       throw new Error('JOB_SUPERSEDED');
     }
 
-    const summaryResponse = await reviewWithGemma(env, {
-      systemPrompt: SUMMARY_SYSTEM_PROMPT,
-      userPrompt: buildSummaryPrompt({
-        prTitle: pr.title,
-        verdict: verdictSummary.verdict,
-        fileSummaries,
-      }),
+    const summaryResponse = await model.generateSummary({
+      prTitle: pr.title ?? null,
+      verdict: verdictSummary.verdict,
+      fileSummaries,
     });
 
-    totalInputTokens += summaryResponse.inputTokens;
-    totalOutputTokens += summaryResponse.outputTokens;
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
 
-    const formattedSummary = formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
+    const formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
 
     await updateJobStep(env, job.id, 'Completing', { status: 'running' });
     const review = await github.createReview(job.owner, job.repo, job.pr_number, {
       commitSha: pr.head.sha,
-      event: toReviewEvent(verdictSummary.verdict),
+      event: formatter.toReviewEvent(verdictSummary.verdict),
       body: formattedSummary,
       comments: reviewedComments.map(c => ({
         path: c.path,
         position: c.position,
-        body: formatInlineComment(c)
+        body: formatter.formatInlineComment(c)
       })),
     });
 
@@ -428,12 +329,18 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
       summary: `${reviewedComments.length} inline comments across ${files.length} files.${hasFailures ? ' Some files failed to parse.' : ''}`,
     });
 
+    const finalUsage = tracker.getTotalUsage();
+    logger.info(`Final token usage for job ${job.id}:`, { 
+      total: finalUsage, 
+      breakdown: tracker.getBreakdown() 
+    });
+
     await completeJob(env, job.id, {
       verdict: verdictSummary.verdict,
       fileCount: files.length,
       commentCount: reviewedComments.length,
-      totalInputTokens,
-      totalOutputTokens,
+      totalInputTokens: finalUsage.input,
+      totalOutputTokens: finalUsage.output,
       summaryMarkdown: formattedSummary,
       reviewId: review.id,
       summaryModel: summaryResponse.modelUsed,
@@ -469,3 +376,4 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
     }
   }
 }
+
