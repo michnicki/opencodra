@@ -12,27 +12,36 @@ function extractJson(raw: string) {
     return blocks[blocks.length - 1][1].trim();
   }
 
+  // 1b. Handle truncated markdown block (unclosed)
+  const openBlockMatch = raw.match(/```(?:json)?\s*([\s\S]*)$/i);
+  if (openBlockMatch) {
+    return openBlockMatch[1].trim();
+  }
+
   // 2. If no code blocks, look for the block containing "findings" or "summary"
-  // This helps ignore introductory reasoning blocks
   const findingsIdx = raw.lastIndexOf('"findings"');
   const summaryIdx = raw.lastIndexOf('"summary"');
   const targetIdx = Math.max(findingsIdx, summaryIdx);
 
   if (targetIdx !== -1) {
-    // Search backwards from findingsIdx for '{'
     const startIdx = raw.lastIndexOf('{', targetIdx);
-    // Search forwards from findingsIdx for '}'
-    const endIdx = raw.lastIndexOf('}');
-    if (startIdx !== -1 && endIdx > startIdx) {
-      return raw.slice(startIdx, endIdx + 1);
+    if (startIdx !== -1) {
+      const endIdx = raw.lastIndexOf('}');
+      if (endIdx > startIdx) {
+        return raw.slice(startIdx, endIdx + 1);
+      }
+      return raw.slice(startIdx); // Pass to jsonrepair to salvage
     }
   }
 
   // 3. Fallback to basic balanced braces
   const firstBrace = raw.indexOf('{');
-  const lastBrace = raw.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return raw.slice(firstBrace, lastBrace + 1);
+  if (firstBrace !== -1) {
+    const lastBrace = raw.lastIndexOf('}');
+    if (lastBrace > firstBrace) {
+      return raw.slice(firstBrace, lastBrace + 1);
+    }
+    return raw.slice(firstBrace);
   }
 
   return raw.trim();
