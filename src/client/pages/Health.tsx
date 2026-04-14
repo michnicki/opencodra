@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
-import { StatusBadge } from '@client/components/StatusBadge';
+import { StatusBadge } from '@client/components/status-badge';
 import { Button } from '@client/components/ui/button';
 import {
   AlertTriangle, RefreshCw, RotateCcw, Trash2,

@@ -140,6 +140,22 @@
   --color-input:                 var(--input);
   --color-ring:                  var(--ring);
 
+  --color-success:        var(--success);
+  --color-success-bg:     var(--success-bg);
+  --color-success-border: var(--success-border);
+
+  --color-warning:        var(--warning);
+  --color-warning-bg:     var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+
+  --color-danger:         var(--danger);
+  --color-danger-bg:      var(--danger-bg);
+  --color-danger-border:  var(--danger-border);
+
+  --color-info:           var(--info);
+  --color-info-bg:        var(--info-bg);
+  --color-info-border:    var(--info-border);
+
   --radius-sm:  calc(var(--radius) - 2px);
   --radius-md:  var(--radius);
   --radius-lg:  calc(var(--radius) + 4px);
@@ -218,49 +234,40 @@
   to { transform: rotate(360deg); }
 }
 
-/* ─────────────────────────────────────────────────────
-   Page entrance choreography
-───────────────────────────────────────────────────── */
-.page-enter {
+@utility page-enter {
   animation: fade-up 0.5s var(--ease-out-expo) both;
-}
-.page-enter > * {
-  animation: fade-up 0.5s var(--ease-out-expo) both;
-}
-.page-enter > *:nth-child(1)  { animation-delay: 0ms; }
-.page-enter > *:nth-child(2)  { animation-delay: 60ms; }
-.page-enter > *:nth-child(3)  { animation-delay: 120ms; }
-.page-enter > *:nth-child(4)  { animation-delay: 180ms; }
-.page-enter > *:nth-child(5)  { animation-delay: 240ms; }
-.page-enter > *:nth-child(6)  { animation-delay: 300ms; }
+  & > * {
+    animation: fade-up 0.5s var(--ease-out-expo) both;
+  }
+  & > *:nth-child(1)  { animation-delay: 0ms; }
+  & > *:nth-child(2)  { animation-delay: 60ms; }
+  & > *:nth-child(3)  { animation-delay: 120ms; }
+  & > *:nth-child(4)  { animation-delay: 180ms; }
+  & > *:nth-child(5)  { animation-delay: 240ms; }
+  & > *:nth-child(6)  { animation-delay: 300ms; }
 
-@media (prefers-reduced-motion: reduce) {
-  .page-enter, .page-enter > * { animation: none !important; }
-  * { transition-duration: 0.01ms !important; }
-}
-
-/* ─────────────────────────────────────────────────────
-   Surface card
-───────────────────────────────────────────────────── */
-.surface {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  transition: border-color 0.2s;
-}
-
-.surface-hover {
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-.surface-hover:hover {
-  border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 15%, transparent);
+  @media (prefers-reduced-motion: reduce) {
+    animation: none !important;
+    & > * { animation: none !important; }
+  }
 }
 
 /* ─────────────────────────────────────────────────────
-   Skeleton loader
+   Surface & Utilities
 ───────────────────────────────────────────────────── */
-.skeleton {
+@utility surface {
+  @apply bg-card border border-border rounded-lg transition-[border-color] duration-200;
+}
+
+@utility surface-hover {
+  @apply transition-[border-color,box-shadow] duration-200;
+  &:hover {
+    border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 15%, transparent);
+  }
+}
+
+@utility skeleton {
   background: linear-gradient(
     90deg,
     var(--muted) 25%,
@@ -268,113 +275,63 @@
     var(--muted) 75%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.8s linear infinite;
-  border-radius: var(--radius-sm);
+  @apply animate-[shimmer_1.8s_linear_infinite] rounded-sm;
 }
 
-/* ─────────────────────────────────────────────────────
-   Code blocks
-───────────────────────────────────────────────────── */
-.code-block {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 1rem 1.125rem;
-  border-radius: var(--radius-md);
-  background: oklch(13% 0.012 155);
-  color: oklch(85% 0.010 155);
-  font-family: var(--font-mono);
-  font-size: 0.775rem;
-  line-height: 1.7;
-  overflow: auto;
-  border: 1px solid oklch(23% 0.016 155);
-  letter-spacing: 0.01em;
+@utility code-block {
+  @apply m-0 whitespace-pre-wrap break-words px-[1.125rem] py-4 rounded-md bg-[oklch(13%_0.012_155)] text-[oklch(85%_0.010_155)] font-mono text-[0.775rem] leading-[1.7] overflow-auto border border-[oklch(23%_0.016_155)] tracking-[0.01em];
+
+  .dark & {
+    @apply bg-[oklch(10%_0.010_155)] border-[oklch(21%_0.014_155)];
+  }
 }
 
-.dark .code-block {
-  background: oklch(10% 0.010 155);
-  border-color: oklch(21% 0.014 155);
+@utility severity-tag {
+  @apply text-[0.64rem] px-[5.5px] py-[1.5px] rounded-[3px] uppercase font-bold tracking-[0.07em] border border-transparent;
+
+  &.P0  { @apply bg-danger-bg text-danger border-danger-border; }
+  &.P1  { @apply bg-warning-bg text-warning border-warning-border; }
+  &.P2  {
+    @apply bg-[oklch(95%_0.06_65)] text-[oklch(50%_0.14_65)] border-[oklch(83%_0.09_65)];
+    .dark & {
+      @apply bg-[oklch(21%_0.07_65)] text-[oklch(72%_0.14_65)] border-[oklch(31%_0.09_65)];
+    }
+  }
+  &.P3  { @apply bg-info-bg text-info border-info-border; }
+  &.nit { @apply bg-muted text-muted-foreground border-border; }
 }
 
-/* ─────────────────────────────────────────────────────
-   Severity tags
-───────────────────────────────────────────────────── */
-.severity-tag {
-  font-size: 0.64rem;
-  padding: 1.5px 5.5px;
-  border-radius: 3px;
-  text-transform: uppercase;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  border: 1px solid transparent;
-}
-.severity-tag.P0  { background: var(--danger-bg);  color: var(--danger);  border-color: var(--danger-border); }
-.severity-tag.P1  { background: var(--warning-bg); color: var(--warning); border-color: var(--warning-border); }
-.severity-tag.P2  {
-  background: oklch(95% 0.06 65);
-  color: oklch(50% 0.14 65);
-  border-color: oklch(83% 0.09 65);
-}
-.dark .severity-tag.P2 {
-  background: oklch(21% 0.07 65);
-  color: oklch(72% 0.14 65);
-  border-color: oklch(31% 0.09 65);
-}
-.severity-tag.P3  { background: var(--info-bg);    color: var(--info);    border-color: var(--info-border); }
-.severity-tag.nit { background: var(--muted);      color: var(--muted-foreground); border-color: var(--border); }
+@utility category-tag {
+  @apply text-[0.72rem] text-muted-foreground inline-flex items-center gap-[5px] font-medium;
 
-/* ─────────────────────────────────────────────────────
-   Category tags
-───────────────────────────────────────────────────── */
-.category-tag {
-  font-size: 0.72rem;
-  color: var(--muted-foreground);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 500;
-}
-.category-tag::before {
-  content: '';
-  width: 5px; height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
-  display: inline-block;
-}
-.category-tag.security    { color: var(--danger); }
-.category-tag.performance { color: var(--info); }
-.category-tag.bugs        { color: var(--warning); }
-.category-tag.correctness { color: var(--success); }
-.category-tag.quality     { color: oklch(56% 0.16 295); }
-.dark .category-tag.quality { color: oklch(70% 0.14 295); }
+  &::before {
+    content: '';
+    @apply w-[5px] h-[5px] rounded-full bg-current flex-shrink-0 inline-block;
+  }
 
-/* ─────────────────────────────────────────────────────
-   Step dots
-───────────────────────────────────────────────────── */
-.step-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+  &.security    { @apply text-danger; }
+  &.performance { @apply text-info; }
+  &.bugs        { @apply text-warning; }
+  &.correctness { @apply text-success; }
+  &.quality     {
+    @apply text-[oklch(56%_0.16_295)];
+    .dark & { @apply text-[oklch(70%_0.14_295)]; }
+  }
 }
-.step-dot.pending { background: color-mix(in oklch, var(--muted-foreground) 35%, transparent); }
-.step-dot.running {
-  background: var(--info);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--info) 25%, transparent);
-  animation: pulse-ring 1.5s var(--ease-out-quart) infinite;
-}
-.step-dot.done   { background: var(--success); }
-.step-dot.failed { background: var(--danger); }
 
-/* ─────────────────────────────────────────────────────
-   Pulsing dot
-───────────────────────────────────────────────────── */
-.pulsing-dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: var(--info);
-  display: inline-block;
-  animation: pulse-ring 1.5s var(--ease-out-quart) infinite;
+@utility step-dot {
+  @apply w-2 h-2 rounded-full flex-shrink-0;
+
+  &.pending { background: color-mix(in oklch, var(--muted-foreground) 35%, transparent); }
+  &.running {
+    @apply bg-info shadow-[0_0_0_3px_color-mix(in_oklch,var(--info)_25%,transparent)] animate-[pulse-ring_1.5s_var(--ease-out-quart)_infinite];
+  }
+  &.done    { @apply bg-success; }
+  &.failed  { @apply bg-danger; }
+}
+
+@utility pulsing-dot {
+  @apply w-[7px] h-[7px] rounded-full bg-info inline-block animate-[pulse-ring_1.5s_var(--ease-out-quart)_infinite];
 }
 
 /* ─────────────────────────────────────────────────────
@@ -391,134 +348,69 @@
   box-shadow: 0 8px 32px oklch(0% 0 0 / 0.5) !important;
 }
 
-/* ─────────────────────────────────────────────────────
-   Sidebar nav items
-───────────────────────────────────────────────────── */
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  padding: 0.45rem 0.75rem;
-  border-radius: var(--radius-md);
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--muted-foreground);
-  transition: color 0.15s, background-color 0.15s;
-  letter-spacing: 0.005em;
-  cursor: pointer;
-  width: 100%;
-  text-align: left;
-  border: none;
-  background: none;
-  outline: none;
-  text-decoration: none;
-}
-.nav-item:hover {
-  color: var(--foreground);
-  background-color: var(--secondary);
-}
-.nav-item.active {
-  color: var(--primary);
-  background-color: color-mix(in oklch, var(--primary) 10%, transparent);
-  font-weight: 600;
-}
-.dark .nav-item.active {
-  background-color: color-mix(in oklch, var(--primary) 16%, transparent);
+@utility nav-item {
+  @apply flex items-center gap-[0.625rem] px-3 py-[0.45rem] rounded-md text-[0.875rem] font-medium text-muted-foreground transition-colors tracking-[0.005em] cursor-pointer w-full text-left border-none bg-none outline-none no-underline;
+
+  &:hover {
+    @apply text-foreground bg-secondary;
+  }
+
+  &.active {
+    @apply text-primary bg-[color-mix(in_oklch,var(--primary)_10%,transparent)] font-semibold;
+    .dark & {
+      @apply bg-[color-mix(in_oklch,var(--primary)_16%,transparent)];
+    }
+  }
 }
 
-/* ─────────────────────────────────────────────────────
-   Evil chart card (dark inner surface for charts)
-───────────────────────────────────────────────────── */
-.chart-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  position: relative;
+@utility chart-card {
+  @apply bg-card border border-border rounded-lg overflow-hidden relative;
 }
 
-/* Subtle dot-grid background for chart cards */
-.chart-card-inner {
-  position: absolute;
-  inset: 0;
+@utility chart-card-inner {
+  @apply absolute inset-0 pointer-events-none z-0;
   background-image: radial-gradient(
     circle,
     color-mix(in oklch, var(--primary) 12%, transparent) 1px,
     transparent 1px
   );
   background-size: 20px 20px;
-  pointer-events: none;
-  z-index: 0;
 }
 
 .chart-card > * { position: relative; z-index: 1; }
 
-/* ─────────────────────────────────────────────────────
-   Stat display
-───────────────────────────────────────────────────── */
-.stat-number {
-  font-size: 2.25rem;
-  font-weight: 700;
-  letter-spacing: -0.04em;
-  line-height: 1;
-  color: var(--foreground);
-  font-variant-numeric: tabular-nums;
+@utility stat-number {
+  @apply text-[2.25rem] font-bold tracking-[-0.04em] leading-none text-foreground tabular-nums;
 }
 
-.stat-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted-foreground);
+@utility stat-label {
+  @apply text-[0.72rem] font-semibold tracking-[0.06em] uppercase text-muted-foreground;
 }
 
-/* ─────────────────────────────────────────────────────
-   Prose
-───────────────────────────────────────────────────── */
-.prose {
-  font-size: 0.875rem;
-  line-height: 1.75;
-  color: var(--foreground);
+@utility prose {
+  @apply text-[0.875rem] leading-[1.75] text-foreground;
+
+  & h1, & h2, & h3, & h4 {
+    @apply font-bold leading-[1.3] mt-[1.4em] mb-[0.4em] tracking-[-0.01em];
+  }
+  & h1 { @apply text-[1.2rem]; }
+  & h2 { @apply text-[1.05rem]; }
+  & h3 { @apply text-[0.95rem]; }
+  & p  { @apply my-[0.6em]; }
+  & ul, & ol { @apply pl-[1.4em] my-[0.5em]; }
+  & li { @apply my-[0.2em]; }
+  & strong { @apply font-bold; }
+  & em { @apply italic; }
+  & code {
+    @apply font-mono text-[0.78em] bg-muted px-[0.3em] py-[0.1em] rounded-[3px] border border-border;
+  }
+  & pre {
+    @apply bg-[oklch(13%_0.012_155)] text-[oklch(85%_0.01_155)] px-4 py-[0.85rem] rounded-md overflow-x-auto text-[0.78em] border border-[oklch(23%_0.016_155)];
+    .dark & { @apply bg-[oklch(10%_0.01_155)] border-[oklch(21%_0.014_155)]; }
+  }
+  & blockquote {
+    @apply border-l-2 border-primary pl-4 text-muted-foreground my-[0.85em];
+  }
+  & a { @apply text-primary underline underline-offset-2; }
+  & hr { @apply border-border my-[1.5em]; }
 }
-.prose h1,.prose h2,.prose h3,.prose h4 {
-  font-weight: 700;
-  line-height: 1.3;
-  margin-top: 1.4em;
-  margin-bottom: 0.4em;
-  letter-spacing: -0.01em;
-}
-.prose h1 { font-size: 1.2rem; }
-.prose h2 { font-size: 1.05rem; }
-.prose h3 { font-size: 0.95rem; }
-.prose p  { margin: 0.6em 0; }
-.prose ul, .prose ol { padding-left: 1.4em; margin: 0.5em 0; }
-.prose li { margin: 0.2em 0; }
-.prose strong { font-weight: 700; }
-.prose em { font-style: italic; }
-.prose code {
-  font-family: var(--font-mono);
-  font-size: 0.78em;
-  background: var(--muted);
-  padding: 0.1em 0.3em;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-}
-.prose pre {
-  background: oklch(13% 0.012 155);
-  color: oklch(85% 0.01 155);
-  padding: 0.85rem 1rem;
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-  font-size: 0.78em;
-  border: 1px solid oklch(23% 0.016 155);
-}
-.dark .prose pre { background: oklch(10% 0.01 155); border-color: oklch(21% 0.014 155); }
-.prose blockquote {
-  border-left: 2px solid var(--primary);
-  padding-left: 1em;
-  color: var(--muted-foreground);
-  margin: 0.85em 0;
-}
-.prose a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
-.prose hr { border-color: var(--border); margin: 1.5em 0; }

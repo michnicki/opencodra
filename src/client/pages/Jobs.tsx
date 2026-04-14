@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
-import { StatusBadge } from '@client/components/StatusBadge';
-import { Skeleton } from '@client/components/Skeleton';
-import { EmptyState } from '@client/components/EmptyState';
+import { StatusBadge } from '@client/components/status-badge';
+import { Skeleton } from '@client/components/skeleton';
+import { EmptyState } from '@client/components/empty-state';
 import { Button } from '@client/components/ui/button';
 import { Input } from '@client/components/ui/input';
 import { Inbox, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
