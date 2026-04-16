@@ -16,4 +16,6 @@ declare interface Env {
   DASHBOARD_PASSWORD: string;
   BOT_USERNAME: string;
   ENVIRONMENT: string;
+  CF_API_TOKEN: string;
+  CF_ACCOUNT_ID: string;
 }
