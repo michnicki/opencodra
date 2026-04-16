@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
 import { StatusBadge } from '@client/components/status-badge';
@@ -7,6 +7,9 @@ import { EmptyState } from '@client/components/empty-state';
 import { Button } from '@client/components/ui/button';
 import { Input } from '@client/components/ui/input';
 import { Select } from '@client/components/ui/select';
+import { Alert } from '@client/components/ui/alert';
+import { PageHeader } from '@client/components/page-header';
+import { usePolling } from '@client/hooks/use-polling';
 import { Inbox, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import type { JobSummary } from '@shared/schema';
 
@@ -22,75 +25,53 @@ export function JobsPage() {
 
   const limit = 20;
 
-  useEffect(() => {
-    let stopped = false;
+  const load = async (isManual = false) => {
+    if (isManual) setRefreshing(true);
+    try {
+      const res = await api.getJobs({
+        status:  filters.status  || undefined,
+        verdict: filters.verdict || undefined,
+        search:  filters.search  || undefined,
+        limit,
+        offset:  (filters.page - 1) * limit,
+      });
+      setJobs(res.jobs);
+      setTotal(res.total);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load jobs.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
 
-    const load = async (isManual = false) => {
-      if (isManual) setRefreshing(true);
-      try {
-        const res = await api.getJobs({
-          status:  filters.status  || undefined,
-          verdict: filters.verdict || undefined,
-          search:  filters.search  || undefined,
-          limit,
-          offset:  (filters.page - 1) * limit,
-        });
-        if (!stopped) {
-          setJobs(res.jobs);
-          setTotal(res.total);
-          setError(null);
-          setLoading(false);
-        }
-      } catch (e) {
-        if (!stopped) {
-          setError(e instanceof Error ? e.message : 'Failed to load jobs.');
-          setLoading(false);
-        }
-      } finally {
-        if (!stopped) setRefreshing(false);
-      }
-    };
-
-    load();
-    const timer = window.setInterval(load, 10_000);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [filters]);
+  usePolling(load, 15_000, [filters]);
 
   const totalPages = Math.ceil(total / limit);
-
 
   const thCls = 'px-4 py-3 text-left text-[10px] font-bold uppercase tracking-wider text-muted-foreground select-none';
 
   return (
     <section className="page-enter flex flex-col gap-6">
 
-      {/* Header */}
-      <header className="flex items-end justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">Overview</p>
-          <h1
-            className="text-2xl font-bold text-foreground"
-            style={{ letterSpacing: '-0.025em' }}
+      <PageHeader
+        category="Overview"
+        title="Review jobs"
+        description={!loading && `${total.toLocaleString()} ${total === 1 ? 'job' : 'jobs'} found`}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setFilters((f) => ({ ...f }))}
+            disabled={refreshing}
+            className="gap-2"
           >
-            Review jobs
-          </h1>
-          {!loading && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {total.toLocaleString()} {total === 1 ? 'job' : 'jobs'} found
-            </p>
-          )}
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setFilters((f) => ({ ...f }))}
-          disabled={refreshing}
-          className="gap-2"
-        >
-          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
-        </Button>
-      </header>
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Refresh
+          </Button>
+        }
+      />
 
       {/* Filters */}
       <div className="surface p-4 flex flex-wrap gap-3 items-end">
@@ -133,12 +114,7 @@ export function JobsPage() {
       </div>
 
       {error && (
-        <div
-          className="rounded-lg border px-4 py-3 text-sm"
-          style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">{error}</Alert>
       )}
 
       {/* Table */}

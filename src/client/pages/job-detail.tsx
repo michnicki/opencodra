@@ -6,6 +6,7 @@ import { JobMetaCards } from '@client/components/job-detail/job-meta-cards';
 import { JobReviewOverview } from '@client/components/job-detail/job-review-overview';
 import { JobFindingsList } from '@client/components/job-detail/job-findings-list';
 import { JobDetailSkeleton } from '@client/components/job-detail/job-skeleton';
+import { Alert } from '@client/components/ui/alert';
 
 export function JobDetailPage() {
   const { id = '' } = useParams();
@@ -24,12 +25,7 @@ export function JobDetailPage() {
       />
 
       {error && (
-        <div
-          className="rounded-lg border px-4 py-3 text-sm"
-          style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">{error}</Alert>
       )}
 
       <JobProgress job={job} />
