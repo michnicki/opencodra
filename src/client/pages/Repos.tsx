@@ -65,17 +65,35 @@ export function ReposPage() {
             </p>
           )}
         </div>
-        <Button
-          id="sync-repos-btn"
-          onClick={handleSync}
-          disabled={syncing}
-          variant="outline"
-          size="sm"
-          className="gap-2"
-        >
-          <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
-          {syncing ? 'Syncing…' : 'Sync'}
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            asChild
+            variant="outline"
+            size="sm"
+            className="gap-2"
+          >
+            <a
+              href="https://github.com/apps/codra-app/installations/new"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Configure Codra App access"
+            >
+              <Settings size={13} />
+              Configure App
+            </a>
+          </Button>
+          <Button
+            id="sync-repos-btn"
+            onClick={handleSync}
+            disabled={syncing}
+            variant="outline"
+            size="sm"
+            className="gap-2"
+          >
+            <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
+            {syncing ? 'Syncing…' : 'Sync'}
+          </Button>
+        </div>
       </header>
 
       {error && (

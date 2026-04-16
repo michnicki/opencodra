@@ -11,6 +11,7 @@ import {
   History,
   ArrowRight,
   RefreshCw,
+  Settings,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { StatusBadge } from '@client/components/status-badge';
@@ -69,16 +70,34 @@ export function DashboardPage() {
             Live activity stream and system snapshot.
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => load(true)}
-          disabled={refreshing || loading}
-          className="gap-2"
-        >
-          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            asChild
+            variant="outline"
+            size="sm"
+            className="gap-2"
+          >
+            <a
+              href="https://github.com/apps/codra-app/installations/new"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Configure Codra App access"
+            >
+              <Settings size={13} />
+              Configure App
+            </a>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => load(true)}
+            disabled={refreshing || loading}
+            className="gap-2"
+          >
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Refresh
+          </Button>
+        </div>
       </header>
 
       {/* ── KPI strip ── */}
