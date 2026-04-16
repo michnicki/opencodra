@@ -3,6 +3,8 @@ import { api } from '@client/lib/api';
 import { Skeleton } from '@client/components/skeleton';
 import { EmptyState } from '@client/components/empty-state';
 import { Button } from '@client/components/ui/button';
+import { Alert } from '@client/components/ui/alert';
+import { PageHeader } from '@client/components/page-header';
 import { REPO_CONFIG_FILENAME } from '@shared/config';
 import { GitBranch, Settings, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react';
 import { cn } from '@client/lib/utils';
@@ -47,62 +49,44 @@ export function ReposPage() {
   return (
     <section className="page-enter flex flex-col gap-6">
 
-      {/* Header */}
-      <header className="flex items-end justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">
-            Configuration
-          </p>
-          <h1
-            className="text-2xl font-bold text-foreground"
-            style={{ letterSpacing: '-0.025em' }}
-          >
-            Repositories
-          </h1>
-          {!loading && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {repos.length} {repos.length === 1 ? 'repository' : 'repositories'} linked
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <Button
-            asChild
-            variant="outline"
-            size="sm"
-            className="gap-2"
-          >
-            <a
-              href="https://github.com/apps/codra-app/installations/new"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Configure Codra App access"
+      <PageHeader
+        category="Configuration"
+        title="Repositories"
+        description={!loading && `${repos.length} ${repos.length === 1 ? 'repository' : 'repositories'} linked`}
+        actions={
+          <>
+            <Button
+              asChild
+              variant="outline"
+              size="sm"
+              className="gap-2"
             >
-              <Settings size={13} />
-              Configure App
-            </a>
-          </Button>
-          <Button
-            id="sync-repos-btn"
-            onClick={handleSync}
-            disabled={syncing}
-            variant="outline"
-            size="sm"
-            className="gap-2"
-          >
-            <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
-            {syncing ? 'Syncing…' : 'Sync'}
-          </Button>
-        </div>
-      </header>
+              <a
+                href="https://github.com/apps/codra-app/installations/new"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Settings size={13} />
+                Configure App
+              </a>
+            </Button>
+            <Button
+              id="sync-repos-btn"
+              onClick={handleSync}
+              disabled={syncing}
+              variant="outline"
+              size="sm"
+              className="gap-2"
+            >
+              <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
+              {syncing ? 'Syncing…' : 'Sync'}
+            </Button>
+          </>
+        }
+      />
 
       {error && (
-        <div
-          className="rounded-md border px-4 py-3 text-sm"
-          style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">{error}</Alert>
       )}
 
       <div className="grid grid-cols-[210px_1fr] gap-5 items-start">

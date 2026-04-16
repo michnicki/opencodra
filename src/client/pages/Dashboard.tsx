@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { api } from '@client/lib/api';
 import type { StatsPayload } from '@shared/schema';
 import type { JobSummary } from '@shared/schema';
@@ -17,8 +17,11 @@ import { Link } from 'react-router-dom';
 import { StatusBadge } from '@client/components/status-badge';
 import { Skeleton } from '@client/components/skeleton';
 import { Button } from '@client/components/ui/button';
-import { Sparkline } from '@client/components/sparkline';
 import { TimeRangeSelect } from '@client/components/time-range-select';
+import { PageHeader } from '@client/components/page-header';
+import { StatsGrid } from '@client/components/stats-grid';
+import { usePolling } from '@client/hooks/use-polling';
+import { fmtNumber } from '@client/lib/utils';
 
 const generateMockTrend = (base: number, length: number) => {
   return Array.from({ length }, (_, i) => {
@@ -27,12 +30,6 @@ const generateMockTrend = (base: number, length: number) => {
     return Math.max(0, base + trend + noise);
   });
 };
-
-function fmt(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
-  return n.toLocaleString();
-}
 
 export function DashboardPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
@@ -57,7 +54,7 @@ export function DashboardPage() {
     }
   };
 
-  useEffect(() => { load(); }, [days]);
+  usePolling(load, 15_000, [days]);
 
   const mockTrends = useMemo(() => ({
     jobs: generateMockTrend(40, days),
@@ -69,25 +66,25 @@ export function DashboardPage() {
   const kpis = [
     { 
       label: 'Total reviews',   
-      value: stats ? fmt(stats.totals.jobs) : null, 
+      value: stats ? fmtNumber(stats.totals.jobs) : null, 
       icon: Activity,
       trend: stats ? mockTrends.jobs : Array(days).fill(0),
     },
     { 
       label: 'Input tokens',    
-      value: stats ? fmt(stats.totals.inputTokens) : null, 
+      value: stats ? fmtNumber(stats.totals.inputTokens) : null, 
       icon: ArrowUpRight,
       trend: stats ? mockTrends.inputTokens : Array(days).fill(0),
     },
     { 
       label: 'Output tokens',   
-      value: stats ? fmt(stats.totals.outputTokens) : null, 
+      value: stats ? fmtNumber(stats.totals.outputTokens) : null, 
       icon: Cpu,
       trend: stats ? mockTrends.outputTokens : Array(days).fill(0),
     },
     { 
       label: 'Comments posted', 
-      value: stats ? fmt(stats.totals.comments) : null, 
+      value: stats ? fmtNumber(stats.totals.comments) : null, 
       icon: MessageSquare,
       trend: stats ? mockTrends.comments : Array(days).fill(0),
     },
@@ -96,71 +93,46 @@ export function DashboardPage() {
   return (
     <section className="page-enter flex flex-col gap-6">
 
-      {/* ── Page Header ── */}
-      <header className="flex items-end justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">
-            Overview
-          </p>
-          <h1 className="text-2xl font-bold text-foreground" style={{ letterSpacing: '-0.025em' }}>
-            Dashboard
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Live activity stream and system snapshot.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <TimeRangeSelect 
-            value={days}
-            onValueChange={setDays}
-          />
-          <Button
-            asChild
-            variant="outline"
-            size="sm"
-            className="gap-2"
-          >
-            <a
-              href="https://github.com/apps/codra-app/installations/new"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Configure Codra App access"
+      <PageHeader
+        category="Overview"
+        title="Dashboard"
+        description="Live activity stream and system snapshot."
+        actions={
+          <>
+            <TimeRangeSelect 
+              value={days}
+              onValueChange={setDays}
+            />
+            <Button
+              asChild
+              variant="outline"
+              size="sm"
+              className="gap-2"
             >
-              <Settings size={13} />
-              Configure App
-            </a>
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => load(true)}
-            disabled={refreshing || loading}
-            className="gap-2"
-          >
-            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-            Refresh
-          </Button>
-        </div>
-      </header>
+              <a
+                href="https://github.com/apps/codra-app/installations/new"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Settings size={13} />
+                Configure App
+              </a>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => load(true)}
+              disabled={refreshing || loading}
+              className="gap-2"
+            >
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+              Refresh
+            </Button>
+          </>
+        }
+      />
 
-      {/* ── KPI strip ── */}
-      <div className="surface grid grid-cols-2 sm:grid-cols-4 divide-x divide-y sm:divide-y-0 divide-border">
-        {kpis.map(({ label, value, icon: Icon, trend }, i) => (
-          <div key={i} className="flex flex-col gap-2.5 px-5 py-4 sm:px-6 sm:py-5 relative overflow-hidden group">
-            <Sparkline data={trend} />
-            <div className="relative z-10 flex items-center gap-2 text-muted-foreground group-hover:text-foreground transition-colors">
-              <Icon size={13} strokeWidth={1.75} />
-              <span className="stat-label">{label}</span>
-            </div>
-            <div className="relative z-10">
-              {value !== null
-                ? <p className="stat-number">{value}</p>
-                : <Skeleton height={36} width={60} />
-              }
-            </div>
-          </div>
-        ))}
-      </div>
+      <StatsGrid items={kpis} />
 
       {/* ── Activity Stream ── */}
       <div className="flex flex-col gap-0">

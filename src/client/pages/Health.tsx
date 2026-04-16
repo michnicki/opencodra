@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
 import { StatusBadge } from '@client/components/status-badge';
 import { Button } from '@client/components/ui/button';
+import { Alert } from '@client/components/ui/alert';
+import { PageHeader } from '@client/components/page-header';
+import { StatsGrid } from '@client/components/stats-grid';
+import { usePolling } from '@client/hooks/use-polling';
 import {
   AlertTriangle, RefreshCw, RotateCcw, Trash2,
   CheckCircle2, ShieldAlert, ServerCrash,
@@ -41,7 +45,6 @@ export function HealthPage() {
   const [processing,   setProcessing]   = useState(false);
 
   const loadData = async () => {
-    setError(null);
     try {
       const [jobsRes, dlqRes] = await Promise.all([
         api.getJobs({ status: 'failed', limit: 50 }),
@@ -49,6 +52,7 @@ export function HealthPage() {
       ]);
       setFailedJobs(jobsRes.jobs);
       setDlqMessages(dlqRes.messages);
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load health data.');
     } finally {
@@ -57,11 +61,7 @@ export function HealthPage() {
     }
   };
 
-  useEffect(() => {
-    loadData();
-    const timer = setInterval(loadData, 30_000);
-    return () => clearInterval(timer);
-  }, []);
+  usePolling(loadData, 30_000);
 
   const handleReplayDlq = async (leaseIds: string[]) => {
     if (processing) return;
@@ -98,89 +98,48 @@ export function HealthPage() {
   const thCls = 'px-4 py-3 text-left text-[10px] font-bold uppercase tracking-wider text-muted-foreground';
   const tdCls = 'px-4 py-3.5 text-sm';
 
+  const stats = [
+    {
+      icon: ShieldAlert,
+      label: 'Dead Letter Queue',
+      value: loadingDlq ? null : dlqMessages.length,
+    },
+    {
+      icon: ServerCrash,
+      label: 'Failed jobs',
+      value: loadingJobs ? null : failedJobs.length,
+    },
+  ];
+
   return (
     <section className="page-enter flex flex-col gap-6">
 
-      {/* Header */}
-      <header className="flex items-end justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">
-            Monitoring
-          </p>
-          <h1
-            className="text-2xl font-bold text-foreground"
-            style={{ letterSpacing: '-0.025em' }}
+      <PageHeader
+        category="Monitoring"
+        title="System health"
+        description={<HealthPill ok={allOk} />}
+        actions={
+          <Button
+            id="health-refresh-btn"
+            variant="outline"
+            size="sm"
+            onClick={loadData}
+            disabled={loadingJobs || loadingDlq}
+            className="gap-2"
           >
-            System health
-          </h1>
-          <div className="mt-2">
-            <HealthPill ok={allOk} />
-          </div>
-        </div>
-        <Button
-          id="health-refresh-btn"
-          variant="outline"
-          size="sm"
-          onClick={loadData}
-          disabled={loadingJobs || loadingDlq}
-          className="gap-2"
-        >
-          <RefreshCw
-            size={13}
-            className={(loadingJobs || loadingDlq) ? 'animate-spin' : ''}
-          />
-          Refresh
-        </Button>
-      </header>
+            <RefreshCw
+              size={13}
+              className={(loadingJobs || loadingDlq) ? 'animate-spin' : ''}
+            />
+            Refresh
+          </Button>
+        }
+      />
 
-      {/* Summary strip */}
-      <div className="surface grid grid-cols-2 divide-x divide-border">
-        {[
-          {
-            icon: ShieldAlert,
-            label: 'Dead Letter Queue',
-            count: dlqMessages.length,
-            ok: dlqOk,
-            loading: loadingDlq,
-          },
-          {
-            icon: ServerCrash,
-            label: 'Failed jobs',
-            count: failedJobs.length,
-            ok: failedOk,
-            loading: loadingJobs,
-          },
-        ].map(({ icon: Icon, label, count, ok, loading }) => (
-          <div key={label} className="flex items-center gap-4 px-6 py-4">
-            <div
-              className="flex h-10 w-10 items-center justify-center rounded-lg shrink-0"
-              style={ok
-                ? { background: 'var(--success-bg)', color: 'var(--success)' }
-                : { background: 'var(--danger-bg)',  color: 'var(--danger)' }
-              }
-            >
-              {ok
-                ? <CheckCircle2 size={18} strokeWidth={2} />
-                : <Icon size={18} strokeWidth={2} />
-              }
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground font-medium">{label}</p>
-              <p className="text-xl font-bold text-foreground mt-0.5" style={{ letterSpacing: '-0.03em' }}>
-                {loading ? '—' : count}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
+      <StatsGrid items={stats} columns={2} />
 
       {error && (
-        <div
-          className="rounded-md border px-4 py-3 text-sm"
-          style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">{error}</Alert>
       )}
 
       {/* ── DLQ section ── */}

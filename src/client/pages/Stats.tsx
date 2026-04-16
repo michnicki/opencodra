@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '@client/lib/api';
 import type { StatsPayload } from '@shared/schema';
 import {
@@ -8,16 +8,16 @@ import {
 } from 'recharts';
 import { TrendingUp, CheckCircle2, Cpu, Terminal, Activity, ArrowUpRight, MessageSquare } from 'lucide-react';
 import { TimeRangeSelect } from '@client/components/time-range-select';
+import { PageHeader } from '@client/components/page-header';
+import { StatsGrid } from '@client/components/stats-grid';
+import { usePolling } from '@client/hooks/use-polling';
+import { useIsDarkMode } from '@client/hooks/use-is-dark-mode';
+import { fmtNumber } from '@client/lib/utils';
+import { Alert } from '@client/components/ui/alert';
 
 /* ── Emerald palette (static — needed for SVG attributes) ── */
 const EM      = '#10b981'; // emerald-500
 const EM_DARK = '#34d399'; // emerald-400 (for dark mode charts)
-
-function fmt(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
-  return n.toLocaleString();
-}
 
 const VERDICT_COLORS = {
   approve:         EM,
@@ -25,7 +25,6 @@ const VERDICT_COLORS = {
   request_changes: '#f87171',
   none:            '#6b7280',
 };
-const MODEL_HUES = [155, 45, 250, 25, 295];
 
 /* ── Custom tooltip ── */
 const ChartTooltip = ({ active, payload, label }: any) => {
@@ -48,38 +47,16 @@ const ChartTooltip = ({ active, payload, label }: any) => {
 const axisProps = {
   fontSize: 10,
   tickLine: false,
+  tickMargin: 8,
   axisLine: false,
   tick: { fontFamily: 'var(--font-sans)', fill: 'var(--muted-foreground)' } as const,
 };
 
-/* ── Scorecard strip ── */
-function KpiStrip({ stats }: { stats: StatsPayload }) {
-  const items = [
-    { icon: Activity,       label: 'Reviews',       value: fmt(stats.totals.jobs) },
-    { icon: ArrowUpRight,   label: 'Input tokens',  value: fmt(stats.totals.inputTokens) },
-    { icon: Cpu,            label: 'Output tokens', value: fmt(stats.totals.outputTokens) },
-    { icon: MessageSquare,  label: 'Comments',      value: fmt(stats.totals.comments) },
-  ];
-
-  return (
-    <div className="surface grid grid-cols-4 divide-x divide-border">
-      {items.map(({ icon: Icon, label, value }, i) => (
-        <div key={i} className="flex flex-col gap-2.5 px-6 py-5">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <Icon size={13} strokeWidth={1.75} />
-            <span className="stat-label">{label}</span>
-          </div>
-          <p className="stat-number">{value}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /* ══════════════════════════════════════════════════════════
    EVIL Chart: Full-width Area — 30-day review volume
+   (Renamed to AreaVolumeChart for clarity)
 ══════════════════════════════════════════════════════════ */
-function EvilAreaChart({ data, isDark, days }: { data: { day: string; jobs: number }[]; isDark: boolean; days: number }) {
+function AreaVolumeChart({ data, isDark, days }: { data: { day: string; jobs: number }[]; isDark: boolean; days: number }) {
   const color = isDark ? EM_DARK : EM;
   return (
     <div className="chart-card">
@@ -121,10 +98,11 @@ function EvilAreaChart({ data, isDark, days }: { data: { day: string; jobs: numb
               dataKey="day"
               {...axisProps}
               tickFormatter={(v) => {
-                const [, m, d] = v.split('-');
-                return `${m}/${d}`;
+                const parts = v.split('-');
+                if (parts.length < 3) return v;
+                return `${parts[1]}/${parts[2]}`;
               }}
-              interval={4}
+              interval={Math.ceil(days / 8)}
             />
             <YAxis {...axisProps} />
             <Tooltip
@@ -157,7 +135,7 @@ function EvilAreaChart({ data, isDark, days }: { data: { day: string; jobs: numb
 /* ══════════════════════════════════════════════════════════
    EVIL Chart: Bar — language models
 ══════════════════════════════════════════════════════════ */
-function EvilBarChart({
+function ModelsBarChart({
   models, isDark,
 }: {
   models: StatsPayload['models'];
@@ -235,7 +213,7 @@ function CustomLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }: an
   );
 }
 
-function EvilDonut({ verdictData }: { verdictData: { name: string; value: number; color: string }[] }) {
+function VerdictDonut({ verdictData }: { verdictData: { name: string; value: number; color: string }[] }) {
   return (
     <div className="chart-card flex flex-col">
       <div className="chart-card-inner" />
@@ -349,39 +327,43 @@ function TopRepos({ repos }: { repos: StatsPayload['topRepos'] }) {
 export function StatsPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isDark, setIsDark] = useState(false);
   const [days, setDays] = useState(30);
 
-  useEffect(() => {
-    setIsDark(document.documentElement.classList.contains('dark'));
-    const obs = new MutationObserver(() => {
-      setIsDark(document.documentElement.classList.contains('dark'));
-    });
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    return () => obs.disconnect();
-  }, []);
+  const isDark = useIsDarkMode();
 
-  useEffect(() => {
-    api.getStats(days)
-      .then((r) => setStats(r.stats))
-      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load stats.'));
-  }, [days]);
+  const load = async () => {
+    try {
+      const res = await api.getStats(days);
+      setStats(res.stats);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load stats.');
+    }
+  };
+
+  usePolling(load, 30_000, [days]);
 
   if (!stats) {
     return (
       <section className="page-enter flex flex-col gap-6">
-        <header>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">Analytics</p>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground" style={{ letterSpacing: '-0.025em' }}>
-            System insights
-          </h1>
-        </header>
-        <div className="surface px-5 py-4 text-sm text-muted-foreground">
-          {error ?? 'Loading…'}
-        </div>
+        <PageHeader category="Analytics" title="System insights" />
+        {error ? (
+          <Alert variant="destructive">{error}</Alert>
+        ) : (
+          <div className="surface px-5 py-4 text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
       </section>
     );
   }
+
+  const kpiItems = [
+    { icon: Activity,       label: 'Reviews',       value: fmtNumber(stats.totals.jobs) },
+    { icon: ArrowUpRight,   label: 'Input tokens',  value: fmtNumber(stats.totals.inputTokens) },
+    { icon: Cpu,            label: 'Output tokens', value: fmtNumber(stats.totals.outputTokens) },
+    { icon: MessageSquare,  label: 'Comments',      value: fmtNumber(stats.totals.comments) },
+  ];
 
   const verdictData = stats.verdicts
     .map((v) => ({
@@ -394,35 +376,23 @@ export function StatsPage() {
   return (
     <section className="page-enter flex flex-col gap-5">
 
-      {/* Header */}
-      <header className="flex items-end justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">Analytics</p>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground" style={{ letterSpacing: '-0.025em' }}>
-            System insights
-          </h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <TimeRangeSelect 
-            value={days}
-            onValueChange={setDays}
-          />
-        </div>
-      </header>
+      <PageHeader 
+        category="Analytics" 
+        title="System insights" 
+        actions={
+          <TimeRangeSelect value={days} onValueChange={setDays} />
+        }
+      />
       
-      {/* KPI strip */}
-      <KpiStrip stats={stats} />
+      <StatsGrid items={kpiItems} />
 
-      {/* Full-width area chart */}
-      <EvilAreaChart data={stats.trend} isDark={isDark} days={days} />
+      <AreaVolumeChart data={stats.trend} isDark={isDark} days={days} />
 
-      {/* Row 2: bar + donut */}
       <div className="grid grid-cols-2 gap-5">
-        <EvilBarChart models={stats.models} isDark={isDark} />
-        <EvilDonut verdictData={verdictData} />
+        <ModelsBarChart models={stats.models} isDark={isDark} />
+        <VerdictDonut verdictData={verdictData} />
       </div>
 
-      {/* Repos (spans full width if single, half if side-by-side) */}
       {stats.topRepos.length > 0 && <TopRepos repos={stats.topRepos} />}
 
     </section>
