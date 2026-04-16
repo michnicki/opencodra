@@ -72,9 +72,9 @@
       "GITHUB_APP_WEBHOOK_SECRET",
       "GEMINI_API_KEY",
       "NEON_DATABASE_URL",
-      "DASHBOARD_PASSWORD"
-      // CF_API_TOKEN and CF_ACCOUNT_ID are optional — only needed for /api/dlq
-      // inspection & replay. Add them via `wrangler secret put` if you need DLQ tools.
+      "DASHBOARD_PASSWORD",
+      "CF_API_TOKEN",
+      "CF_ACCOUNT_ID"
     ]
   },
   // Non-sensitive config only. Put credentials in Worker secrets, not here.
