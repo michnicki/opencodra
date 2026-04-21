@@ -36,7 +36,7 @@ export function AppShell() {
       >
 
         <Link to="/dashboard" className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-4 transition-colors hover:bg-secondary/50">
-          {/* Emerald icon mark */}
+          {/* Lime icon mark */}
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary shadow-sm">
             <Zap size={14} className="text-primary-foreground" strokeWidth={2.5} />
           </div>

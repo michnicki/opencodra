@@ -2,9 +2,11 @@ import { FormEvent, useState } from 'react';
 import { api } from '@client/lib/api';
 import { Button } from '@client/components/ui/button';
 import { Input } from '@client/components/ui/input';
-import { Zap } from 'lucide-react';
+import { Zap, Sun, Moon } from 'lucide-react';
+import { useTheme } from '@client/lib/theme';
 
 export function LoginPage() {
+  const { theme, toggleTheme } = useTheme();
   const [password, setPassword] = useState('');
   const [pending, setPending]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
@@ -24,7 +26,16 @@ export function LoginPage() {
   }
 
   return (
-    <div className="min-h-svh flex items-center justify-center bg-background p-6">
+    <div className="min-h-svh flex items-center justify-center bg-background p-6 relative">
+      
+      {/* Floating theme toggle */}
+      <button
+        onClick={toggleTheme}
+        className="fixed top-6 right-6 flex h-10 w-10 items-center justify-center rounded-full border border-border bg-card shadow-sm hover:bg-secondary transition-colors z-50 text-muted-foreground hover:text-foreground"
+        aria-label="Toggle theme"
+      >
+        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
 
       {/* Ambient background */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
