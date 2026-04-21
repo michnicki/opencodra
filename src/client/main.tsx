@@ -13,6 +13,8 @@ import { SettingsPage } from './pages/Settings';
 import { NotFoundPage } from './pages/NotFound';
 import './app.css';
 
+import { ThemeProvider } from './lib/theme';
+
 const router = createBrowserRouter([
   {
     path: '/',
@@ -41,6 +43,8 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <ThemeProvider>
+      <RouterProvider router={router} />
+    </ThemeProvider>
   </React.StrictMode>,
 );

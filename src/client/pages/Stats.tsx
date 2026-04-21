@@ -15,12 +15,12 @@ import { useIsDarkMode } from '@client/hooks/use-is-dark-mode';
 import { fmtNumber } from '@client/lib/utils';
 import { Alert } from '@client/components/ui/alert';
 
-/* ── Emerald palette (static — needed for SVG attributes) ── */
-const EM      = '#10b981'; // emerald-500
-const EM_DARK = '#34d399'; // emerald-400 (for dark mode charts)
+/* ── Lime palette (static — needed for SVG attributes) ── */
+const LM      = '#84cc16'; // legible lime for light mode
+const LM_DARK = '#E0FE56'; // high-contrast lime
 
 const VERDICT_COLORS = {
-  approve:         EM,
+  approve:         LM,
   comment:         '#f59e0b',
   request_changes: '#f87171',
   none:            '#6b7280',
@@ -57,7 +57,7 @@ const axisProps = {
    (Renamed to AreaVolumeChart for clarity)
 ══════════════════════════════════════════════════════════ */
 function AreaVolumeChart({ data, isDark, days }: { data: { day: string; jobs: number }[]; isDark: boolean; days: number }) {
-  const color = isDark ? EM_DARK : EM;
+  const color = isDark ? LM_DARK : LM;
   return (
     <div className="chart-card">
       <div className="chart-card-inner" />
@@ -141,7 +141,7 @@ function ModelsBarChart({
   models: StatsPayload['models'];
   isDark: boolean;
 }) {
-  const color = isDark ? EM_DARK : EM;
+  const color = isDark ? LM_DARK : LM;
   const chartData = models.map((m) => ({
     name: m.modelUsed.split('/').pop() ?? m.modelUsed,
     calls: m.calls,
@@ -308,8 +308,8 @@ function TopRepos({ repos }: { repos: StatsPayload['topRepos'] }) {
                   className="h-full rounded-full transition-all duration-700"
                   style={{
                     width: `${pct}%`,
-                    background: `linear-gradient(to right, ${EM}, oklch(72% 0.18 155))`,
-                    boxShadow: `0 0 6px ${EM}80`,
+                    background: `linear-gradient(to right, ${LM}, ${LM_DARK})`,
+                    boxShadow: `0 0 12px ${LM_DARK}90`,
                   }}
                 />
               </div>
