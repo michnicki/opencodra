@@ -16,7 +16,7 @@
 :root {
   /* Surfaces - Pure & Crisp */
   /* Surfaces - High-Contrast */
-  --background:         oklch(99%   0.005 115);
+  --background:         oklch(100%  0 0);
   --foreground:         oklch(12%   0.02  115);
   --card:               oklch(100%  0 0);
   --card-foreground:    oklch(12%   0.02  115);
@@ -218,9 +218,7 @@
     position: fixed;
     inset: 0;
     z-index: -1;
-    background:
-      radial-gradient(ellipse 70% 50% at 0% 0%,   oklch(96% 0.12 115 / 0.25), transparent 65%),
-      radial-gradient(ellipse 55% 40% at 100% 100%, oklch(90% 0.05 115 / 0.08), transparent 60%);
+    background: none;
     transition: opacity 0.4s;
   }
 

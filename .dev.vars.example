@@ -1,9 +1,12 @@
 APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nreplace-with-your-github-app-private-key\n-----END PRIVATE KEY-----"
 GITHUB_APP_ID="123456"
 GITHUB_APP_WEBHOOK_SECRET="replace-with-your-webhook-secret"
+GITHUB_CLIENT_ID="replace-with-your-dashboard-oauth-client-id"
+GITHUB_CLIENT_SECRET="replace-with-your-dashboard-oauth-client-secret"
+AUTH_CALLBACK_URL="http://127.0.0.1:8787/auth/github/callback"
+DASHBOARD_ALLOWED_USERS="devarshishimpi"
 GEMINI_API_KEY="replace-with-your-gemini-api-key"
 NEON_DATABASE_URL="postgresql://user:password@your-endpoint-pooler.region.aws.neon.tech/dbname?sslmode=require&channel_binding=require"
-DASHBOARD_PASSWORD="replace-with-a-strong-dashboard-password"
 # Optional: required only for DLQ inspection/replay via /api/dlq
 # Generate at https://dash.cloudflare.com/profile/api-tokens (Queues:Edit permission)
 CF_API_TOKEN="replace-with-cloudflare-api-token"

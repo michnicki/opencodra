@@ -9,6 +9,7 @@ export default defineConfig({
       '@server': resolve(__dirname, './src/server'),
       '@client': resolve(__dirname, './src/client'),
       '@shared': resolve(__dirname, './src/shared'),
+      '@': resolve(__dirname, './src/client'),
     },
   },
   test: {

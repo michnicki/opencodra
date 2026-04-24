@@ -1,16 +1,25 @@
 import type { JobDetail, JobSummary, RepoConfigRecord, StatsPayload } from './schema';
 
-export type ApiErrorPayload = {
-  error: string;
+export type AuthSessionUser = {
+  githubUserId: number;
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+  email: string | null;
+  signedInAt: string;
 };
 
-export type LoginPayload = {
-  password: string;
+export type ApiErrorPayload = {
+  error: string;
 };
 
 export type JobsResponse = {
   jobs: JobSummary[];
   total: number;
+};
+
+export type AuthSessionResponse = {
+  user: AuthSessionUser;
 };
 
 export type JobDetailResponse = {

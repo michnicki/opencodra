@@ -2,17 +2,18 @@
  * @vitest-environment jsdom
  */
 import { expect, it, describe, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { LoginPage } from '@client/pages/Login';
 import { DashboardPage } from '@client/pages/Dashboard';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '@client/lib/api';
+import { ThemeProvider } from '@client/lib/theme';
 import React from 'react';
 
 // Mock the API client
 vi.mock('@client/lib/api', () => ({
   api: {
-    login: vi.fn(),
+    getSession: vi.fn(),
     getStats: vi.fn(),
     getJobs: vi.fn(),
   }
@@ -24,31 +25,17 @@ describe('Frontend UI Flows (JSDOM)', () => {
     vi.clearAllMocks();
   });
 
-  it('completes the login flow', async () => {
-    vi.mocked(api.login).mockResolvedValue({ ok: true });
-    
-    // We mock location change
-    const originalLocation = window.location;
-    delete (window as any).location;
-    window.location = { ...originalLocation, href: '' } as any;
-
+  it('renders the GitHub sign-in flow', async () => {
     render(
-      <MemoryRouter>
-        <LoginPage />
-      </MemoryRouter>
+      <ThemeProvider>
+        <MemoryRouter>
+          <LoginPage />
+        </MemoryRouter>
+      </ThemeProvider>
     );
 
-    const passwordInput = screen.getByPlaceholderText('Dashboard password');
-    const submitBtn = screen.getByText('Sign in');
-
-    fireEvent.change(passwordInput, { target: { value: 'correct-password' } });
-    fireEvent.click(submitBtn);
-
-    await waitFor(() => {
-        expect(api.login).toHaveBeenCalledWith({ password: 'correct-password' });
-    });
-    
-    expect(window.location.href).toBe('/dashboard');
+    const signInLink = screen.getByRole('link', { name: 'Sign in with GitHub' });
+    expect(signInLink.getAttribute('href')).toBe('/auth/github');
   });
 
   it('displays the dashboard with stats and activity', async () => {

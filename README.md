@@ -53,8 +53,8 @@ What the deploy button does not provision for you:
 
 - your Neon database
 - GitHub App credentials
+- GitHub OAuth app credentials
 - Gemini API key
-- dashboard password
 
 That means the deploy flow is best thought of as "Cloudflare infrastructure bootstrap", followed by a short secrets setup step.
 
@@ -67,9 +67,10 @@ Codra expects these secrets in Cloudflare production and in local `.dev.vars` fo
 - `APP_PRIVATE_KEY`
 - `GITHUB_APP_ID`
 - `GITHUB_APP_WEBHOOK_SECRET`
+- `GITHUB_CLIENT_ID`
+- `GITHUB_CLIENT_SECRET`
 - `GEMINI_API_KEY`
 - `NEON_DATABASE_URL`
-- `DASHBOARD_PASSWORD`
 
 Optional, only for DLQ inspection and replay APIs:
 
@@ -77,6 +78,20 @@ Optional, only for DLQ inspection and replay APIs:
 - `CF_ACCOUNT_ID`
 
 The expected local shape is already documented in [`.dev.vars.example`](/C:/Users/devar/Dropbox/Documents/GitHub/codra/.dev.vars.example).
+
+In the checked-in production Wrangler config, these values are regular environment vars rather than secrets:
+
+- `AUTH_CALLBACK_URL`
+- `DASHBOARD_ALLOWED_USERS`
+
+## Dashboard Auth
+
+Codra now uses GitHub OAuth for dashboard access instead of a shared password. The main deployment only accepts GitHub users listed in `DASHBOARD_ALLOWED_USERS`.
+
+Production setup requires:
+
+- one GitHub OAuth App for the dashboard
+- the existing GitHub App for webhook/check/review automation
 
 ## Neon Postgres Setup
 

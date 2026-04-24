@@ -14,6 +14,22 @@ process.env.TEST_DATABASE_URL = 'postgresql://neondb_owner:npg_SZg5DNCBdl0T@ep-t
 // Standard test timeout
 vi.setConfig({ testTimeout: 20000 });
 
+if (typeof window !== 'undefined' && !window.matchMedia) {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (query: string) => ({
+      matches: query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }),
+  });
+}
+
 // Global cleanup for database tables (Disabled temporarily to debug race conditions)
 /*
 beforeEach(async () => {
