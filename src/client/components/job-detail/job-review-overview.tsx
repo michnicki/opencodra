@@ -23,10 +23,10 @@ export function JobReviewOverview({ job }: JobReviewOverviewProps) {
   const renderSummary = () => {
     if (!job.summaryMarkdown) return '';
     let content = job.summaryMarkdown.replace(/^(✅ \*\*Approved\*\*|💬 \*\*Comments posted\*\*)\n\n/, '').trim();
-    if (content.startsWith('### 💡 Codra Review')) return content;
+    if (content.startsWith('### 💡 Codra Review') || content.includes('Codra Review')) return content;
     
     const shortSha = job.commitSha.slice(0, 10);
-    return `### 💡 Codra Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About Codra</summary>\n\n<br/>\n\n[Your team has set up Codra to review pull requests in this repo](https://codra.devarshi.dev/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf Codra has suggestions, it will comment; otherwise it will react with 👍.\n\nCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
+    return `### <picture><source media="(prefers-color-scheme: dark)" srcset="https://codra.devarshi.dev/icons/codra-icon-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://codra.devarshi.dev/icons/codra-icon-light.svg"><img src="https://codra.devarshi.dev/icons/codra-icon-light.svg" alt="Codra Icon" width="20" height="20" style="vertical-align: middle;"></picture> Codra Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About Codra</summary>\n\n<br/>\n\n[Your team has set up Codra to review pull requests in this repo](https://codra.devarshi.dev/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf Codra has suggestions, it will comment; otherwise it will react with 👍.\n\nCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
   };
 
   return (

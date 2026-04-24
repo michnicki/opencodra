@@ -2,8 +2,10 @@ import { FormEvent, useState } from 'react';
 import { api } from '@client/lib/api';
 import { Button } from '@client/components/ui/button';
 import { Input } from '@client/components/ui/input';
-import { Zap, Sun, Moon } from 'lucide-react';
+import { Sun, Moon } from 'lucide-react';
 import { useTheme } from '@client/lib/theme';
+import codraDark from '@/assets/codra-fullicon-dark.svg';
+import codraLight from '@/assets/codra-fullicon-light.svg';
 
 export function LoginPage() {
   const { theme, toggleTheme } = useTheme();
@@ -59,20 +61,11 @@ export function LoginPage() {
           {/* Brand */}
           <div className="flex flex-col gap-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary shadow-md">
-                <Zap size={18} className="text-primary-foreground" strokeWidth={2.5} />
-              </div>
-              <div className="flex items-baseline gap-1.5">
-                <span
-                  className="text-xl font-bold text-foreground"
-                  style={{ letterSpacing: '-0.025em' }}
-                >
-                  Codra
-                </span>
-                <span className="text-[9px] font-bold uppercase tracking-widest text-primary/60">
-                  review
-                </span>
-              </div>
+              <img 
+                src={theme === 'dark' ? codraDark : codraLight} 
+                alt="Codra" 
+                className="h-9 w-auto" 
+              />
             </div>
             <p className="text-sm text-muted-foreground leading-relaxed">
               PR review control panel. Sign in with the shared dashboard password.

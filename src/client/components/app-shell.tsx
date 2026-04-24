@@ -8,12 +8,13 @@ import {
   LogOut,
   Sun,
   Moon,
-  Zap,
   Activity,
   Settings,
 } from 'lucide-react';
 import { cn } from '@client/lib/utils';
 import { useTheme } from '@client/lib/theme';
+import codraDark from '@/assets/codra-fullicon-dark.svg';
+import codraLight from '@/assets/codra-fullicon-light.svg';
 
 const links = [
   { to: '/dashboard', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -35,22 +36,12 @@ export function AppShell() {
         className="fixed inset-y-0 left-0 z-30 flex flex-col glass border-r border-border transition-colors duration-300"
       >
 
-        <Link to="/dashboard" className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-4 transition-colors hover:bg-secondary/50">
-          {/* Lime icon mark */}
-          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary shadow-sm">
-            <Zap size={14} className="text-primary-foreground" strokeWidth={2.5} />
-          </div>
-          <div className="flex items-baseline gap-1">
-            <span
-              className="text-[15px] font-bold text-foreground tracking-tight"
-              style={{ letterSpacing: '-0.02em' }}
-            >
-              Codra
-            </span>
-            <span className="text-[9px] font-semibold uppercase tracking-widest text-primary/60">
-              review
-            </span>
-          </div>
+        <Link to="/dashboard" className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4 transition-colors hover:bg-secondary/50">
+          <img 
+            src={theme === 'dark' ? codraDark : codraLight} 
+            alt="Codra" 
+            className="h-7 w-auto" 
+          />
         </Link>
 
         {/* Navigation */}

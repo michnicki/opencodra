@@ -63,7 +63,7 @@ export class FormatterService {
   formatReviewOverview(commitSha: string, botUsername: string) {
     const shortSha = commitSha.slice(0, 10);
     
-    return `### 💡 Codra Review
+    return `### <picture><source media="(prefers-color-scheme: dark)" srcset="https://codra.devarshi.dev/icons/codra-icon-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://codra.devarshi.dev/icons/codra-icon-light.svg"><img src="https://codra.devarshi.dev/icons/codra-icon-light.svg" alt="Codra Icon" width="20" height="20" style="vertical-align: middle;"></picture> Codra Review
 
 Here are some automated review suggestions for this pull request.
 
