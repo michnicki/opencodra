@@ -1,4 +1,5 @@
 import { NavLink, Outlet, Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 import { api } from '@client/lib/api';
 import {
   LayoutDashboard,
@@ -15,6 +16,7 @@ import { cn } from '@client/lib/utils';
 import { useTheme } from '@client/lib/theme';
 import codraDark from '@/assets/codra-fullicon-dark.svg';
 import codraLight from '@/assets/codra-fullicon-light.svg';
+import type { AuthSessionUser } from '@shared/api';
 
 const links = [
   { to: '/dashboard', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -26,6 +28,27 @@ const links = [
 
 export function AppShell() {
   const { theme, toggleTheme } = useTheme();
+  const [sessionUser, setSessionUser] = useState<AuthSessionUser | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api.getSession()
+      .then((response) => {
+        if (!cancelled) {
+          setSessionUser(response.user);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSessionUser(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="flex min-h-svh bg-background">
@@ -81,6 +104,16 @@ export function AppShell() {
 
         {/* Footer */}
         <div className="shrink-0 border-t border-border p-2.5">
+          {sessionUser && (
+            <div className="mb-2 rounded-xl border border-border/60 bg-background/60 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+                Signed In
+              </p>
+              <p className="mt-1 truncate text-sm font-medium text-foreground">
+                @{sessionUser.login}
+              </p>
+            </div>
+          )}
           <div className="flex flex-col gap-0.5">
             <button
               id="theme-toggle"

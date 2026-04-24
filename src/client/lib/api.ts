@@ -1,8 +1,8 @@
 import type {
+  AuthSessionResponse,
   DlqResponse,
   JobDetailResponse,
   JobsResponse,
-  LoginPayload,
   ModelConfigsResponse,
   RepoConfigResponse,
   RepoConfigsResponse,
@@ -41,11 +41,8 @@ async function request<T>(input: string, init?: RequestInit) {
 }
 
 export const api = {
-  login(payload: LoginPayload) {
-    return request<{ ok: boolean }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+  getSession() {
+    return request<AuthSessionResponse>('/api/auth/session');
   },
   logout() {
     return request<{ ok: boolean }>('/auth/logout', {

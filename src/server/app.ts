@@ -5,6 +5,7 @@ import { requireSession } from '@server/middleware/auth';
 import { observability } from '@server/middleware/observability';
 import { createAuthRouter } from '@server/routes/auth';
 import { createWebhookRouter } from '@server/routes/webhook';
+import { createAuthApiRouter } from '@server/routes/api/auth';
 import { createJobsRouter } from '@server/routes/api/jobs';
 import { createReposRouter } from '@server/routes/api/repos';
 import { createStatsRouter } from '@server/routes/api/stats';
@@ -26,6 +27,7 @@ export function createApp() {
   app.use('/api/*', requireSession);
   app.use('/auth/logout', requireSession);
 
+  app.route('/api/auth', createAuthApiRouter());
   app.route('/api/jobs', createJobsRouter());
   app.route('/api/repos', createReposRouter());
   app.route('/api/stats', createStatsRouter());

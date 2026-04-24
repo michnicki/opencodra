@@ -2,13 +2,13 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "codra",
   "main": "./src/server/index.ts",
-  "compatibility_date": "2026-04-11",
+  "compatibility_date": "2026-04-21",
   "compatibility_flags": [
     "nodejs_compat"
   ],
   "routes": [
     {
-      "pattern": "codra.devarshi.dev",
+      "pattern": "app.codra.devarshi.dev",
       "custom_domain": true
     }
   ],
@@ -72,15 +72,18 @@
       "APP_PRIVATE_KEY",
       "GITHUB_APP_ID",
       "GITHUB_APP_WEBHOOK_SECRET",
+      "GITHUB_CLIENT_ID",
+      "GITHUB_CLIENT_SECRET",
       "GEMINI_API_KEY",
       "NEON_DATABASE_URL",
-      "DASHBOARD_PASSWORD",
       "CF_API_TOKEN",
       "CF_ACCOUNT_ID"
     ]
   },
   "vars": {
+    "AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/github/callback",
     "BOT_USERNAME": "codra-app",
+    "DASHBOARD_ALLOWED_USERS": "devarshishimpi",
     "ENVIRONMENT": "production"
   }
 }
