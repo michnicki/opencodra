@@ -1,6 +1,11 @@
-import { Zap, GitBranch } from 'lucide-react';
+import { GitBranch } from 'lucide-react';
+import { useTheme } from '@client/lib/theme';
+import codraDark from '@/assets/codra-fullicon-dark.svg';
+import codraLight from '@/assets/codra-fullicon-light.svg';
 
 export function Footer() {
+  const { theme } = useTheme();
+
   return (
     <footer className="border-t border-border/30 py-10">
       <div className="container mx-auto px-6 md:px-10">
@@ -8,11 +13,13 @@ export function Footer() {
 
           {/* Brand */}
           <div className="flex items-center gap-2">
-            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/15">
-              <Zap size={11} className="text-primary" />
-            </div>
-            <span className="text-sm font-semibold text-foreground">Codra</span>
-            <span className="text-[10px] text-muted-foreground/40 font-medium">· MIT License</span>
+            <img 
+              src={theme === 'dark' ? codraDark : codraLight} 
+              alt="Codra" 
+              className="h-6 w-auto" 
+            />
+            {/* Brand icon only */}
+
           </div>
 
           {/* Links */}

@@ -1,9 +1,9 @@
 # Codra
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/codra-gh-banner-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="./assets/codra-gh-banner-light.svg">
-  <img alt="Codra banner" src="./assets/codra-gh-banner-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="./public/assets/codra-gh-banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="./public/assets/codra-gh-banner-light.svg">
+  <img alt="Codra banner" src="./public/assets/codra-gh-banner-light.svg">
 </picture>
 
 Open source PR review infrastructure for Cloudflare Workers.
@@ -138,3 +138,14 @@ model:
     - "gemma-3-27b"
     - "@cf/zai-org/glm-4.7-flash"
 ```
+
+## License
+
+Codra is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+
+### What this means:
+- **Keep it Open**: If you modify Codra and host it as a service (SaaS), you **must** make your modified source code available to your users.
+- **Hosted Version**: The maintainer (Devarshi Shimpi) reserves the right to provide a separate, proprietary hosted version of Codra.
+- **Contributions**: By contributing to this repository, you agree that your contributions will be licensed under the same AGPL-3.0 license.
+
+See the [LICENSE](LICENSE) file for the full text.

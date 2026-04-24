@@ -6,15 +6,19 @@ export function CTA() {
   return (
     <section className="pt-0 pb-16">
       <div className="container mx-auto px-6">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center border-t border-border/60 pt-14">
-
+        <div
+          data-reveal
+          className="reveal-on-scroll grid grid-cols-1 lg:grid-cols-12 gap-8 items-center border-t border-border/60 pt-14"
+        >
           {/* Left: raw, editorial heading */}
           <div className="lg:col-span-7">
             <p className="text-[10px] font-black uppercase tracking-[0.3em] text-primary mb-4">
-              Open Source · MIT License
+              Open Source
             </p>
-            <h2 className="text-3xl lg:text-4xl font-black tracking-tight text-foreground leading-[0.9] mb-0"
-              style={{ letterSpacing: '-0.03em' }}>
+            <h2
+              className="text-3xl lg:text-4xl font-black tracking-tight text-foreground leading-[0.9] mb-0"
+              style={{ letterSpacing: '-0.03em' }}
+            >
               IT'S YOUR CODE.<br />
               <span className="text-muted-foreground/50">OWN THE REVIEWER TOO.</span>
             </h2>
@@ -27,12 +31,35 @@ export function CTA() {
             </p>
             <div className="flex flex-col sm:flex-row gap-3">
               <Link to="/login">
-                <Button size="lg" className="h-11 px-7 text-sm font-black gap-2 transition-all hover:scale-[1.03] active:scale-95 whitespace-nowrap">
+                <Button
+                  size="lg"
+                  className="h-11 px-7 text-sm font-black gap-2 whitespace-nowrap"
+                  style={{ transition: 'transform 0.15s var(--ease-out-quart), box-shadow 0.2s' }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.transform = 'scale(1.04)';
+                    e.currentTarget.style.boxShadow = '0 8px 24px color-mix(in oklch, var(--primary) 28%, transparent)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.transform = 'scale(1)';
+                    e.currentTarget.style.boxShadow = '';
+                  }}
+                  onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.96)')}
+                  onMouseUp={e => (e.currentTarget.style.transform = 'scale(1.04)')}
+                >
                   Deploy to your Org <ArrowRight size={15} strokeWidth={3} />
                 </Button>
               </Link>
               <a href="https://github.com/devarshishimpi/codra" target="_blank" rel="noopener noreferrer">
-                <Button variant="outline" size="lg" className="h-11 px-6 text-sm font-semibold whitespace-nowrap">
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="h-11 px-6 text-sm font-semibold whitespace-nowrap"
+                  style={{ transition: 'transform 0.15s var(--ease-out-quart), border-color 0.2s' }}
+                  onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.03)')}
+                  onMouseLeave={e => (e.currentTarget.style.transform = 'scale(1)')}
+                  onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.97)')}
+                  onMouseUp={e => (e.currentTarget.style.transform = 'scale(1.03)')}
+                >
                   Read the Docs
                 </Button>
               </a>
@@ -41,7 +68,6 @@ export function CTA() {
               Cloudflare-ready · Self-hosted · Community maintained
             </p>
           </div>
-
         </div>
       </div>
     </section>
