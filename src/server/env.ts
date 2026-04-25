@@ -32,6 +32,7 @@ export interface AppBindings {
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
   AUTH_CALLBACK_URL: string;
+  APP_URL: string;
   DASHBOARD_ALLOWED_USERS: string;
   GEMINI_API_KEY: string;
   NEON_DATABASE_URL: string;

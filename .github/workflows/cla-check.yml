@@ -30,7 +30,7 @@ jobs:
 
             console.log('Checking CLA signature for @' + author + '...');
 
-            const response = await fetch('https://codra.devarshi.dev/api/internal/check-cla?user=' + encodeURIComponent(author), {
+            const response = await fetch('https://codra.run/api/internal/check-cla?user=' + encodeURIComponent(author), {
               headers: {
                 'x-cla-check-secret': secret,
               },
@@ -44,7 +44,7 @@ jobs:
             const payload = await response.json();
             if (!payload.signed) {
               console.error('❌ @' + author + ' has not signed the CLA.');
-              console.error('Please visit https://codra.devarshi.dev/cla to sign.');
+              console.error('Please visit https://codra.run/cla to sign.');
               process.exit(1);
             }
 
