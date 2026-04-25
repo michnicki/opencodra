@@ -42,7 +42,7 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 
 Use the button above to clone and deploy Codra to your own Cloudflare account.
 
-Cloudflare can provision or bind the Cloudflare-native resources defined in [`wrangler.jsonc`](/C:/Users/devar/Dropbox/Documents/GitHub/codra/wrangler.jsonc), including:
+Cloudflare can provision or bind the Cloudflare-native resources defined in [`wrangler.jsonc`](/wrangler.jsonc), including:
 
 - `APP_KV`
 - `REVIEW_QUEUE`
@@ -58,7 +58,7 @@ What the deploy button does not provision for you:
 
 That means the deploy flow is best thought of as "Cloudflare infrastructure bootstrap", followed by a short secrets setup step.
 
-For this repo's own production deployment, the checked-in route and binding IDs in [`wrangler.jsonc`](/C:/Users/devar/Dropbox/Documents/GitHub/codra/wrangler.jsonc) are intentional. They are what keep `codra.devarshi.dev` deploying against the same Worker, KV namespace, and queues. If you fork Codra, replace those values with your own resources.
+For this repo's own production deployment, the checked-in route and binding IDs in [`wrangler.jsonc`](/wrangler.jsonc) are intentional. They are what keep `codra.run` deploying against the same Worker, KV namespace, and queues. If you fork Codra, replace those values with your own resources.
 
 ## Required Secrets
 
@@ -77,7 +77,7 @@ Optional, only for DLQ inspection and replay APIs:
 - `CF_API_TOKEN`
 - `CF_ACCOUNT_ID`
 
-The expected local shape is already documented in [`.dev.vars.example`](/C:/Users/devar/Dropbox/Documents/GitHub/codra/.dev.vars.example).
+The expected local shape is already documented in [`.dev.vars.example`](/.dev.vars.example).
 
 In the checked-in production Wrangler config, these values are regular environment vars rather than secrets:
 
@@ -113,7 +113,7 @@ postgresql://<user>:<password>@<endpoint>-pooler.<region>.aws.neon.tech/<db>?ssl
 
 Codra now ships with a single bootstrap migration:
 
-- [`db/migrations/001_initial.sql`](/C:/Users/devar/Dropbox/Documents/GitHub/codra/db/migrations/001_initial.sql)
+- [`db/migrations/001_initial.sql`](/db/migrations/001_initial.sql)
 
 You can run it from the Neon SQL editor or with your preferred Postgres client.
 

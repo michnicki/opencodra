@@ -1,14 +1,16 @@
 import type { ParsedReviewComment } from '@shared/schema';
 
 export class FormatterService {
+  constructor(private baseUrl: string) {}
+
   toReviewEvent(verdict: 'approve' | 'comment') {
     return verdict === 'approve' ? 'APPROVE' as const : 'COMMENT' as const;
   }
 
   severityIcon(severity: ParsedReviewComment['severity']) {
-    const baseUrl = 'https://codra.devarshi.dev/icons';
+    const iconBase = `${this.baseUrl}/icons`;
     const img = (name: string, alt: string) =>
-      `<img src="${baseUrl}/${name}-icon.svg" width="20" height="20" alt="${alt}" style="vertical-align:middle" />`;
+      `<img src="${iconBase}/${name}-icon.svg" width="20" height="20" alt="${alt}" style="vertical-align:middle" />`;
     switch (severity) {
       case 'P0':  return img('p0',  'P0');
       case 'P1':  return img('p1',  'P1');
@@ -62,8 +64,9 @@ export class FormatterService {
 
   formatReviewOverview(commitSha: string, botUsername: string) {
     const shortSha = commitSha.slice(0, 10);
+    const iconBase = `${this.baseUrl}/icons`;
     
-    return `### <picture><source media="(prefers-color-scheme: dark)" srcset="https://codra.devarshi.dev/icons/codra-icon-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://codra.devarshi.dev/icons/codra-icon-light.svg"><img src="https://codra.devarshi.dev/icons/codra-icon-light.svg" alt="Codra Icon" width="20" height="20" style="vertical-align: middle;"></picture> Codra Review
+    return `### <picture><source media="(prefers-color-scheme: dark)" srcset="${iconBase}/codra-icon-dark.svg"><source media="(prefers-color-scheme: light)" srcset="${iconBase}/codra-icon-light.svg"><img src="${iconBase}/codra-icon-light.svg" alt="Codra Icon" width="20" height="20" style="vertical-align: middle;"></picture> Codra Review
 
 Here are some automated review suggestions for this pull request.
 
@@ -74,7 +77,7 @@ Here are some automated review suggestions for this pull request.
 
 <br/>
 
-[Your team has set up Codra to review pull requests in this repo](https://codra.devarshi.dev/repos). Reviews are triggered when you:
+[Your team has set up Codra to review pull requests in this repo](${this.baseUrl}/repos). Reviews are triggered when you:
 
 - **Open** a pull request for review
 - **Mark** a draft as ready

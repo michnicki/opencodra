@@ -109,7 +109,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage) 
   const github = new GitHubService(env, job.installation_id);
   const tracker = new TokenTracker();
   const model = new ModelService(env, tracker);
-  const formatter = new FormatterService();
+  const formatter = new FormatterService(env.APP_URL);
 
   let checkRunId = job.check_run_id;
 

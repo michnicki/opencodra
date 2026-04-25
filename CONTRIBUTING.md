@@ -8,7 +8,7 @@ Thank you for your interest in contributing to Codra! We are building a high-per
 
 Before we can merge your pull request, you must sign our Contributor License Agreement. This is a quick process that takes about 10 seconds and ensures that your contributions can be included under our dual-licensing model (AGPL-3.0 for the core).
 
-- **How to sign:** Visit [codra.devarshi.dev/cla](https://codra.devarshi.dev/cla) or follow the link provided by the automated GitHub check on your PR.
+- **How to sign:** Visit [codra.run/cla](https://codra.run/cla) or follow the link provided by the automated GitHub check on your PR.
 - **Why?** It protects the project's ability to remain sustainable while staying open source.
 
 ---
