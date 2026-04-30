@@ -85,6 +85,7 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     GITHUB_CLIENT_ID: 'dashboard-client-id',
     GITHUB_CLIENT_SECRET: 'dashboard-client-secret',
     AUTH_CALLBACK_URL: 'https://codra.test/auth/github/callback',
+    APP_URL: 'https://codra.test',
     DASHBOARD_ALLOWED_USERS: 'devarshishimpi',
     GEMINI_API_KEY: 'gemini-key',
     NEON_DATABASE_URL: TEST_NEON_DB_URL,

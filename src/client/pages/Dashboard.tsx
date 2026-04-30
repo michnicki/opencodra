@@ -22,6 +22,7 @@ import { PageHeader } from '@client/components/page-header';
 import { StatsGrid } from '@client/components/stats-grid';
 import { usePolling } from '@client/hooks/use-polling';
 import { fmtNumber } from '@client/lib/utils';
+import { Alert } from '@client/components/ui/alert';
 
 const generateMockTrend = (base: number, length: number) => {
   return Array.from({ length }, (_, i) => {
@@ -36,6 +37,7 @@ export function DashboardPage() {
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [days, setDays] = useState(30);
 
@@ -48,6 +50,9 @@ export function DashboardPage() {
       ]);
       setStats(statsRes.stats);
       setRecentJobs(jobsRes.jobs);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to refresh dashboard.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -122,7 +127,7 @@ export function DashboardPage() {
               variant="outline"
               size="sm"
               onClick={() => load(true)}
-              disabled={refreshing || loading}
+              disabled={refreshing}
               className="gap-2"
             >
               <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
@@ -131,6 +136,8 @@ export function DashboardPage() {
           </>
         }
       />
+
+      {error && <Alert variant="destructive">{error}</Alert>}
 
       <StatsGrid items={kpis} />
 
@@ -217,7 +224,7 @@ export function DashboardPage() {
           {!loading && recentJobs.length > 0 && (
             <div className="px-5 py-2.5 bg-muted/20 border-t border-border/50">
               <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/40 text-center">
-                {recentJobs.length} events · auto-refreshes every 10s
+                {recentJobs.length} events · auto-refreshes every 15s
               </p>
             </div>
           )}

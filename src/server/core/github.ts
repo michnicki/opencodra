@@ -132,7 +132,8 @@ async function createGitHubJwt(appId: string, privateKeyPem: string) {
   return `${header}.${payload}.${signatureString}`;
 }
 
-async function readCachedInstallationToken(env: Pick<AppBindings, 'APP_KV'>, installationId: string) {
+async function readCachedInstallationToken(env: Pick<AppBindings, 'APP_KV'>, installationId: string, tracker?: { incrementSubrequests(count?: number): void }) {
+  if (tracker) tracker.incrementSubrequests(1);
   const cached = await env.APP_KV.get(installationCacheKey(installationId), 'json');
   return cached as InstallationTokenCacheRecord | null;
 }
@@ -141,9 +142,11 @@ async function writeCachedInstallationToken(
   env: Pick<AppBindings, 'APP_KV'>,
   installationId: string,
   record: InstallationTokenCacheRecord,
+  tracker?: { incrementSubrequests(count?: number): void },
 ) {
   const expiresAt = new Date(record.expiresAt).getTime();
   const ttl = Math.max(60, Math.floor((expiresAt - Date.now()) / 1000) - 300);
+  if (tracker) tracker.incrementSubrequests(1);
   await env.APP_KV.put(installationCacheKey(installationId), JSON.stringify(record), { expirationTtl: ttl });
 }
 
@@ -154,10 +157,11 @@ export class GitHubClient {
       'APP_KV' | 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME'
     >,
     private readonly installationId: string,
+    private readonly tracker?: { incrementSubrequests(count?: number): void },
   ) {}
 
   async getInstallationToken(): Promise<string> {
-    const cached = await readCachedInstallationToken(this.env, this.installationId);
+    const cached = await readCachedInstallationToken(this.env, this.installationId, this.tracker);
     if (cached?.token) {
       return cached.token;
     }
@@ -192,7 +196,7 @@ export class GitHubClient {
       await writeCachedInstallationToken(this.env, this.installationId, {
         token: data.token,
         expiresAt: data.expires_at,
-      });
+      }, this.tracker);
 
       return data.token;
     });
@@ -231,9 +235,18 @@ export class GitHubClient {
 
   async listRepositories(): Promise<GitHubRepository[]> {
     return withRetry('listRepositories', async () => {
-      const response = await this.requestAndCheck('/installation/repositories');
-      const data = (await response.json()) as { repositories: GitHubRepository[] };
-      return data.repositories;
+      const repositories: GitHubRepository[] = [];
+      const perPage = 100;
+
+      for (let page = 1; ; page += 1) {
+        const response = await this.requestAndCheck(`/installation/repositories?per_page=${perPage}&page=${page}`);
+        const data = (await response.json()) as { repositories: GitHubRepository[] };
+        repositories.push(...data.repositories);
+
+        if (data.repositories.length < perPage) {
+          return repositories;
+        }
+      }
     });
   }
 
@@ -244,6 +257,7 @@ export class GitHubClient {
   ): Promise<Response> {
     const token = await this.getInstallationToken();
 
+    if (this.tracker) this.tracker.incrementSubrequests(1);
     return withTimeout(`GitHub ${init.method ?? 'GET'} ${path}`, GITHUB_TIMEOUT_MS, (signal) =>
       fetch(`https://api.github.com${path}`, {
         ...init,

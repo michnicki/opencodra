@@ -1,6 +1,9 @@
 import { createApp } from '@server/app';
 import { insertJob } from '@server/db/jobs';
-import { defaultRepoConfig } from '@shared/schema';
+import { insertFileReview } from '@server/db/file-reviews';
+import { getRepoConfigRecord } from '@server/db/repo-configs';
+import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
+import { defaultRepoConfig, reviewJobMessageSchema } from '@shared/schema';
 import type {
   AuthSessionResponse,
   JobDetailResponse,
@@ -176,6 +179,60 @@ describe('Dashboard API Suite', () => {
     expect(data.job.files).toBeDefined();
   });
 
+  it('fetches job details when stored comments have null code suggestions', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo: `api-test-repo-${Date.now()}`,
+      prNumber: 43,
+      prTitle: 'Null suggestion PR',
+      prAuthor: 'tester',
+      commitSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+
+    await insertFileReview(env, {
+      jobId: job.id,
+      filePath: 'src/lib/slug.ts',
+      fileStatus: 'done',
+      modelUsed: 'gemma-4-31b-it',
+      modelProvider: 'google',
+      diffLineCount: 5,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [{
+        path: 'src/lib/slug.ts',
+        position: 1,
+        severity: 'P2',
+        category: 'quality',
+        title: 'Example',
+        body: 'Body',
+        codeSuggestion: null,
+      }],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 10,
+      verdict: 'comment',
+      fileSummary: 'summary',
+      errorMessage: null,
+    });
+
+    const response = await app.request(`/api/jobs/${job.id}`, {
+      headers: { Cookie: `codra_session=${token}` },
+    }, env);
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as JobDetailResponse;
+    expect(data.job.files[0].parsedComments[0].codeSuggestion).toBeNull();
+  });
+
   it('returns stats successfully', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
@@ -202,5 +259,67 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as RepoConfigsResponse;
     expect(Array.isArray(data.repos)).toBe(true);
+  });
+
+  it('keeps repo model settings inherited when loading global strategy', async () => {
+    const env = createTestEnv();
+    const repo = `global-inherit-${Date.now()}`;
+
+    await updateGlobalConfig(env, {
+      main: '@cf/zai-org/glm-4.7-flash',
+      fallbacks: [],
+      size_overrides: [],
+    });
+
+    const loaded = await loadRepoConfig(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo,
+    });
+
+    expect(loaded.parsedJson.model.main).toBe('@cf/zai-org/glm-4.7-flash');
+
+    const record = await getRepoConfigRecord(env, 'api-test-owner', repo);
+    expect(record?.mainModel).toBeNull();
+    expect(record?.fallbackModels).toBeNull();
+    expect(record?.sizeOverrides).toBeNull();
+
+    await updateGlobalConfig(env, {
+      main: 'gemma-4-26b-a4b-it',
+      fallbacks: ['@cf/zai-org/glm-4.7-flash'],
+      size_overrides: [],
+    });
+
+    const reloaded = await loadRepoConfig(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo,
+    });
+
+    expect(reloaded.parsedJson.model.main).toBe('gemma-4-26b-a4b-it');
+  });
+
+  it('accepts legacy jobId-only queue messages during schema transition', () => {
+    const parsed = reviewJobMessageSchema.safeParse({
+      jobId: crypto.randomUUID(),
+      deliveryId: 'legacy-delivery',
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo: 'api-test-repo',
+      prNumber: 42,
+      commitSha: 'abc123',
+      trigger: 'auto',
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts unsupported webhook events so old queue messages can be drained', () => {
+    const parsed = reviewJobMessageSchema.safeParse({
+      deliveryId: 'bad-event-delivery',
+      eventName: 'check_suite',
+    });
+
+    expect(parsed.success).toBe(true);
   });
 });

@@ -49,10 +49,11 @@ export async function getStats(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, days
     queryRows<{ owner: string; repo: string; jobs: number }>(
       env,
       `
-        SELECT owner, repo, COUNT(*)::int AS jobs
-        FROM jobs
-        GROUP BY owner, repo
-        ORDER BY jobs DESC, owner ASC, repo ASC
+        SELECT r.owner, r.repo, COUNT(*)::int AS jobs
+        FROM jobs j
+        JOIN repositories r ON j.repository_id = r.id
+        GROUP BY r.owner, r.repo
+        ORDER BY jobs DESC, r.owner ASC, r.repo ASC
         LIMIT 10
       `,
     ),

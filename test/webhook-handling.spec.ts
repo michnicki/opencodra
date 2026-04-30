@@ -33,6 +33,10 @@ describe('Webhook Handling Suite', () => {
   const env = createTestEnv();
   const app = createApp();
 
+  beforeEach(() => {
+    (env.REVIEW_QUEUE as any).sent.length = 0;
+  });
+
   it('rejects webhooks with invalid signatures', async () => {
     const payload = JSON.stringify(createMockPRWebhook());
     const response = await app.request(
@@ -58,6 +62,8 @@ describe('Webhook Handling Suite', () => {
         action: 'opened',
         repository: { name: repoName, owner: { login: 'test-owner' } }
     });
+    rawPayload.pull_request.head.sha = 'a'.repeat(40);
+    rawPayload.pull_request.base.sha = 'b'.repeat(40);
     const body = JSON.stringify(rawPayload);
     const signature = await signPayload(env.GITHUB_APP_WEBHOOK_SECRET, body);
 
@@ -79,11 +85,48 @@ describe('Webhook Handling Suite', () => {
     const json = await response.json() as any;
     expect(response.status).toBe(202);
     expect(json.ok).toBe(true);
-    expect(json.jobId).toBeDefined();
+    expect(json.message).toBe('queued');
+    expect(json.job.status).toBe('queued');
 
     const queue = env.REVIEW_QUEUE as any;
     expect(queue.sent).toHaveLength(1);
-    expect(queue.sent[0].jobId).toBe(json.jobId);
+    expect(queue.sent[0].jobId).toBe(json.job.id);
+    expect(queue.sent[0].deliveryId).toBeDefined();
+    expect(queue.sent[0].eventName).toBeUndefined();
+    expect(queue.sent[0].payload).toBeUndefined();
+  });
+
+  it('acknowledges unsupported GitHub events without queueing review work', async () => {
+    const rawPayload = createMockPRWebhook({
+      action: 'opened',
+      repository: { name: `repo-${Date.now()}-check-suite`, owner: { login: 'test-owner' } },
+    });
+    const body = JSON.stringify(rawPayload);
+    const signature = await signPayload(env.GITHUB_APP_WEBHOOK_SECRET, body);
+
+    const response = await app.request(
+      'http://codra.test/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'x-github-event': 'check_suite',
+          'x-github-delivery': `check-suite-${Date.now()}`,
+          'x-hub-signature-256': signature,
+          'content-type': 'application/json',
+        },
+        body,
+      },
+      env,
+    );
+
+    const json = await response.json() as any;
+    expect(response.status).toBe(202);
+    expect(json.ok).toBe(true);
+    expect(json.ignored).toBe(true);
+    expect(json.eventName).toBe('check_suite');
+
+    const queue = env.REVIEW_QUEUE as any;
+    expect(queue.sent).toHaveLength(0);
   });
 
   it('ignores webhooks for draft PRs', async () => {
@@ -110,6 +153,11 @@ describe('Webhook Handling Suite', () => {
 
       const json = await response.json() as any;
       expect(response.status).toBe(202);
-      expect(json.ignored).toBe(true);
+      expect(json.message).toBe('queued');
+
+      const queue = env.REVIEW_QUEUE as any;
+      expect(queue.sent).toHaveLength(1);
+      expect(queue.sent[0].payload).toBeUndefined();
+      expect(queue.sent[0].eventName).toBe('pull_request');
   });
 });

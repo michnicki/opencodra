@@ -4,8 +4,8 @@ import type { AppBindings } from '../env';
 export class GitHubService {
   private client: GitHubClient;
 
-  constructor(env: AppBindings, installationId: string) {
-    this.client = new GitHubClient(env, installationId);
+  constructor(env: AppBindings, installationId: string, tracker?: { incrementSubrequests(count?: number): void }) {
+    this.client = new GitHubClient(env, installationId, tracker);
   }
 
   async getPullRequest(owner: string, repo: string, prNumber: number) {

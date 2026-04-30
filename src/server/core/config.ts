@@ -1,95 +1,108 @@
-import { parse as parseYaml } from 'yaml';
-import { defaultRepoConfig, repoConfigSchema, type RepoConfig } from '@shared/schema';
-import { REPO_CONFIG_CACHE_VERSION, REPO_CONFIG_FILENAME } from '@shared/config';
+import { defaultRepoConfig, type RepoConfig } from '@shared/schema';
+import { REPO_CONFIG_CACHE_VERSION } from '@shared/config';
 import type { AppBindings } from '@server/env';
-import { getRepoConfigRecord, upsertRepoConfig } from '@server/db/repo-configs';
-import { GitHubClient } from './github';
+import { getRepoConfigRecord, syncRepoConfig } from '@server/db/repo-configs';
 
 type CachedConfig = {
-  rawYaml: string | null;
   parsedJson: RepoConfig;
-  configMissing: boolean;
   enabled: boolean;
 };
 
-function cacheKey(owner: string, repo: string) {
-  return `config:${REPO_CONFIG_CACHE_VERSION}:${REPO_CONFIG_FILENAME}:${owner}/${repo}`;
+const REPO_CONFIG_CACHE_PREFIX = `config:${REPO_CONFIG_CACHE_VERSION}:db:`;
+const REPO_CONFIG_REVISION_KEY = `config:${REPO_CONFIG_CACHE_VERSION}:db_revision`;
+
+async function getRepoConfigCacheRevision(env: Pick<AppBindings, 'APP_KV'>) {
+  return (await env.APP_KV.get(REPO_CONFIG_REVISION_KEY)) ?? '0';
+}
+
+async function cacheKey(env: Pick<AppBindings, 'APP_KV'>, owner: string, repo: string) {
+  const revision = await getRepoConfigCacheRevision(env);
+  return `${REPO_CONFIG_CACHE_PREFIX}${revision}:${owner}/${repo}`;
 }
 
 const GLOBAL_CONFIG_KEY = 'config:global_model';
 
+const SERVER_DEFAULT_GLOBAL_CONFIG: RepoConfig['model'] = {
+  main: 'gemma-4-31b-it',
+  fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+  size_overrides: [
+    {
+      max_lines: 300,
+      model: 'gemma-4-31b-it',
+      fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+    },
+    {
+      max_lines: 100,
+      model: '@cf/moonshotai/kimi-k2.5',
+      fallbacks: ['@cf/zai-org/glm-4.7-flash'],
+    },
+  ],
+};
+
+function hasRepoModelOverride(existing: Awaited<ReturnType<typeof getRepoConfigRecord>> | null) {
+  return Boolean(
+    existing?.mainModel ||
+    (Array.isArray(existing?.fallbackModels) && existing.fallbackModels.length > 0) ||
+    (Array.isArray(existing?.sizeOverrides) && existing.sizeOverrides.length > 0),
+  );
+}
+
 export async function getGlobalConfig(env: Pick<AppBindings, 'APP_KV'>): Promise<RepoConfig['model']> {
   const cached = await env.APP_KV.get(GLOBAL_CONFIG_KEY, 'json');
   if (cached) return cached as RepoConfig['model'];
-  
-  return defaultRepoConfig.model;
+
+  return SERVER_DEFAULT_GLOBAL_CONFIG;
 }
 
 export async function updateGlobalConfig(env: Pick<AppBindings, 'APP_KV'>, config: RepoConfig['model']) {
   await env.APP_KV.put(GLOBAL_CONFIG_KEY, JSON.stringify(config));
+  await invalidateAllRepoConfigCache(env);
 }
 
-export function parseRepoConfig(rawYaml: string | null) {
-  if (!rawYaml) {
-    return {
-      rawYaml: null,
-      parsedJson: defaultRepoConfig,
-      configMissing: true,
-      enabled: true,
-    } satisfies CachedConfig;
-  }
-
-  const parsed = parseYaml(rawYaml) as unknown;
-  return {
-    rawYaml,
-    parsedJson: repoConfigSchema.parse(parsed ?? {}),
-    configMissing: false,
-    enabled: true,
-  } satisfies CachedConfig;
+export async function invalidateRepoConfigCache(env: Pick<AppBindings, 'APP_KV'>, owner: string, repo: string) {
+  await env.APP_KV.delete(await cacheKey(env, owner, repo));
 }
+
+export async function invalidateAllRepoConfigCache(env: Pick<AppBindings, 'APP_KV'>) {
+  await env.APP_KV.put(REPO_CONFIG_REVISION_KEY, String(Date.now()));
+}
+
 
 export async function loadRepoConfig(
   env: Pick<AppBindings, 'APP_KV' | 'NEON_DATABASE_URL'>,
-  github: GitHubClient,
   input: { installationId: string; owner: string; repo: string },
 ) {
-  const key = cacheKey(input.owner, input.repo);
+  const key = await cacheKey(env, input.owner, input.repo);
   const cached = await env.APP_KV.get(key, 'json');
   if (cached) {
     return cached as CachedConfig;
   }
 
-  // Check DB first for existing enabled status or overrides
+  // Check DB for existing config
   const existing = await getRepoConfigRecord(env, input.owner, input.repo);
 
-  const repoFile = await github.getRepoFileOrNull(input.owner, input.repo, REPO_CONFIG_FILENAME);
-  const parsed = parseRepoConfig(repoFile);
-  
-  // If there's no YAML and no DB override, use the GLOBAL config
-  if (parsed.configMissing && (!existing || !existing.mainModel)) {
+  let parsedJson = existing?.parsedJson ?? defaultRepoConfig;
+  const enabled = existing?.enabled ?? true;
+
+  // If there's no DB override, use the GLOBAL config
+  if (!hasRepoModelOverride(existing)) {
     const globalModel = await getGlobalConfig(env);
-    parsed.parsedJson = {
-      ...parsed.parsedJson,
+    parsedJson = {
+      ...parsedJson,
       model: globalModel
     };
   }
 
-  // Combine: use DB's enabled status if it exists
   const finalConfig: CachedConfig = {
-    ...parsed,
-    enabled: existing ? existing.enabled : true,
+    parsedJson,
+    enabled,
   };
 
   await env.APP_KV.put(key, JSON.stringify(finalConfig), { expirationTtl: 60 * 10 });
-  await upsertRepoConfig(env, {
-    installationId: input.installationId,
-    owner: input.owner,
-    repo: input.repo,
-    rawYaml: finalConfig.rawYaml,
-    parsedJson: finalConfig.parsedJson,
-    configMissing: finalConfig.configMissing,
-    enabled: finalConfig.enabled,
-  });
+
+  if (!existing) {
+    await syncRepoConfig(env, input);
+  }
 
   return finalConfig;
 }

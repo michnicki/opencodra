@@ -1,8 +1,10 @@
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff } from './helpers';
 import { vi } from 'vitest';
-import { insertJob, getJobForProcessing } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob } from '@server/db/jobs';
 import { defaultRepoConfig } from '@shared/schema';
+
+const sha = (char: string) => char.repeat(40);
 
 // Properly mock the services as real classes with prototype methods
 vi.mock('@server/services/github', () => {
@@ -70,53 +72,43 @@ describe('Review Flow Lifecycle', () => {
   const env = createTestEnv();
 
   it('completes a full review from pending job to finished', async () => {
-    const job = await insertJob(env, {
-      installationId: '123',
-      owner: 'test-owner',
-      repo: 'test-repo',
-      prNumber: 1,
-      prTitle: 'Test PR',
-      prAuthor: 'author',
-      commitSha: 'headsha',
-      baseSha: 'basesha',
-      trigger: 'auto',
-      headRef: 'feature',
-      baseRef: 'main',
-      configSnapshot: defaultRepoConfig,
-    });
+    const repo = `test-repo-${Date.now()}-full`;
+    const headSha = sha('a');
+    const baseSha = sha('b');
 
     await runReviewJob(env, {
-      jobId: job.id,
       deliveryId: 'delivery-123',
-      installationId: '123',
-      owner: 'test-owner',
-      repo: 'test-repo',
-      prNumber: 1,
-      commitSha: 'headsha',
-      trigger: 'auto',
+      eventName: 'pull_request',
+      payload: {
+        action: 'opened',
+        installation: { id: 123 },
+        repository: { owner: { login: 'test-owner' }, name: repo },
+        pull_request: {
+          number: 1,
+          head: { sha: headSha, ref: 'feature' },
+          base: { sha: baseSha, ref: 'main' },
+          title: 'Test PR',
+          user: { login: 'author' },
+          draft: false,
+        }
+      }
     });
 
-    const finalJob = await getJobForProcessing(env, job.id);
+    const finalJob = await findExistingJobForHead(env, {
+      owner: 'test-owner',
+      repo,
+      prNumber: 1,
+      commitSha: headSha,
+      trigger: 'auto',
+    });
     expect(finalJob?.status).toBe('done');
   });
 
   it('stops processing if the job is superseded mid-way', async () => {
       const { GitHubService } = await import('@server/services/github');
-      
-      const job = await insertJob(env, {
-        installationId: 'test-owner-supersede',
-        owner: 'test-owner',
-        repo: 'test-repo',
-        prNumber: 2,
-        prTitle: 'Supersede Test',
-        prAuthor: 'author',
-        commitSha: 'headsha-2',
-        baseSha: 'basesha-2',
-        trigger: 'auto',
-        headRef: 'feature',
-        baseRef: 'main',
-        configSnapshot: defaultRepoConfig,
-      });
+      const repo = `test-repo-${Date.now()}-supersede`;
+      const headSha = sha('c');
+      const baseSha = sha('d');
 
       // Spy on the prototype of our mocked class
       const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff');
@@ -124,23 +116,135 @@ describe('Review Flow Lifecycle', () => {
       getDiffSpy.mockImplementationOnce(async () => {
           const { getDb } = await import('@server/db/client');
           const sql = getDb(env);
-          await sql.query('UPDATE jobs SET status = \'superseded\' WHERE id = $1', [job.id]);
+          await sql.query(
+            `
+              UPDATE jobs j
+              SET status = 'superseded'
+              FROM repositories r
+              WHERE j.repository_id = r.id
+                AND r.owner = $1
+                AND r.repo = $2
+                AND j.pr_number = $3
+            `,
+            ['test-owner', repo, 2],
+          );
           return generateMockDiff([{ path: 'test.ts', content: 'a' }]);
       });
 
       await runReviewJob(env, {
-        jobId: job.id,
         deliveryId: 'delivery-456',
-        installationId: '123',
-        owner: 'test-owner',
-        repo: 'test-repo',
-        prNumber: 2,
-        commitSha: 'headsha-2',
-        trigger: 'auto',
+        eventName: 'pull_request',
+        payload: {
+          action: 'opened',
+          installation: { id: 123 },
+          repository: { owner: { login: 'test-owner' }, name: repo },
+          pull_request: {
+            number: 2,
+            head: { sha: headSha, ref: 'feature' },
+            base: { sha: baseSha, ref: 'main' },
+            title: 'Supersede Test',
+            user: { login: 'author' },
+            draft: false,
+          }
+        }
       });
 
-      const finalJob = await getJobForProcessing(env, job.id);
+      const finalJob = await findExistingJobForHead(env, {
+        owner: 'test-owner',
+        repo,
+        prNumber: 2,
+        commitSha: headSha,
+        trigger: 'auto',
+      });
       expect(finalJob?.status).toBe('superseded');
       expect(finalJob?.verdict).toBeNull();
+  });
+
+  it('processes a pre-created retry job from a queue message', async () => {
+    const repo = `test-repo-${Date.now()}-retry`;
+    const sourceHeadSha = sha('1');
+    const retryHeadSha = sha('2');
+    const baseSha = sha('3');
+
+    const source = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 3,
+      prTitle: 'Retry Test',
+      prAuthor: 'author',
+      commitSha: sourceHeadSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+
+    const retry = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 3,
+      prTitle: 'Retry Test',
+      prAuthor: 'author',
+      commitSha: retryHeadSha,
+      baseSha,
+      trigger: 'retry',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+      retryOfJobId: source.id,
+    });
+
+    await runReviewJob(env, {
+      jobId: retry.id,
+      deliveryId: 'delivery-retry',
+    });
+
+    const finalJob = await getJobForProcessing(env, retry.id);
+    expect(finalJob?.status).toBe('done');
+  });
+
+  it('resumes an existing queued duplicate job instead of stranding it', async () => {
+    const repo = `test-repo-${Date.now()}-duplicate`;
+    const headSha = sha('4');
+    const baseSha = sha('5');
+
+    const existing = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 4,
+      prTitle: 'Duplicate Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+
+    await runReviewJob(env, {
+      deliveryId: 'delivery-duplicate',
+      eventName: 'pull_request',
+      payload: {
+        action: 'opened',
+        installation: { id: 123 },
+        repository: { owner: { login: 'test-owner' }, name: repo },
+        pull_request: {
+          number: 4,
+          head: { sha: headSha, ref: 'feature' },
+          base: { sha: baseSha, ref: 'main' },
+          title: 'Duplicate Test',
+          user: { login: 'author' },
+          draft: false,
+        },
+      },
+    });
+
+    const finalJob = await getJobForProcessing(env, existing.id);
+    expect(finalJob?.status).toBe('done');
   });
 });

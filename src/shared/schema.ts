@@ -20,13 +20,13 @@ export const jobStepSchema = z.object({
 
 export const parsedReviewCommentSchema = z.object({
   path: z.string().min(1),
-  line: z.number().int().positive().optional(),
-  position: z.number().int().positive().optional(),
+  line: z.number().int().positive().nullable().optional(),
+  position: z.number().int().positive().nullable().optional(),
   severity: z.enum(reviewSeverities),
   category: z.enum(reviewCategories).default('quality'),
   title: z.string().min(1),
   body: z.string().min(1),
-  codeSuggestion: z.string().min(1).optional(),
+  codeSuggestion: z.string().min(1).nullable().optional(),
 });
 
 export const fileReviewModelOutputSchema = z.object({
@@ -122,8 +122,8 @@ export const repoConfigSchema = z.object({
   }),
   model: z
     .object({
-      main: z.string().default('gemma-4-31b-it'),
-      fallbacks: z.array(z.string()).default([]),
+      main: z.string().nullable().default('gemma-4-31b-it'),
+      fallbacks: z.array(z.string()).nullable().default([]),
       size_overrides: z
         .array(
           z.object({
@@ -132,31 +132,45 @@ export const repoConfigSchema = z.object({
             fallbacks: z.array(z.string()).optional(),
           }),
         )
+        .nullable()
         .optional(),
     })
     .default({
       main: 'gemma-4-31b-it',
-      fallbacks: ['gemma-3-27b', '@cf/zai-org/glm-4.7-flash'],
+      fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
       size_overrides: [],
     }),
 });
 
 export const reviewJobMessageSchema = z.object({
-  jobId: z.string().uuid(),
+  jobId: z.string().uuid().optional(),
   deliveryId: z.string().min(1),
-  installationId: z.string().min(1),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  prNumber: z.number().int().positive(),
-  commitSha: z.string().min(1),
-  trigger: z.enum(reviewTriggers),
+  eventName: z.string().min(1).optional(),
+  payload: z.any().optional(),
+  installationId: z.string().min(1).optional(),
+  owner: z.string().min(1).optional(),
+  repo: z.string().min(1).optional(),
+  prNumber: z.number().int().positive().optional(),
+  commitSha: z.string().min(1).optional(),
+  trigger: z.enum(reviewTriggers).optional(),
   requestId: z.string().optional(),
+}).superRefine((message, ctx) => {
+  if (message.jobId || message.eventName) {
+    return;
+  }
+
+  ctx.addIssue({
+    code: 'custom',
+    message: 'Queue message must include either jobId or eventName.',
+    path: ['jobId'],
+  });
 });
 
 export const jobSummarySchema = z.object({
   id: z.string().uuid(),
   owner: z.string(),
   repo: z.string(),
+  installationId: z.string(),
   prNumber: z.number().int(),
   prTitle: z.string().nullable(),
   prAuthor: z.string().nullable(),
@@ -175,6 +189,9 @@ export const jobSummarySchema = z.object({
   overallConfidenceScore: z.number().nullable().optional(),
   overallCorrectness: z.string().nullable().optional(),
   steps: z.array(jobStepSchema).default([]),
+  checkRunId: coerceNumberSchema.nullable().optional(),
+  configSnapshot: repoConfigSchema.nullable().optional(),
+  retryOfJobId: z.string().uuid().nullable().optional(),
 });
 
 export const jobsQuerySchema = z.object({
@@ -228,9 +245,7 @@ export const repoConfigRecordSchema = z.object({
   installationId: z.string(),
   owner: z.string(),
   repo: z.string(),
-  rawYaml: z.string().nullable(),
   parsedJson: repoConfigSchema,
-  configMissing: z.boolean(),
   updatedAt: dateStringSchema,
   lastJobCreatedAt: dateStringSchema.nullable(),
   lastJobVerdict: z.enum(reviewVerdicts).nullable(),

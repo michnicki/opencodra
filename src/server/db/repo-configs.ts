@@ -1,14 +1,13 @@
 import type { AppBindings } from '@server/env';
 import { queryRows } from './client';
 import { defaultRepoConfig, repoConfigRecordSchema, repoConfigSchema, type RepoConfig } from '@shared/schema';
+import { getOrCreateRepository } from './repositories';
 
 type RepoConfigRow = {
   installation_id: string;
   owner: string;
   repo: string;
-  raw_yaml: string | null;
   parsed_json: RepoConfig | null;
-  config_missing: boolean;
   updated_at: string;
   main_model: string | null;
   fallback_models: string[] | null;
@@ -24,9 +23,7 @@ function mapRepo(row: RepoConfigRow) {
     installationId: row.installation_id,
     owner: row.owner,
     repo: row.repo,
-    rawYaml: row.raw_yaml,
     parsedJson,
-    configMissing: row.config_missing,
     updatedAt: row.updated_at,
     lastJobCreatedAt: row.last_job_created_at,
     lastJobVerdict: row.last_job_verdict,
@@ -43,42 +40,90 @@ export async function upsertRepoConfig(
     installationId: string;
     owner: string;
     repo: string;
-    rawYaml: string | null;
     parsedJson: RepoConfig;
-    configMissing: boolean;
     enabled?: boolean;
   },
 ) {
+  const repositoryId = await getOrCreateRepository(env, {
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+  });
+
   const model = input.parsedJson.model;
   await queryRows(
     env,
     `
-      INSERT INTO repo_configs (installation_id, owner, repo, raw_yaml, parsed_json, config_missing, updated_at, main_model, fallback_models, size_overrides, enabled)
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, now(), $7, $8::jsonb, $9::jsonb, COALESCE($10, TRUE))
-      ON CONFLICT (owner, repo)
+      INSERT INTO repo_configs (repository_id, parsed_json, updated_at, main_model, fallback_models, size_overrides, enabled)
+      VALUES ($1, $2::jsonb, now(), $3, $4::jsonb, $5::jsonb, COALESCE($6, TRUE))
+      ON CONFLICT (repository_id)
       DO UPDATE
-      SET installation_id = EXCLUDED.installation_id,
-          raw_yaml = EXCLUDED.raw_yaml,
-          parsed_json = EXCLUDED.parsed_json,
-          config_missing = EXCLUDED.config_missing,
+      SET parsed_json = EXCLUDED.parsed_json,
           updated_at = EXCLUDED.updated_at,
           main_model = EXCLUDED.main_model,
           fallback_models = EXCLUDED.fallback_models,
           size_overrides = EXCLUDED.size_overrides,
-          enabled = COALESCE($10, repo_configs.enabled)
+          enabled = COALESCE($6, repo_configs.enabled)
     `,
     [
-      input.installationId, 
-      input.owner, 
-      input.repo, 
-      input.rawYaml, 
-      JSON.stringify(input.parsedJson), 
-      input.configMissing,
-      model?.main ?? 'gemma-4-31b-it',
-      JSON.stringify(model?.fallbacks ?? []),
+      repositoryId,
+      JSON.stringify(input.parsedJson),
+      model?.main ?? null,
+      model?.fallbacks ? JSON.stringify(model.fallbacks) : null,
       model?.size_overrides ? JSON.stringify(model.size_overrides) : null,
       input.enabled ?? null
     ],
+  );
+}
+
+// Used during sync — only creates the record if it doesn't exist.
+// Preserves all existing model overrides if the repo is already configured.
+export async function syncRepoConfig(
+  env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
+  input: {
+    installationId: string;
+    owner: string;
+    repo: string;
+  },
+) {
+  const repositoryId = await getOrCreateRepository(env, {
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+  });
+
+  // Insert with null model overrides (global strategy) but DO NOTHING if already exists
+  await queryRows(
+    env,
+    `
+      INSERT INTO repo_configs (repository_id, parsed_json, updated_at, main_model, fallback_models, size_overrides, enabled)
+      VALUES ($1, $2::jsonb, now(), NULL, NULL, NULL, TRUE)
+      ON CONFLICT (repository_id) DO NOTHING
+    `,
+    [repositoryId, JSON.stringify(defaultRepoConfig)],
+  );
+}
+
+export async function updateRepoConfigEnabled(
+  env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
+  input: {
+    owner: string;
+    repo: string;
+    enabled: boolean;
+  },
+) {
+  await queryRows(
+    env,
+    `
+      UPDATE repo_configs rc
+      SET enabled = $3,
+          updated_at = now()
+      FROM repositories r
+      WHERE rc.repository_id = r.id
+        AND r.owner = $1
+        AND r.repo = $2
+    `,
+    [input.owner, input.repo, input.enabled],
   );
 }
 
@@ -87,12 +132,10 @@ export async function listRepoConfigs(env: Pick<AppBindings, 'NEON_DATABASE_URL'
     env,
     `
       SELECT
-        rc.installation_id,
-        rc.owner,
-        rc.repo,
-        rc.raw_yaml,
+        r.installation_id,
+        r.owner,
+        r.repo,
         rc.parsed_json,
-        rc.config_missing,
         rc.updated_at,
         rc.main_model,
         rc.fallback_models,
@@ -101,14 +144,15 @@ export async function listRepoConfigs(env: Pick<AppBindings, 'NEON_DATABASE_URL'
         lj.created_at AS last_job_created_at,
         lj.verdict AS last_job_verdict
       FROM repo_configs rc
+      JOIN repositories r ON rc.repository_id = r.id
       LEFT JOIN LATERAL (
         SELECT created_at, verdict
         FROM jobs
-        WHERE owner = rc.owner AND repo = rc.repo
+        WHERE repository_id = r.id
         ORDER BY created_at DESC
         LIMIT 1
       ) lj ON true
-      ORDER BY rc.owner ASC, rc.repo ASC
+      ORDER BY r.owner ASC, r.repo ASC
     `,
   );
 
@@ -120,12 +164,10 @@ export async function getRepoConfigRecord(env: Pick<AppBindings, 'NEON_DATABASE_
     env,
     `
       SELECT
-        rc.installation_id,
-        rc.owner,
-        rc.repo,
-        rc.raw_yaml,
+        r.installation_id,
+        r.owner,
+        r.repo,
         rc.parsed_json,
-        rc.config_missing,
         rc.updated_at,
         rc.main_model,
         rc.fallback_models,
@@ -134,14 +176,15 @@ export async function getRepoConfigRecord(env: Pick<AppBindings, 'NEON_DATABASE_
         lj.created_at AS last_job_created_at,
         lj.verdict AS last_job_verdict
       FROM repo_configs rc
+      JOIN repositories r ON rc.repository_id = r.id
       LEFT JOIN LATERAL (
         SELECT created_at, verdict
         FROM jobs
-        WHERE owner = rc.owner AND repo = rc.repo
+        WHERE repository_id = r.id
         ORDER BY created_at DESC
         LIMIT 1
       ) lj ON true
-      WHERE rc.owner = $1 AND rc.repo = $2
+      WHERE r.owner = $1 AND r.repo = $2
       LIMIT 1
     `,
     [owner, repo],

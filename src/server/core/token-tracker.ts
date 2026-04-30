@@ -12,6 +12,25 @@ export interface ModelUsage extends TokenUsage {
 
 export class TokenTracker {
   private usage: Map<string, ModelUsage> = new Map();
+  private subrequests = 0;
+  private readonly MAX_SUBREQUESTS = 50;
+  private readonly SAFE_MARGIN = 22; // Increased even further to handle finalization overhead
+
+  incrementSubrequests(count = 1) {
+    this.subrequests += count;
+  }
+
+  getSubrequestCount() {
+    return this.subrequests;
+  }
+
+  hasRemainingSubrequests(needed = 1) {
+    return this.subrequests + needed <= this.MAX_SUBREQUESTS;
+  }
+
+  isNearLimit() {
+    return this.subrequests >= this.MAX_SUBREQUESTS - this.SAFE_MARGIN;
+  }
 
   /**
    * Records token usage for a specific model call.

@@ -1,11 +1,10 @@
 import { Hono } from 'hono';
-import type { GitHubWebhookEventName, GitHubWebhookPayload, PullRequestWebhookPayload } from '@shared/github';
+import { isSupportedGitHubWebhookEvent, type GitHubWebhookPayload } from '@shared/github';
 import type { AppEnv } from '@server/env';
+import { loadRepoConfig } from '@server/core/config';
 import { extractReviewRequest } from '@server/core/review';
 import { verifyGitHubWebhookSignature } from '@server/core/verify';
 import { jsonError } from '@server/core/http';
-import { GitHubClient } from '@server/core/github';
-import { loadRepoConfig } from '@server/core/config';
 import { findExistingJobForHead, insertJob, supersedeOlderJobs } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 
@@ -13,7 +12,7 @@ export function createWebhookRouter() {
   const app = new Hono<AppEnv>();
 
   app.post('/', async (c) => {
-    const eventName = c.req.header('x-github-event') as GitHubWebhookEventName | undefined;
+    const eventName = c.req.header('x-github-event');
     const deliveryId = c.req.header('x-github-delivery');
     const signature = c.req.header('x-hub-signature-256');
     const rawBody = await c.req.text();
@@ -45,15 +44,18 @@ export function createWebhookRouter() {
       return c.json({ ok: true, ignored: true }, 202);
     }
 
-    const github = new GitHubClient(c.env, installationId);
-    const repoConfig = await loadRepoConfig(c.env, github, {
+    if (!isSupportedGitHubWebhookEvent(eventName)) {
+      return c.json({ ok: true, ignored: true, eventName }, 202);
+    }
+
+    const repoConfig = await loadRepoConfig(c.env, {
       installationId,
       owner: payload.repository.owner.login,
       repo: payload.repository.name,
     });
 
     if (repoConfig.enabled === false) {
-      return c.json({ ok: true, ignored: true, reason: 'repo_disabled' }, 202);
+      return c.json({ ok: true, ignored: true, reason: 'repository_disabled' }, 202);
     }
 
     const extracted = extractReviewRequest({
@@ -63,82 +65,65 @@ export function createWebhookRouter() {
       config: repoConfig.parsedJson,
     });
 
-    if (!extracted) {
-      if (eventName === 'pull_request') {
-        const prPayload = payload as PullRequestWebhookPayload;
-        if (prPayload.action === 'closed' && repoConfig.parsedJson.review.labels !== false) {
-          const labels = repoConfig.parsedJson.review.labels;
-          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p1);
-          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p2);
-          await github.removeIssueLabel(prPayload.repository.owner.login, prPayload.repository.name, prPayload.pull_request.number, labels.p3);
-          return c.json({ ok: true, cleaned: true }, 200);
-        }
+    if (extracted?.commitSha && extracted.baseSha) {
+      const existingJob = await findExistingJobForHead(c.env, {
+        owner: extracted.owner,
+        repo: extracted.repo,
+        prNumber: extracted.prNumber,
+        commitSha: extracted.commitSha,
+        trigger: extracted.trigger,
+      });
+
+      if (existingJob) {
+        return c.json({
+          ok: true,
+          duplicate: true,
+          message: existingJob.status === 'queued' ? 'queued' : 'duplicate',
+          job: existingJob,
+        }, 202);
       }
-      return c.json({ ok: true, ignored: true }, 202);
+
+      const job = await insertJob(c.env, {
+        installationId: extracted.installationId,
+        owner: extracted.owner,
+        repo: extracted.repo,
+        prNumber: extracted.prNumber,
+        prTitle: extracted.prTitle,
+        prAuthor: extracted.prAuthor,
+        commitSha: extracted.commitSha,
+        baseSha: extracted.baseSha,
+        trigger: extracted.trigger,
+        headRef: extracted.headRef,
+        baseRef: extracted.baseRef,
+        configSnapshot: repoConfig.parsedJson,
+      });
+
+      await supersedeOlderJobs(c.env, {
+        installationId: extracted.installationId,
+        owner: extracted.owner,
+        repo: extracted.repo,
+        prNumber: extracted.prNumber,
+        newJobId: job.id,
+      });
+
+      await c.env.REVIEW_QUEUE.send({
+        jobId: job.id,
+        deliveryId,
+        requestId: c.get('requestId'),
+      });
+
+      return c.json({ ok: true, message: 'queued', job }, 202);
     }
 
-    let resolved = extracted;
-    if (eventName === 'issue_comment') {
-      const pr = await github.getPullRequest(extracted.owner, extracted.repo, extracted.prNumber);
-      resolved = {
-        ...extracted,
-        prTitle: pr.title,
-        prAuthor: pr.user.login,
-        commitSha: pr.head.sha,
-        baseSha: pr.base.sha,
-        headRef: pr.head.ref,
-        baseRef: pr.base.ref,
-      };
-    }
-
-    const duplicateJob = await findExistingJobForHead(c.env, {
-      owner: resolved.owner,
-      repo: resolved.repo,
-      prNumber: resolved.prNumber,
-      commitSha: resolved.commitSha,
-      trigger: resolved.trigger,
-    });
-    if (duplicateJob) {
-      return c.json({ ok: true, duplicate: true, jobId: duplicateJob.id }, 202);
-    }
-
-    const job = await insertJob(c.env, {
-      installationId: resolved.installationId,
-      owner: resolved.owner,
-      repo: resolved.repo,
-      prNumber: resolved.prNumber,
-      prTitle: resolved.prTitle,
-      prAuthor: resolved.prAuthor,
-      commitSha: resolved.commitSha,
-      baseSha: resolved.baseSha,
-      trigger: resolved.trigger,
-      headRef: resolved.headRef,
-      baseRef: resolved.baseRef,
-      configSnapshot: repoConfig.parsedJson,
-    });
-
-    // Supersede any older pending/running jobs for this PR
-    await supersedeOlderJobs(c.env, {
-      installationId: resolved.installationId,
-      owner: resolved.owner,
-      repo: resolved.repo,
-      prNumber: resolved.prNumber,
-      newJobId: job.id,
-    });
-
+    // Events that do not produce a concrete job, such as PR close cleanup or
+    // mention events that need PR lookup, are still handled by the worker.
     await c.env.REVIEW_QUEUE.send({
-      jobId: job.id,
       deliveryId,
-      installationId: resolved.installationId,
-      owner: resolved.owner,
-      repo: resolved.repo,
-      prNumber: resolved.prNumber,
-      commitSha: resolved.commitSha,
-      trigger: resolved.trigger,
+      eventName,
       requestId: c.get('requestId'),
     });
 
-    return c.json({ ok: true, jobId: job.id }, 202);
+    return c.json({ ok: true, message: 'queued' }, 202);
   });
 
   return app;

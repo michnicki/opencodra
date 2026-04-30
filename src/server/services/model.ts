@@ -9,6 +9,34 @@ import type { TokenTracker } from '../core/token-tracker';
 import type { ModelResponse } from '../models/types';
 import { logger } from '../core/logger';
 
+const DEFAULT_GOOGLE_FALLBACK = 'gemma-4-31b-it';
+const MODEL_ALIASES: Record<string, string> = {
+  'gemma-4-31b': 'gemma-4-31b-it',
+  'gemma-4-26b': 'gemma-4-26b-a4b-it',
+};
+
+function isCloudflareModel(model: string) {
+  return model.startsWith('@cf/');
+}
+
+function normalizeModel(model: string) {
+  return MODEL_ALIASES[model] ?? model;
+}
+
+function uniqueModels(models: string[]) {
+  return Array.from(new Set(models.map(normalizeModel)));
+}
+
+function isCloudflareAllocationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('4006') || message.toLowerCase().includes('daily free allocation');
+}
+
+function isGoogleRateLimitError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.toLowerCase().includes('quota exceeded');
+}
+
 export class ModelService {
   constructor(private env: AppBindings, private tracker?: TokenTracker) {}
 
@@ -21,33 +49,44 @@ export class ModelService {
 
     // Use default if not configured
     if (!modelCfg) {
-      return { primary: 'gemma-4-31b-it', fallbacks: [] };
+      return {
+        primary: 'gemma-4-31b-it',
+        fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash']
+      };
     }
 
-    let selectedModel = modelCfg.main;
-    let fallbackModels = modelCfg.fallbacks || [];
+    let selectedModel = normalizeModel(modelCfg.main ?? 'gemma-4-31b-it');
+    let fallbackModels = (modelCfg.fallbacks || []).map(normalizeModel);
 
     // Apply size overrides based on total PR lines
     if (modelCfg.size_overrides && modelCfg.size_overrides.length > 0) {
       const sortedOverrides = [...modelCfg.size_overrides].sort((a, b) => a.max_lines - b.max_lines);
       const matched = sortedOverrides.find(o => thresholdBase <= o.max_lines);
       if (matched) {
-        selectedModel = matched.model;
-        fallbackModels = matched.fallbacks || fallbackModels;
+        selectedModel = normalizeModel(matched.model);
+        fallbackModels = (matched.fallbacks || fallbackModels).map(normalizeModel);
       }
+    }
+
+    const chain = uniqueModels([selectedModel, ...fallbackModels]);
+    selectedModel = chain[0] ?? 'gemma-4-31b-it';
+    fallbackModels = chain.slice(1);
+    if (chain.length > 0 && chain.every(isCloudflareModel)) {
+      fallbackModels = [...fallbackModels, DEFAULT_GOOGLE_FALLBACK];
     }
 
     return { primary: selectedModel, fallbacks: fallbackModels };
   }
 
   private async callModel(model: string, input: { systemPrompt: string; userPrompt: string }): Promise<ModelResponse> {
+    model = normalizeModel(model);
     // Determine provider based on model name
     // Cloudflare models start with @cf/
     if (model.startsWith('@cf/')) {
-      return await reviewWithCloudflare(this.env, model, input);
+      return await reviewWithCloudflare(this.env, model, input, this.tracker);
     } else {
       // Default to Google for gemma/gemini
-      return await reviewWithGoogle(this.env, model, input);
+      return await reviewWithGoogle(this.env, model, input, this.tracker);
     }
   }
 
@@ -70,26 +109,52 @@ export class ModelService {
     const modelsToTry = [primary, ...fallbacks];
 
     let lastError: any;
+    const unavailableProviders = new Set<string>();
     for (const currentModel of modelsToTry) {
-      try {
-        const response = await this.callModel(currentModel, { systemPrompt, userPrompt });
-        
-        if (this.tracker) {
-          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
-        }
+      if (isCloudflareModel(currentModel) && unavailableProviders.has('cloudflare')) {
+        logger.warn(`Skipping Cloudflare model ${currentModel} because Cloudflare AI allocation is unavailable`);
+        continue;
+      }
 
-        const parsed = parseFileReviewResponse(response.rawText, params.file);
-        return {
-          ...response,
-          parsed,
-          userPrompt,
-        };
-      } catch (error: any) {
-        lastError = error;
-        logger.warn(`Model ${currentModel} failed for ${params.file.path}`, { 
-          error: error.message || error,
-          willRetry: modelsToTry.indexOf(currentModel) < modelsToTry.length - 1
-        });
+      let attempts = 0;
+      const maxAttempts = 2;
+
+      while (attempts < maxAttempts) {
+        try {
+          const response = await this.callModel(currentModel, { systemPrompt, userPrompt });
+
+          if (this.tracker) {
+            this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+          }
+
+          const parsed = parseFileReviewResponse(response.rawText, params.file);
+          return {
+            ...response,
+            parsed,
+            userPrompt,
+          };
+        } catch (error: any) {
+          lastError = error;
+          attempts++;
+          if (isCloudflareModel(currentModel) && isCloudflareAllocationError(error)) {
+            unavailableProviders.add('cloudflare');
+          }
+
+          const isRateLimit = isGoogleRateLimitError(error);
+          const isRetryable = false;
+
+          logger.warn(`Model ${currentModel} failed for ${params.file.path} (attempt ${attempts}/${maxAttempts})`, {
+            error: error.message || error,
+            rateLimited: isRateLimit,
+            willRetrySameModel: isRetryable,
+            willTryFallback: !isRetryable && modelsToTry.indexOf(currentModel) < modelsToTry.length - 1
+          });
+
+          if (isRetryable) {
+            continue;
+          }
+          break; // Move to next model in fallbacks
+        }
       }
     }
 
@@ -106,7 +171,13 @@ export class ModelService {
     const modelsToTry = [primary, ...fallbacks];
 
     let lastError: any;
+    const unavailableProviders = new Set<string>();
     for (const currentModel of modelsToTry) {
+      if (isCloudflareModel(currentModel) && unavailableProviders.has('cloudflare')) {
+        logger.warn(`Skipping Cloudflare summary model ${currentModel} because Cloudflare AI allocation is unavailable`);
+        continue;
+      }
+
       try {
         const response = await this.callModel(currentModel, {
           systemPrompt: SUMMARY_SYSTEM_PROMPT,
@@ -120,6 +191,9 @@ export class ModelService {
         return response;
       } catch (error: any) {
         lastError = error;
+        if (isCloudflareModel(currentModel) && isCloudflareAllocationError(error)) {
+          unavailableProviders.add('cloudflare');
+        }
         logger.warn(`Summary model ${currentModel} failed`, { error: error.message || error });
       }
     }

@@ -40,7 +40,7 @@ export default {
         // Malformed message — cannot be retried meaningfully. Ack it so
         // Cloudflare delivers it to the DLQ for inspection instead of burning
         // retries on something that will never be valid.
-        logger.error('Invalid queue message schema; sending to DLQ', {
+        logger.error('Invalid queue message schema; discarding message', {
           body: message.body,
           error: parseResult.error.flatten(),
         });

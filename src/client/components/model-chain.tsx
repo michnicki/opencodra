@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { cn } from '@client/lib/utils';
 import { Select } from '@client/components/ui/select';
 import { Button } from '@client/components/ui/button';
@@ -10,11 +10,10 @@ export const PROVIDERS = [
 ];
 
 export const MODELS = [
-  { value: '@cf/moonshotai/kimi-k2.5',   label: 'Kimi K2.5',           provider: 'cloudflare' },
-  { value: 'gemma-4-31b-it',             label: 'Gemma 4 (31b)',       provider: 'google' },
-  { value: 'gemma-3-27b',                 label: 'Gemma 3 (27b)',       provider: 'google' },
-  { value: '@cf/zai-org/glm-4.7-flash',   label: 'GLM 4.7 Flash',       provider: 'cloudflare' },
-  { value: 'gemini-2.0-flash-001',       label: 'Gemini 2.0 Flash',    provider: 'google' },
+  { value: 'gemma-4-31b-it',               label: 'Gemma 4 (31b)',       provider: 'google' },
+  { value: 'gemma-4-26b-a4b-it',           label: 'Gemma 4 (26b)',       provider: 'google' },
+  { value: '@cf/moonshotai/kimi-k2.5',     label: 'Kimi K2.5',           provider: 'cloudflare' },
+  { value: '@cf/zai-org/glm-4.7-flash',    label: 'GLM 4.7 Flash',       provider: 'cloudflare' },
 ];
 
 interface ModelSelectorProps {
@@ -27,6 +26,14 @@ interface ModelSelectorProps {
 export function ModelSelector({ value, onValueChange, hideLabels, className }: ModelSelectorProps) {
   const currentModel = MODELS.find(m => m.value === value) || MODELS[0];
   const [provider, setProvider] = useState(currentModel.provider);
+
+  // Keep provider in sync when value changes from parent
+  useEffect(() => {
+    const model = MODELS.find(m => m.value === value);
+    if (model && model.provider !== provider) {
+      setProvider(model.provider);
+    }
+  }, [value]);
 
   const filteredModels = useMemo(() => 
     MODELS.filter(m => m.provider === provider).map(m => ({ value: m.value, label: m.label })),
@@ -93,8 +100,9 @@ export function ModelChain({ primary, fallbacks, onChange }: ModelChainProps) {
             <Button 
               variant="ghost" 
               size="sm" 
+              type="button"
               className="h-9 px-2 text-muted-foreground/40 hover:text-red-500 hover:bg-red-500/5 mb-0"
-              onClick={() => removeFallback(i)}
+              onClick={(e) => { e.stopPropagation(); removeFallback(i); }}
             >
               <Trash2 size={14} />
             </Button>
@@ -102,6 +110,7 @@ export function ModelChain({ primary, fallbacks, onChange }: ModelChainProps) {
         ))}
 
         <button 
+          type="button"
           className="ml-1 text-[10px] font-bold text-primary/60 hover:text-primary transition-colors flex items-center gap-1.5 py-1"
           onClick={addFallback}
         >
