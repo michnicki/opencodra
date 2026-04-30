@@ -137,4 +137,38 @@ unescaped newlines",
     // Closest valid line to 8 in our mockFile (available are 1, 2, 3) is 3
     expect(result.comments[0].line).toBe(3);
   });
+
+  it('does not treat reviewed source snippets as review JSON', () => {
+    const rawOutput = `
+\`\`\`ts
+export function nextOwner(owner: string) {
+  return owner.toUpperCase();
+}
+\`\`\``;
+
+    expect(() => parseFileReviewResponse(rawOutput, mockFile)).toThrow('Could not find JSON root');
+  });
+
+  it('drops placeholder schema findings instead of failing validation', () => {
+    const rawOutput = `
+{
+  "findings": [{
+    "title": "<Plain title>",
+    "body": "<Technical explanation>",
+    "priority": "<0|1|2|3>",
+    "code_location": {
+      "absolute_file_path": "test.ts",
+      "line": "<int>",
+      "line_range": { "start": "<int>", "end": "<int>" }
+    }
+  }],
+  "overall_correctness": "patch is correct",
+  "overall_explanation": "No concrete findings",
+  "overall_confidence_score": 0.5
+}`;
+
+    const result = parseFileReviewResponse(rawOutput, mockFile);
+    expect(result.comments).toHaveLength(0);
+    expect(result.verdict).toBe('approve');
+  });
 });

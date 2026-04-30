@@ -1,6 +1,7 @@
 import type { AppBindings } from '@server/env';
 import { queryRows } from './client';
 import { defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type RepoConfig } from '@shared/schema';
+import { getOrCreateRepository } from './repositories';
 
 type JobRow = {
   id: string;
@@ -10,8 +11,8 @@ type JobRow = {
   pr_number: number;
   pr_title: string | null;
   pr_author: string | null;
-  commit_sha: string;
-  base_sha: string;
+  commit_sha: Buffer;
+  base_sha: Buffer;
   trigger: 'auto' | 'mention' | 'retry';
   status: 'queued' | 'running' | 'done' | 'failed' | 'superseded';
   config_snapshot: { review?: RepoConfig['review']; model?: RepoConfig['model'] } | null;
@@ -47,15 +48,16 @@ type JobDetailRow = JobRow & {
   files_json: unknown[] | null;
 };
 
-function mapJob(row: JobRow) {
+export function mapJob(row: JobRow) {
   return jobSummarySchema.parse({
     id: row.id,
     owner: row.owner,
     repo: row.repo,
+    installationId: row.installation_id,
     prNumber: row.pr_number,
     prTitle: row.pr_title,
     prAuthor: row.pr_author,
-    commitSha: row.commit_sha,
+    commitSha: row.commit_sha.toString('hex'),
     trigger: row.trigger,
     status: row.status,
     verdict: row.verdict,
@@ -69,6 +71,9 @@ function mapJob(row: JobRow) {
     errorMessage: row.error_msg,
     overallConfidenceScore: row.overall_confidence_score,
     steps: row.steps ?? [],
+    checkRunId: row.check_run_id,
+    configSnapshot: row.config_snapshot ? repoConfigSchema.parse(row.config_snapshot) : null,
+    retryOfJobId: row.retry_of_job_id,
   });
 }
 
@@ -90,37 +95,44 @@ export async function insertJob(
     retryOfJobId?: string | null;
   },
 ) {
+  const repositoryId = await getOrCreateRepository(env, {
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+  });
+
   const [row] = await queryRows<JobRow>(
     env,
     `
-      INSERT INTO jobs (
-        installation_id,
-        owner,
-        repo,
-        pr_number,
-        pr_title,
-        pr_author,
-        commit_sha,
-        base_sha,
-        trigger,
-        status,
-        config_snapshot,
-        head_ref,
-        base_ref,
-        retry_of_job_id
+      WITH inserted AS (
+        INSERT INTO jobs (
+          repository_id,
+          pr_number,
+          pr_title,
+          pr_author,
+          commit_sha,
+          base_sha,
+          trigger,
+          status,
+          config_snapshot,
+          head_ref,
+          base_ref,
+          retry_of_job_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid)
+        RETURNING *
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10::jsonb, $11, $12, $13::uuid)
-      RETURNING *
+      SELECT i.*, r.owner, r.repo, r.installation_id
+      FROM inserted i
+      JOIN repositories r ON i.repository_id = r.id
     `,
     [
-      input.installationId,
-      input.owner,
-      input.repo,
+      repositoryId,
       input.prNumber,
       input.prTitle,
       input.prAuthor,
-      input.commitSha,
-      input.baseSha,
+      Buffer.from(input.commitSha, 'hex'),
+      Buffer.from(input.baseSha, 'hex'),
       input.trigger,
       JSON.stringify(input.configSnapshot ?? defaultRepoConfig),
       input.headRef,
@@ -149,23 +161,23 @@ export async function listJobs(
 
   if (query.owner) {
     params.push(query.owner);
-    conditions.push(`owner = $${params.length}`);
+    conditions.push(`r.owner = $${params.length}`);
   }
   if (query.repo) {
     params.push(query.repo);
-    conditions.push(`repo = $${params.length}`);
+    conditions.push(`r.repo = $${params.length}`);
   }
   if (query.status) {
     params.push(query.status);
-    conditions.push(`status = $${params.length}`);
+    conditions.push(`j.status = $${params.length}`);
   }
   if (query.verdict) {
     params.push(query.verdict);
-    conditions.push(`verdict = $${params.length}`);
+    conditions.push(`j.verdict = $${params.length}`);
   }
   if (query.search) {
     params.push(`%${query.search}%`);
-    conditions.push(`(pr_title ILIKE $${params.length} OR CAST(pr_number AS TEXT) LIKE $${params.length})`);
+    conditions.push(`(j.pr_title ILIKE $${params.length} OR CAST(j.pr_number AS TEXT) LIKE $${params.length})`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -178,10 +190,11 @@ export async function listJobs(
   const rows = await queryRows<JobRow>(
     env,
     `
-      SELECT *
-      FROM jobs
+      SELECT j.*, r.owner, r.repo, r.installation_id
+      FROM jobs j
+      JOIN repositories r ON j.repository_id = r.id
       ${whereClause}
-      ORDER BY created_at DESC
+      ORDER BY j.created_at DESC
       LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `,
     params,
@@ -191,7 +204,8 @@ export async function listJobs(
     env,
     `
       SELECT COUNT(*) as count
-      FROM jobs
+      FROM jobs j
+      JOIN repositories r ON j.repository_id = r.id
       ${whereClause}
     `,
     params.slice(0, -2),
@@ -210,9 +224,10 @@ export async function getJobForProcessing(env: Pick<AppBindings, 'NEON_DATABASE_
   const [row] = await queryRows<JobRow>(
     env,
     `
-      SELECT *
-      FROM jobs
-      WHERE id = $1
+      SELECT j.*, r.owner, r.repo, r.installation_id
+      FROM jobs j
+      JOIN repositories r ON j.repository_id = r.id
+      WHERE j.id = $1
       LIMIT 1
     `,
     [jobId],
@@ -225,39 +240,63 @@ export async function getJobDetail(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, 
   if (!jobId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
     return null;
   }
+
   const [row] = await queryRows<JobDetailRow>(
     env,
     `
       SELECT
         j.*,
+        r.owner,
+        r.repo,
+        r.installation_id,
         COALESCE(
-          JSON_AGG(
-            JSON_BUILD_OBJECT(
-              'id', fr.id,
-              'jobId', fr.job_id,
-              'filePath', fr.file_path,
-              'fileStatus', fr.file_status,
-              'modelUsed', fr.model_used,
-              'diffLineCount', fr.diff_line_count,
-              'diffInput', fr.diff_input,
-              'rawAiOutput', fr.raw_ai_output,
-              'parsedComments', COALESCE(fr.parsed_comments, '[]'::jsonb),
-              'inputTokens', fr.input_tokens,
-              'outputTokens', fr.output_tokens,
-              'durationMs', fr.duration_ms,
-              'verdict', fr.verdict,
-              'fileSummary', fr.file_summary,
-              'errorMessage', fr.error_msg,
-              'createdAt', fr.created_at
+          (
+            SELECT JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'id', fr.id,
+                'jobId', fr.job_id,
+                'filePath', fr.file_path,
+                'fileStatus', fr.file_status,
+                'modelUsed', fr.model_used,
+                'diffLineCount', fr.diff_line_count,
+                'diffInput', fr.diff_input,
+                'rawAiOutput', fr.raw_ai_output,
+                'inputTokens', fr.input_tokens,
+                'outputTokens', fr.output_tokens,
+                'durationMs', fr.duration_ms,
+                'verdict', fr.verdict,
+                'fileSummary', fr.file_summary,
+                'errorMessage', fr.error_msg,
+                'createdAt', fr.created_at,
+                'parsedComments', COALESCE(
+                  (
+                    SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                        'path', rc.path,
+                        'line', rc.line,
+                        'position', rc.position,
+                        'severity', rc.severity,
+                        'category', rc.category,
+                        'title', rc.title,
+                        'body', rc.body,
+                        'codeSuggestion', rc.code_suggestion
+                      )
+                      ORDER BY rc.id ASC
+                    ) FROM review_comments rc WHERE rc.file_review_id = fr.id
+                  ),
+                  '[]'::json
+                )
+              )
+              ORDER BY fr.created_at ASC
             )
-            ORDER BY fr.created_at ASC
-          ) FILTER (WHERE fr.id IS NOT NULL),
+            FROM file_reviews fr
+            WHERE fr.job_id = j.id
+          ),
           '[]'::json
         ) AS files_json
       FROM jobs j
-      LEFT JOIN file_reviews fr ON fr.job_id = j.id
+      JOIN repositories r ON j.repository_id = r.id
       WHERE j.id = $1
-      GROUP BY j.id
     `,
     [jobId],
   );
@@ -266,7 +305,7 @@ export async function getJobDetail(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, 
 
   return jobDetailSchema.parse({
     ...mapJob(row),
-    baseSha: row.base_sha,
+    baseSha: row.base_sha.toString('hex'),
     headRef: row.head_ref,
     baseRef: row.base_ref,
     summaryMarkdown: row.summary_markdown,
@@ -278,17 +317,31 @@ export async function getJobDetail(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, 
   });
 }
 
-export async function markJobRunning(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId: string) {
-  await queryRows(
+export async function startJobProcessing(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId: string, stepName: string) {
+  const now = new Date().toISOString();
+  const rows = await queryRows<{ id: string }>(
     env,
     `
       UPDATE jobs
       SET status = 'running',
-          started_at = COALESCE(started_at, now())
+          started_at = COALESCE(started_at, now()),
+          steps = COALESCE(steps, '[]'::jsonb) || jsonb_build_array(
+            jsonb_build_object(
+              'name', $2::text,
+              'status', 'running',
+              'startedAt', $3::text,
+              'finishedAt', NULL,
+              'error', NULL
+            )
+          )
       WHERE id = $1
+        AND status = 'queued'
+      RETURNING id
     `,
-    [jobId],
+    [jobId, stepName, now],
   );
+
+  return rows.length > 0;
 }
 
 export async function updateJobCheckRun(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId: string, checkRunId: number) {
@@ -337,14 +390,14 @@ export async function completeJob(
       WHERE id = $1
     `,
     [
-      jobId, 
-      input.verdict, 
-      input.fileCount, 
-      input.commentCount, 
-      input.totalInputTokens, 
-      input.totalOutputTokens, 
-      input.summaryMarkdown, 
-      input.reviewId, 
+      jobId,
+      input.verdict,
+      input.fileCount,
+      input.commentCount,
+      input.totalInputTokens,
+      input.totalOutputTokens,
+      input.summaryMarkdown,
+      input.reviewId,
       input.summaryModel,
       input.overallConfidenceScore ?? null
     ],
@@ -358,7 +411,19 @@ export async function failJob(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId
       UPDATE jobs
       SET status = 'failed',
           finished_at = now(),
-          error_msg = $2
+          error_msg = $2,
+          steps = CASE
+            WHEN steps IS NOT NULL THEN (
+              SELECT jsonb_agg(
+                CASE
+                  WHEN s->>'status' = 'running'
+                  THEN s || jsonb_build_object('status', 'failed', 'finishedAt', now(), 'error', $2::text)
+                  ELSE s
+                END
+              ) FROM jsonb_array_elements(steps) s
+            )
+            ELSE steps
+          END
       WHERE id = $1
     `,
     [jobId, errorMessage],
@@ -377,6 +442,28 @@ export async function updateJobFileCount(env: Pick<AppBindings, 'NEON_DATABASE_U
   );
 }
 
+export async function completePreparationStep(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId: string, fileCount: number) {
+  const now = new Date().toISOString();
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET file_count = $2,
+          steps = (
+            SELECT jsonb_agg(
+              CASE
+                WHEN s->>'name' = 'Preparation'
+                THEN s || jsonb_build_object('status', 'done', 'finishedAt', $3::text)
+                ELSE s
+              END
+            ) FROM jsonb_array_elements(steps) s
+          )
+      WHERE id = $1
+    `,
+    [jobId, fileCount, now],
+  );
+}
+
 export async function findExistingJobForHead(
   env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
   input: { owner: string; repo: string; prNumber: number; commitSha: string; trigger: 'auto' | 'mention' },
@@ -384,17 +471,18 @@ export async function findExistingJobForHead(
   const [row] = await queryRows<JobRow>(
     env,
     `
-      SELECT *
-      FROM jobs
-      WHERE owner = $1
-        AND repo = $2
-        AND pr_number = $3
-        AND commit_sha = $4
-        AND trigger = $5
-      ORDER BY created_at DESC
+      SELECT j.*, r.owner, r.repo, r.installation_id
+      FROM jobs j
+      JOIN repositories r ON j.repository_id = r.id
+      WHERE r.owner = $1
+        AND r.repo = $2
+        AND j.pr_number = $3
+        AND j.commit_sha = $4
+        AND j.trigger = $5
+      ORDER BY j.created_at DESC
       LIMIT 1
     `,
-    [input.owner, input.repo, input.prNumber, input.commitSha, input.trigger],
+    [input.owner, input.repo, input.prNumber, Buffer.from(input.commitSha, 'hex'), input.trigger],
   );
 
   return row ? mapJob(row) : null;
@@ -411,42 +499,48 @@ export async function updateJobStep(
     error?: string | null;
   },
 ) {
-  const [job] = await queryRows<JobRow>(env, 'SELECT steps FROM jobs WHERE id = $1', [jobId]);
-  if (!job) return;
-
-  let steps = (job.steps ?? []) as JobStep[];
-  const stepIndex = steps.findIndex((s) => s.name === stepName);
-
   const now = new Date().toISOString();
+  const startedAt = update.status === 'running' ? now : (update.startedAt ?? null);
+  const finishedAt = update.status === 'done' || update.status === 'failed' ? now : (update.finishedAt ?? null);
+  const error = update.error ?? null;
 
-  if (stepIndex === -1) {
-    steps.push({
-      name: stepName,
-      status: update.status,
-      startedAt: update.status === 'running' ? now : (update.startedAt ?? null),
-      finishedAt: update.status === 'done' || update.status === 'failed' ? now : (update.finishedAt ?? null),
-      error: update.error,
-    });
-  } else {
-    steps[stepIndex] = {
-      ...steps[stepIndex],
-      status: update.status,
-      startedAt: update.status === 'running' && !steps[stepIndex].startedAt ? now : (update.startedAt ?? steps[stepIndex].startedAt),
-      finishedAt: update.status === 'done' || update.status === 'failed' ? now : (update.finishedAt ?? steps[stepIndex].finishedAt),
-      error: update.error ?? steps[stepIndex].error,
-    };
-  }
-
-  await queryRows(env, 'UPDATE jobs SET steps = $2 WHERE id = $1', [jobId, JSON.stringify(steps)]);
+  // Single query that either updates existing step or appends a new one
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET steps = CASE
+        WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(steps, '[]'::jsonb)) s WHERE s->>'name' = $2)
+        THEN (
+          SELECT jsonb_agg(
+            CASE
+              WHEN s->>'name' = $2
+              THEN s || jsonb_build_object(
+                'status', $3::text,
+                'startedAt', COALESCE($4::text, s->>'startedAt'),
+                'finishedAt', COALESCE($5::text, s->>'finishedAt'),
+                'error', COALESCE($6::text, s->>'error')
+              )
+              ELSE s
+            END
+          ) FROM jsonb_array_elements(COALESCE(steps, '[]'::jsonb)) s
+        )
+        ELSE COALESCE(steps, '[]'::jsonb) || jsonb_build_array(
+          jsonb_build_object(
+            'name', $2::text,
+            'status', $3::text,
+            'startedAt', $4::text,
+            'finishedAt', $5::text,
+            'error', $6::text
+          )
+        )
+      END
+      WHERE id = $1
+    `,
+    [jobId, stepName, update.status, startedAt, finishedAt, error],
+  );
 }
 
-/**
- * Marks every job that has been stuck in 'running' for longer than
- * `thresholdMinutes` as failed. This prevents phantom running jobs that were
- * left behind by a crashed or OOM-killed worker invocation.
- *
- * Returns the number of rows updated.
- */
 export async function recoverStaleJobs(
   env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
   thresholdMinutes = 20,
@@ -464,10 +558,6 @@ export async function recoverStaleJobs(
   return rows.length;
 }
 
-/**
- * Marks older 'queued' or 'running' jobs for the same Pull Request as superseded.
- * This should be called when a new job is created for a PR.
- */
 export async function supersedeOlderJobs(
   env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
   input: {
@@ -481,17 +571,19 @@ export async function supersedeOlderJobs(
   const rows = await queryRows<{ id: string }>(
     env,
     `
-      UPDATE jobs
+      UPDATE jobs j
       SET status = 'superseded',
           finished_at = now(),
           error_msg = 'Superseded by a newer commit or job.'
-      WHERE installation_id = $1
-        AND owner = $2
-        AND repo = $3
-        AND pr_number = $4
-        AND id != $5
-        AND status IN ('queued', 'running')
-      RETURNING id
+      FROM repositories r
+      WHERE j.repository_id = r.id
+        AND r.installation_id = $1
+        AND r.owner = $2
+        AND r.repo = $3
+        AND j.pr_number = $4
+        AND j.id != $5
+        AND j.status IN ('queued', 'running')
+      RETURNING j.id
     `,
     [input.installationId, input.owner, input.repo, input.prNumber, input.newJobId],
   );

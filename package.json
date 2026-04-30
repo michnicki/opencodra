@@ -6,11 +6,12 @@
   "scripts": {
     "build": "vite build && npm run cf-typegen",
     "cf-typegen": "wrangler types ./src/server/worker-env.d.ts",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run build && npm run migrate && wrangler deploy",
     "dev": "concurrently -k -n CLIENT,WORKER -c cyan,green \"npm:dev:client\" \"npm:dev:worker\"",
     "dev:client": "vite build --watch --mode development",
     "dev:worker": "wrangler dev",
     "start": "npm run dev",
+    "migrate": "node scripts/migrate.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -58,8 +59,8 @@
     "recharts": "^3.8.1",
     "rehype-raw": "^7.0.0",
     "remark-gfm": "^4.0.1",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
-    "yaml": "^2.8.3",
     "zod": "^4.3.6"
   }
 }

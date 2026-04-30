@@ -24,7 +24,7 @@ export async function insertFileReview(
     errorMessage: string | null;
   },
 ) {
-  await queryRows(
+  const [review] = await queryRows<{ id: string }>(
     env,
     `
       INSERT INTO file_reviews (
@@ -35,7 +35,6 @@ export async function insertFileReview(
         diff_line_count,
         diff_input,
         raw_ai_output,
-        parsed_comments,
         input_tokens,
         output_tokens,
         duration_ms,
@@ -46,7 +45,8 @@ export async function insertFileReview(
         error_msg,
         model_provider
       )
-      VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      RETURNING id
     `,
     [
       input.jobId,
@@ -56,7 +56,6 @@ export async function insertFileReview(
       input.diffLineCount,
       input.diffInput,
       input.rawAiOutput,
-      JSON.stringify(input.parsedComments),
       input.inputTokens,
       input.outputTokens,
       input.durationMs,
@@ -68,6 +67,30 @@ export async function insertFileReview(
       input.modelProvider ?? null,
     ],
   );
+
+  if (input.parsedComments.length > 0) {
+    // Insert comments
+    // Using simple loop or unnest, unnest is more efficient for batch insert
+    const paths = input.parsedComments.map(c => c.path);
+    const lines = input.parsedComments.map(c => c.line ?? null);
+    const positions = input.parsedComments.map(c => c.position ?? null);
+    const severities = input.parsedComments.map(c => c.severity);
+    const categories = input.parsedComments.map(c => c.category);
+    const titles = input.parsedComments.map(c => c.title);
+    const bodies = input.parsedComments.map(c => c.body);
+    const codeSuggestions = input.parsedComments.map(c => c.codeSuggestion ?? null);
+
+    await queryRows(
+      env,
+      `
+        INSERT INTO review_comments (
+          file_review_id, path, line, position, severity, category, title, body, code_suggestion
+        )
+        SELECT $1::uuid, * FROM UNNEST($2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
+      `,
+      [review.id, paths, lines, positions, severities, categories, titles, bodies, codeSuggestions]
+    );
+  }
 }
 
 export async function getModelUsageStats(env: Pick<AppBindings, 'NEON_DATABASE_URL'>) {
@@ -93,7 +116,133 @@ export async function getModelUsageStats(env: Pick<AppBindings, 'NEON_DATABASE_U
   );
 }
 
-export async function getFileReviewsForJob(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobId: string) {
+export async function batchInsertFileReviews(
+  env: Pick<AppBindings, 'NEON_DATABASE_URL'>,
+  jobId: string,
+  reviews: Array<{
+    filePath: string;
+    fileStatus: 'pending' | 'done' | 'skipped' | 'failed';
+    modelUsed: string;
+    modelProvider?: string | null;
+    diffLineCount: number;
+    diffInput: string | null;
+    rawAiOutput: string | null;
+    parsedComments: ParsedReviewComment[];
+    inputTokens: number | null;
+    outputTokens: number | null;
+    durationMs: number | null;
+    verdict: 'approve' | 'comment' | null;
+    fileSummary: string | null;
+    overallCorrectness?: string | null;
+    confidenceScore?: number | null;
+    errorMessage: string | null;
+  }>,
+) {
+  if (reviews.length === 0) return;
+
+  // 1. Insert file reviews and get their IDs
+  // Since we want to handle comments too, we'll do this in a single query with UNNEST and RETURNING
+  const filePaths = reviews.map(r => r.filePath);
+  const fileStatuses = reviews.map(r => r.fileStatus);
+  const modelsUsed = reviews.map(r => r.modelUsed);
+  const diffLineCounts = reviews.map(r => r.diffLineCount);
+  const diffInputs = reviews.map(r => r.diffInput);
+  const rawAiOutputs = reviews.map(r => r.rawAiOutput);
+  const inputTokens = reviews.map(r => r.inputTokens);
+  const outputTokens = reviews.map(r => r.outputTokens);
+  const durationMs = reviews.map(r => r.durationMs);
+  const verdicts = reviews.map(r => r.verdict);
+  const fileSummaries = reviews.map(r => r.fileSummary);
+  const overallCorrectness = reviews.map(r => r.overallCorrectness ?? null);
+  const confidenceScores = reviews.map(r => r.confidenceScore ?? null);
+  const errorMessages = reviews.map(r => r.errorMessage);
+  const modelProviders = reviews.map(r => r.modelProvider ?? null);
+
+  const insertedRows = await queryRows<{ id: string; file_path: string }>(
+    env,
+    `
+      INSERT INTO file_reviews (
+        job_id, file_path, file_status, model_used, diff_line_count, diff_input,
+        raw_ai_output, input_tokens, output_tokens, duration_ms, verdict,
+        file_summary, overall_correctness, confidence_score, error_msg, model_provider
+      )
+      SELECT $1::uuid, * FROM UNNEST(
+        $2::text[], $3::text[], $4::text[], $5::int[], $6::text[],
+        $7::text[], $8::int[], $9::int[], $10::int[], $11::text[],
+        $12::text[], $13::text[], $14::real[], $15::text[], $16::text[]
+      )
+      RETURNING id, file_path
+    `,
+    [
+      jobId, filePaths, fileStatuses, modelsUsed, diffLineCounts, diffInputs,
+      rawAiOutputs, inputTokens, outputTokens, durationMs, verdicts,
+      fileSummaries, overallCorrectness, confidenceScores, errorMessages, modelProviders
+    ]
+  );
+
+  // 2. Prepare and insert comments for all reviews
+  const allComments: Array<{
+    fileReviewId: string;
+    path: string;
+    line: number | null;
+    position: number | null;
+    severity: string;
+    category: string;
+    title: string;
+    body: string;
+    codeSuggestion: string | null;
+  }> = [];
+
+  for (const review of reviews) {
+    const inserted = insertedRows.find(r => r.file_path === review.filePath);
+    if (!inserted || review.parsedComments.length === 0) continue;
+
+    for (const comment of review.parsedComments) {
+      allComments.push({
+        fileReviewId: inserted.id,
+        path: comment.path,
+        line: comment.line ?? null,
+        position: comment.position ?? null,
+        severity: comment.severity,
+        category: comment.category,
+        title: comment.title,
+        body: comment.body,
+        codeSuggestion: comment.codeSuggestion ?? null,
+      });
+    }
+  }
+
+  if (allComments.length > 0) {
+    await queryRows(
+      env,
+      `
+        INSERT INTO review_comments (
+          file_review_id, path, line, position, severity, category, title, body, code_suggestion
+        )
+        SELECT * FROM UNNEST(
+          $1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[]
+        )
+      `,
+      [
+        allComments.map(c => c.fileReviewId),
+        allComments.map(c => c.path),
+        allComments.map(c => c.line),
+        allComments.map(c => c.position),
+        allComments.map(c => c.severity),
+        allComments.map(c => c.category),
+        allComments.map(c => c.title),
+        allComments.map(c => c.body),
+        allComments.map(c => c.codeSuggestion),
+      ]
+    );
+  }
+}
+
+
+
+export async function getFileReviewsForJobs(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, jobIds: string[]) {
+  if (jobIds.length === 0) return [];
+
   return queryRows<{
     id: string;
     job_id: string;
@@ -116,11 +265,30 @@ export async function getFileReviewsForJob(env: Pick<AppBindings, 'NEON_DATABASE
   }>(
     env,
     `
-      SELECT *
-      FROM file_reviews
-      WHERE job_id = $1::uuid
-      ORDER BY created_at ASC
+      SELECT
+        fr.*,
+        COALESCE(
+          (
+            SELECT JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'path', rc.path,
+                'line', rc.line,
+                'position', rc.position,
+                'severity', rc.severity,
+                'category', rc.category,
+                'title', rc.title,
+                'body', rc.body,
+                'codeSuggestion', rc.code_suggestion
+              )
+            ORDER BY rc.id ASC
+            ) FROM review_comments rc WHERE rc.file_review_id = fr.id
+          ),
+          '[]'::json
+        ) AS parsed_comments
+      FROM file_reviews fr
+      WHERE fr.job_id = ANY($1::uuid[])
+      ORDER BY fr.created_at ASC
     `,
-    [jobId],
+    [jobIds],
   );
 }

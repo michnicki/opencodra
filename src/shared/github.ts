@@ -1,4 +1,10 @@
-export type GitHubWebhookEventName = 'pull_request' | 'issue_comment';
+export const supportedGitHubWebhookEvents = ['pull_request', 'issue_comment'] as const;
+
+export type GitHubWebhookEventName = typeof supportedGitHubWebhookEvents[number];
+
+export function isSupportedGitHubWebhookEvent(eventName: string): eventName is GitHubWebhookEventName {
+  return (supportedGitHubWebhookEvents as readonly string[]).includes(eventName);
+}
 
 export type PullRequestWebhookPayload = {
   action: 'opened' | 'synchronize' | 'ready_for_review' | 'reopened' | 'closed';

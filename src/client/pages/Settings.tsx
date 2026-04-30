@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { api } from '@client/lib/api';
 import { PageHeader } from '@client/components/page-header';
 import { Button } from '@client/components/ui/button';
@@ -10,6 +11,24 @@ import {
 import type { ModelConfig } from '@shared/schema';
 import { ModelChain, MODELS } from '@client/components/model-chain';
 import { cn } from '@client/lib/utils';
+
+// ─── Default global config matching the expected dashboard defaults ───────────
+const DEFAULT_GLOBAL_CONFIG = {
+  main: 'gemma-4-31b-it',
+  fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+  size_overrides: [
+    {
+      max_lines: 300,
+      model: 'gemma-4-31b-it',
+      fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+    },
+    {
+      max_lines: 100,
+      model: '@cf/moonshotai/kimi-k2.5',
+      fallbacks: ['@cf/zai-org/glm-4.7-flash'],
+    },
+  ],
+};
 
 // ─── SettingsPage ────────────────────────────────────────────────────────
 export function SettingsPage() {
@@ -26,9 +45,22 @@ export function SettingsPage() {
         api.getGlobalConfig(),
       ]);
       setConfigs(modelsRes.configs);
-      setGlobalConfig(globalRes.config);
+
+      // If global config has no main model set, seed with defaults
+      const cfg = globalRes.config;
+      if (!cfg || !cfg.main) {
+        setGlobalConfig(DEFAULT_GLOBAL_CONFIG);
+      } else {
+        // Ensure fallbacks array is always populated with defaults if empty
+        setGlobalConfig({
+          ...cfg,
+          fallbacks: cfg.fallbacks?.length ? cfg.fallbacks : DEFAULT_GLOBAL_CONFIG.fallbacks,
+          size_overrides: cfg.size_overrides ?? DEFAULT_GLOBAL_CONFIG.size_overrides,
+        });
+      }
     } catch (e: any) {
       setError(e.message);
+      toast.error('Failed to load settings', { description: e.message });
     } finally {
       setLoading(false);
     }
@@ -39,10 +71,17 @@ export function SettingsPage() {
   const handleGlobalUpdate = async () => {
     setSaving('global');
     setError(null);
+    const tid = toast.loading('Saving global strategy…');
     try {
       await api.updateGlobalConfig(globalConfig);
+      toast.success('Global strategy saved', {
+        id: tid,
+        description: `Primary model: ${MODELS.find(m => m.value === globalConfig.main)?.label ?? globalConfig.main}`,
+      });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Update failed');
+      const msg = e instanceof Error ? e.message : 'Update failed';
+      setError(msg);
+      toast.error('Failed to save strategy', { id: tid, description: msg });
     } finally {
       setSaving(null);
     }
@@ -51,6 +90,7 @@ export function SettingsPage() {
   const handleUpdate = async (id: string, updates: Partial<ModelConfig>) => {
     setSaving(id);
     setError(null);
+    const tid = toast.loading(`Updating ${id}…`);
     try {
       const current = configs.find(c => c.modelId === id);
       if (!current) return;
@@ -59,8 +99,11 @@ export function SettingsPage() {
       setConfigs(configs.map(c =>
         c.modelId === id ? { ...c, ...updates, updatedAt: new Date().toISOString() } : c,
       ));
+      toast.success('Model quota updated', { id: tid, description: id });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Update failed');
+      const msg = e instanceof Error ? e.message : 'Update failed';
+      setError(msg);
+      toast.error('Failed to update quota', { id: tid, description: msg });
     } finally {
       setSaving(null);
     }
@@ -74,7 +117,7 @@ export function SettingsPage() {
     setGlobalConfig({
       ...globalConfig,
       size_overrides: [
-        ...(globalConfig.size_overrides || []),
+        ...(globalConfig?.size_overrides || []),
         { max_lines: 300, model: MODELS[0].value, fallbacks: [] },
       ],
     });
@@ -87,10 +130,8 @@ export function SettingsPage() {
   };
 
   const removeGlobalOverride = (idx: number) => {
-    setGlobalConfig({
-      ...globalConfig,
-      size_overrides: (globalConfig.size_overrides || []).filter((_: any, i: number) => i !== idx),
-    });
+    const next = (globalConfig.size_overrides || []).filter((_: any, i: number) => i !== idx);
+    setGlobalConfig({ ...globalConfig, size_overrides: next });
   };
 
   return (
@@ -121,6 +162,7 @@ export function SettingsPage() {
             variant="outline"
             size="sm"
             onClick={addGlobalOverride}
+            disabled={!globalConfig}
             className="gap-1.5 h-7 text-[10px] font-semibold"
           >
             <ListPlus size={12} />
@@ -155,7 +197,8 @@ export function SettingsPage() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => removeGlobalOverride(i)}
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); removeGlobalOverride(i); }}
                       className="absolute top-2 right-2 h-7 w-7 text-muted-foreground/30 hover:text-danger hover:bg-danger/5"
                     >
                       <Trash2 size={13} />

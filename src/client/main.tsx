@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { AppShell } from './components/app-shell';
 import { LandingPage } from './pages/Landing';
 import { DashboardPage } from './pages/Dashboard';
@@ -14,6 +15,19 @@ import { NotFoundPage } from './pages/NotFound';
 import './app.css';
 
 import { ThemeProvider } from './lib/theme';
+import { useIsDarkMode } from './hooks/use-is-dark-mode';
+
+function ToasterWrapper() {
+  const isDark = useIsDarkMode();
+  return (
+    <Toaster
+      theme={isDark ? 'dark' : 'light'}
+      position="bottom-right"
+      richColors
+      closeButton
+    />
+  );
+}
 
 const router = createBrowserRouter([
   {
@@ -45,6 +59,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
       <RouterProvider router={router} />
+      <ToasterWrapper />
     </ThemeProvider>
   </React.StrictMode>,
 );

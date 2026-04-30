@@ -20,7 +20,7 @@ export function JobsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading]   = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  
+
   // System failures (DLQ) state
   const [dlqMessages, setDlqMessages] = useState<DlqMessage[]>([]);
   const [loadingDlq, setLoadingDlq] = useState(true);
@@ -45,7 +45,7 @@ export function JobsPage() {
         }),
         api.getDlqMessages(20).catch(() => ({ messages: [] }))
       ]);
-      
+
       setJobs(jobsRes.jobs);
       setTotal(jobsRes.total);
       setDlqMessages(dlqRes.messages);
@@ -167,7 +167,9 @@ export function JobsPage() {
                 {dlqMessages.map((msg) => (
                   <tr key={msg.lease_id} className="group hover:bg-warning/[0.04] transition-colors">
                     <td className="px-5 py-3 font-mono text-muted-foreground whitespace-nowrap">
-                      {new Date(msg.metadata.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      {msg.metadata.timestamp
+                        ? new Date(msg.metadata.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                        : '—'}
                     </td>
                     <td className="px-5 py-3">
                       <span className="inline-flex items-center rounded-sm bg-warning/20 px-1 font-bold text-warning">

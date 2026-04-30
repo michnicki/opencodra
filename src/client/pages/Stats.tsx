@@ -55,7 +55,7 @@ const axisProps = {
 /* ══════════════════════════════════════════════════════════
    EVIL Chart: Full-width Area — 30-day review volume
    (Renamed to AreaVolumeChart for clarity)
-══════════════════════════════════════════════════════════ */
+ ══════════════════════════════════════════════════════════ */
 function AreaVolumeChart({ data, isDark, days }: { data: { day: string; jobs: number }[]; isDark: boolean; days: number }) {
   const color = isDark ? LM_DARK : LM;
   return (
@@ -134,7 +134,7 @@ function AreaVolumeChart({ data, isDark, days }: { data: { day: string; jobs: nu
 
 /* ══════════════════════════════════════════════════════════
    EVIL Chart: Bar — language models
-══════════════════════════════════════════════════════════ */
+ ══════════════════════════════════════════════════════════ */
 function ModelsBarChart({
   models, isDark,
 }: {
@@ -191,7 +191,7 @@ function ModelsBarChart({
 
 /* ══════════════════════════════════════════════════════════
    EVIL Chart: Donut — decision mix
-══════════════════════════════════════════════════════════ */
+ ══════════════════════════════════════════════════════════ */
 const RADIAN = Math.PI / 180;
 function CustomLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }: any) {
   if (percent < 0.08) return null;
@@ -280,7 +280,7 @@ function VerdictDonut({ verdictData }: { verdictData: { name: string; value: num
 
 /* ══════════════════════════════════════════════════════════
    Top Repos  
-══════════════════════════════════════════════════════════ */
+ ══════════════════════════════════════════════════════════ */
 function TopRepos({ repos }: { repos: StatsPayload['topRepos'] }) {
   const max = Math.max(...repos.map((r) => r.jobs), 1);
   return (
@@ -323,7 +323,7 @@ function TopRepos({ repos }: { repos: StatsPayload['topRepos'] }) {
 
 /* ══════════════════════════════════════════════════════════
    Main page
-══════════════════════════════════════════════════════════ */
+ ══════════════════════════════════════════════════════════ */
 export function StatsPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -359,10 +359,30 @@ export function StatsPage() {
   }
 
   const kpiItems = [
-    { icon: Activity,       label: 'Reviews',       value: fmtNumber(stats.totals.jobs) },
-    { icon: ArrowUpRight,   label: 'Input tokens',  value: fmtNumber(stats.totals.inputTokens) },
-    { icon: Cpu,            label: 'Output tokens', value: fmtNumber(stats.totals.outputTokens) },
-    { icon: MessageSquare,  label: 'Comments',      value: fmtNumber(stats.totals.comments) },
+    {
+      icon: Activity,
+      label: 'Total reviews',
+      value: fmtNumber(stats.totals.jobs),
+      trend: stats.trend.map(d => d.jobs),
+    },
+    {
+      icon: ArrowUpRight,
+      label: 'Input tokens',
+      value: fmtNumber(stats.totals.inputTokens),
+      trend: stats.trend.map(d => d.inputTokens),
+    },
+    {
+      icon: Cpu,
+      label: 'Output tokens',
+      value: fmtNumber(stats.totals.outputTokens),
+      trend: stats.trend.map(d => d.outputTokens),
+    },
+    {
+      icon: MessageSquare,
+      label: 'Comments posted',
+      value: fmtNumber(stats.totals.comments),
+      trend: stats.trend.map(d => d.comments),
+    },
   ];
 
   const verdictData = stats.verdicts

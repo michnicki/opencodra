@@ -5,68 +5,237 @@ import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPo
 import type { FileDiff } from './diff';
 import { jsonrepair } from 'jsonrepair';
 
+function hasReviewKeys(input: string) {
+  return /"(findings|overall_explanation|overall_correctness|overall_confidence_score|summary)"\s*:/.test(input);
+}
+
 function extractJson(raw: string) {
-  // 1. Try to find the last markdown code block first (often where the "final" answer is)
-  const blocks = Array.from(raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi));
-  if (blocks.length > 0) {
-    return blocks[blocks.length - 1][1].trim();
+  // 1. Try to find explicit JSON blocks first (most reliable)
+  const jsonBlocks = Array.from(raw.matchAll(/```json\s*([\s\S]*?)```/gi));
+  if (jsonBlocks.length > 0) {
+    return jsonBlocks[jsonBlocks.length - 1][1].trim();
   }
 
-  // 1b. Handle truncated markdown block (unclosed)
-  const openBlockMatch = raw.match(/```(?:json)?\s*([\s\S]*)$/i);
-  if (openBlockMatch) {
-    return openBlockMatch[1].trim();
-  }
-
-  // 2. If no code blocks, look for the block containing "findings" or "summary"
-  const findingsIdx = raw.lastIndexOf('"findings"');
-  const summaryIdx = raw.lastIndexOf('"summary"');
-  const targetIdx = Math.max(findingsIdx, summaryIdx);
-
-  if (targetIdx !== -1) {
-    const startIdx = raw.lastIndexOf('{', targetIdx);
-    if (startIdx !== -1) {
-      const endIdx = raw.lastIndexOf('}');
-      if (endIdx > startIdx) {
-        return raw.slice(startIdx, endIdx + 1);
+  // 2. Fallback to generic code blocks - must contain a JSON-like structure
+  const genericBlocks = Array.from(raw.matchAll(/```(?:[\w+-]+)?\s*([\s\S]*?)```/gi));
+  if (genericBlocks.length > 0) {
+    const candidates = genericBlocks.filter(b => b[1].includes('{') && b[1].includes('}') && hasReviewKeys(b[1]));
+    if (candidates.length > 0) {
+      const content = candidates[candidates.length - 1][1].trim();
+      // Try to find the actual object inside the code block
+      const start = content.indexOf('{');
+      const end = content.lastIndexOf('}');
+      if (start !== -1 && end !== -1 && end > start) {
+        return content.slice(start, end + 1);
       }
-      return raw.slice(startIdx); // Pass to jsonrepair to salvage
+      return content;
     }
   }
 
-  // 3. Fallback to basic balanced braces
-  const firstBrace = raw.indexOf('{');
-  if (firstBrace !== -1) {
-    const lastBrace = raw.lastIndexOf('}');
-    if (lastBrace > firstBrace) {
-      return raw.slice(firstBrace, lastBrace + 1);
+  // 3. Robust "Outer Brace" extraction
+  // Find the first '{' and then match braces to find the corresponding '}'
+  // We prioritize blocks that look like our expected JSON
+  const findingsIdx = raw.indexOf('"findings"');
+  const summaryIdx = raw.indexOf('"summary"');
+  const targetIdx = findingsIdx !== -1 ? findingsIdx : (summaryIdx !== -1 ? summaryIdx : -1);
+
+  let firstBrace = -1;
+  if (targetIdx !== -1) {
+    // Try to find the brace that opens the object containing the keyword
+    firstBrace = raw.lastIndexOf('{', targetIdx);
+  }
+
+  // If no keyword found, search for generic brace blocks and score them
+  if (firstBrace === -1) {
+    const allBraces = Array.from(raw.matchAll(/\{/g));
+    let bestIdx = -1;
+    let bestScore = -1;
+
+    for (const match of allBraces) {
+      const idx = match.index!;
+      const excerpt = raw.slice(idx, idx + 200);
+      let score = 0;
+
+      // Keywords are strong indicators
+      if (excerpt.includes('"findings"')) score += 100;
+      if (excerpt.includes('"summary"')) score += 50;
+      if (excerpt.includes('"overall_explanation"')) score += 50;
+
+      // JSON structure indicators
+      if (excerpt.includes('" : ') || excerpt.includes('":')) score += 10;
+      if (excerpt.includes('"[')) score += 5;
+
+      // Anti-indicators (looks like code, not our JSON)
+      if (excerpt.includes(': number;') || excerpt.includes(': string;')) score -= 80;
+      if (excerpt.includes('export ') || excerpt.includes('function ')) score -= 80;
+      if (excerpt.includes('interface ') || excerpt.includes('type ')) score -= 80;
+      if (excerpt.includes(' + ')) score -= 20; // Looks like a diff hunk
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = idx;
+      }
     }
-    return raw.slice(firstBrace);
+
+    if (bestIdx !== -1 && bestScore > 0) {
+      firstBrace = bestIdx;
+    }
+  }
+
+  // Final fallback to the very first brace if we're desperate and it looks like JSON
+  if (firstBrace === -1) {
+    const start = raw.indexOf('{');
+    if (start !== -1) {
+      const excerpt = raw.slice(start, start + 50);
+      if (excerpt.includes('"') && excerpt.includes(':')) {
+        firstBrace = start;
+      }
+    }
+  }
+
+  if (firstBrace !== -1) {
+    let stack = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = firstBrace; i < raw.length; i++) {
+      const char = raw[i];
+
+      if (escape) {
+        escape = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '{') stack++;
+        else if (char === '}') {
+          stack--;
+          if (stack === 0) {
+            return raw.slice(firstBrace, i + 1);
+          }
+        }
+      }
+    }
+
+    // Truncated - return everything from first brace
+    return raw.slice(firstBrace).trim();
   }
 
   return raw.trim();
 }
 
+function isPlaceholderString(value: unknown) {
+  return typeof value === 'string' && /^<[^>]+>$/.test(value.trim());
+}
+
+function coerceReviewNumber(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && !isPlaceholderString(value)) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeFinding(finding: any) {
+  if (!finding || typeof finding !== 'object') return null;
+  if (isPlaceholderString(finding.title) || isPlaceholderString(finding.body)) return null;
+
+  const location = finding.code_location && typeof finding.code_location === 'object' ? finding.code_location : {};
+  const line = coerceReviewNumber(location.line);
+  const start = coerceReviewNumber(location.line_range?.start);
+  const end = coerceReviewNumber(location.line_range?.end);
+  const priority = coerceReviewNumber(finding.priority);
+
+  const codeLocation: Record<string, unknown> = {
+    absolute_file_path: location.absolute_file_path || finding.path || '',
+  };
+  if (line !== undefined) {
+    codeLocation.line = Math.trunc(line);
+  }
+  if (start !== undefined || end !== undefined) {
+    codeLocation.line_range = {
+      start: Math.trunc(start ?? end!),
+      end: Math.trunc(end ?? start!),
+    };
+  }
+
+  return {
+    ...finding,
+    title: finding.title || 'Code finding',
+    priority: priority === undefined ? undefined : Math.max(0, Math.min(3, Math.trunc(priority))),
+    code_location: codeLocation,
+    confidence_score: typeof finding.confidence_score === 'number'
+      ? Math.max(0, Math.min(1, finding.confidence_score > 1 ? finding.confidence_score / 10 : finding.confidence_score))
+      : undefined,
+  };
+}
+
 /**
  * Pre-processes JSON string to handle common LLM defects before passing to jsonrepair.
+ * Optimized for CPU performance (avoids backtracking regexes).
  */
 function preprocessJson(json: string): string {
-  // Replace unescaped newlines within string values
-  // This looks for content between quotes and escapes literal newlines
-  return json.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/g, (match, content) => {
-    return `"${content.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
-  });
+  let result = '';
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+
+    if (escape) {
+      result += char;
+      escape = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      result += char;
+      escape = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      result += char;
+      continue;
+    }
+
+    if (inString) {
+      if (char === '\n') {
+        result += '\\n';
+      } else if (char === '\r') {
+        result += '\\r';
+      } else {
+        result += char;
+      }
+    } else {
+      result += char;
+    }
+  }
+
+  return result;
 }
 
 function withSuggestion(body: string, codeSuggestion?: string) {
   if (!codeSuggestion) return body;
-  
+
   // Clean suggestion: remove existing fences if model added them, and trim
   const cleanSuggestion = codeSuggestion.replace(/```suggestion\n?|```/g, '').trim();
-  
+
   // Clean body: remove any trailing redundant suggestion blocks if the model double-outputted
   const cleanBody = body.split('```suggestion')[0].trim();
-  
+
   return `${cleanBody}\n\n\`\`\`suggestion\n${cleanSuggestion}\n\`\`\``;
 }
 
@@ -80,6 +249,9 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
   let extracted = '';
   try {
     extracted = extractJson(raw);
+    if (!hasReviewKeys(extracted)) {
+      throw new Error('Model response did not contain review JSON keys.');
+    }
   } catch (e) {
     logger.error('Failed to extract JSON from model response', { raw, error: e });
     throw new Error('Could not find JSON root in model response.');
@@ -92,7 +264,7 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
     logger.warn('JSON preprocessing partially failed, continuing...', { extracted, error: e });
     preprocessed = extracted;
   }
-  
+
   let repaired = preprocessed;
   try {
     repaired = jsonrepair(preprocessed);
@@ -110,7 +282,48 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
 
   let parsed: z.infer<typeof fileReviewModelOutputSchema>;
   try {
-    parsed = fileReviewModelOutputSchema.parse(parsedJson);
+    const findReviewObject = (arr: any[]): any | null => {
+      // Priority 1: Has findings array and summary
+      const best = arr.find(i => i && typeof i === 'object' && Array.isArray(i.findings) && typeof i.summary === 'string');
+      if (best) return best;
+
+      // Priority 2: Has findings array
+      const good = arr.find(i => i && typeof i === 'object' && Array.isArray(i.findings));
+      if (good) return good;
+
+      // Priority 3: Has review-like keys
+      return arr.find(i =>
+        i && typeof i === 'object' &&
+        ('findings' in i || 'overall_explanation' in i || 'summary' in i || 'overall_correctness' in i)
+      );
+    };
+
+    const data = Array.isArray(parsedJson) ? (findReviewObject(parsedJson) || parsedJson[0] || {}) : parsedJson;
+
+    // Ensure essential keys exist to avoid schema validation errors
+    if (data && typeof data === 'object') {
+      if (!data.findings) data.findings = [];
+      if (!data.overall_explanation) data.overall_explanation = 'No explanation provided.';
+      if (!data.overall_correctness) data.overall_correctness = 'Uncertain';
+
+      // Handle confidence score hallucinations (0-1 range expected)
+      if (typeof data.overall_confidence_score === 'number') {
+        if (data.overall_confidence_score > 1) {
+          // If they gave 1-10 scale, normalize it
+          data.overall_confidence_score = Math.min(data.overall_confidence_score / 10, 1);
+        } else if (data.overall_confidence_score < 0) {
+          data.overall_confidence_score = 0;
+        }
+      } else {
+        data.overall_confidence_score = 0.5;
+      }
+
+      if (Array.isArray(data.findings)) {
+        data.findings = data.findings.map(normalizeFinding).filter(Boolean);
+      }
+    }
+
+    parsed = fileReviewModelOutputSchema.parse(data);
   } catch (e) {
     logger.error('Model response failed schema validation', { parsedJson, error: e });
     throw new Error(`Response schema mismatch: ${e instanceof Error ? e.message : 'Check logs'}`);
@@ -137,7 +350,7 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
             line = undefined;
           }
         }
-        
+
         if (line !== undefined) {
           position = findPositionForLine(file, line);
         }
@@ -173,7 +386,7 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
 
       const title = cleanText(finding.title);
       let body = cleanText(finding.body);
-      
+
       // If the body starts with the title or a similar variant, strip it
       const bodyPrefix = cleanText(body.split('\n')[0]);
       if (bodyPrefix.toLowerCase().startsWith(title.toLowerCase()) || title.toLowerCase().startsWith(bodyPrefix.toLowerCase())) {

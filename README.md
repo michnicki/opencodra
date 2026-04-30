@@ -15,7 +15,7 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 ## What Codra Does
 
 - Reviews pull requests automatically on `opened`, `synchronize`, `ready_for_review`, and `reopened`
-- Supports mention-triggered reviews through `.codra.yml`
+- Supports mention-triggered reviews
 - Posts inline PR comments and updates GitHub check runs
 - Queues review jobs through Cloudflare Queues so webhook intake stays fast
 - Stores job history, repo settings, and review metadata in Neon Postgres
@@ -33,7 +33,7 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 ## Architecture
 
 1. GitHub sends a webhook to Codra.
-2. Codra validates the signature and loads repo config from `.codra.yml`.
+2. Codra validates the signature and loads repo config from the database.
 3. A review job is inserted into Neon and queued on Cloudflare Queues.
 4. The worker consumes the job, fetches the PR diff, runs model review passes, and formats findings.
 5. Codra posts inline comments plus a summary review back to GitHub and stores the run for the dashboard.
@@ -109,13 +109,20 @@ For the Worker runtime, use the pooled Neon connection string. It should include
 postgresql://<user>:<password>@<endpoint>-pooler.<region>.aws.neon.tech/<db>?sslmode=require&channel_binding=require
 ```
 
-### 3. Run the migration
+### 3. Run migrations
 
-Codra now ships with a single bootstrap migration:
+Codra applies SQL migrations automatically during deploy:
 
 - [`db/migrations/001_initial.sql`](/db/migrations/001_initial.sql)
+- [`db/migrations/002_normalize_existing_schema.sql`](/db/migrations/002_normalize_existing_schema.sql)
 
-You can run it from the Neon SQL editor or with your preferred Postgres client.
+On a fresh database, `npm run deploy` initializes `001` and then applies newer migration files in order. On an existing database that predates migration tracking, deploy marks `001` as already applied and then runs later migrations.
+
+For local/admin runs, set `NEON_DATABASE_URL` and run:
+
+```bash
+npm run migrate
+```
 
 ### 4. Add the database URL to Cloudflare
 
@@ -134,25 +141,9 @@ For schema/admin tooling, keep a direct non-pooled Neon connection string handy 
 
 ## Repository Config
 
-Each connected repo can add a `.codra.yml` file to customize behavior. Codra loads this file, caches it in KV, and persists the parsed snapshot in Neon.
+Each connected repo can be configured directly through the Codra dashboard. You can toggle reviews, customize model routing (including fallbacks and size-based overrides), set custom review rules, and manage labels.
 
-Example:
-
-```yaml
-review:
-  on: [opened, synchronize, ready_for_review, reopened]
-  ignore_drafts: true
-  mention_trigger: "@codra-app"
-  max_files: 15
-  custom_rules:
-    - "Prefer narrow, actionable findings over broad style comments."
-
-model:
-  main: "gemma-4-31b-it"
-  fallbacks:
-    - "gemma-3-27b"
-    - "@cf/zai-org/glm-4.7-flash"
-```
+The dashboard provides a visual interface to manage all your repositories in one place, ensuring consistent and predictable AI review behavior across your organization.
 
 ## License
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { api } from '@client/lib/api';
 import { Skeleton } from '@client/components/skeleton';
 import { EmptyState } from '@client/components/empty-state';
@@ -14,7 +15,7 @@ import { cn } from '@client/lib/utils';
 import { defaultRepoConfig, type RepoConfigRecord } from '@shared/schema';
 import { ModelChain, MODELS } from '@client/components/model-chain';
 
-const SYSTEM_DEFAULTS = defaultRepoConfig.model;
+
 
 // ─── RepoItem ─────────────────────────────────────────────────────────────
 interface RepoItemProps {
@@ -22,36 +23,69 @@ interface RepoItemProps {
   isExpanded: boolean;
   onToggle: () => void;
   onRefresh: () => void;
+  globalConfig: any;
 }
 
-function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
+function RepoItem({ repo, isExpanded, onToggle, onRefresh, globalConfig }: RepoItemProps) {
   const [enabled, setEnabled] = useState(repo.enabled);
-  const [mainModel, setMainModel] = useState(repo.mainModel ?? SYSTEM_DEFAULTS.main);
-  const [fallbacks, setFallbacks] = useState<string[]>(
-    repo.fallbackModels?.length ? repo.fallbackModels : SYSTEM_DEFAULTS.fallbacks,
-  );
-  const [sizeOverrides, setSizeOverrides] = useState<any[]>(
-    repo.sizeOverrides ?? SYSTEM_DEFAULTS.size_overrides,
-  );
+  const [mainModel, setMainModel] = useState<string | null>(repo.mainModel);
+  const [fallbacks, setFallbacks] = useState<string[] | null>(repo.fallbackModels);
+  const [sizeOverrides, setSizeOverrides] = useState<any[] | null>(repo.sizeOverrides);
+
+  // Use repo config if it exists, otherwise fall back to global config
+  const defaultMain = globalConfig?.main || 'gemma-4-31b-it';
+  const defaultFallbacks = (globalConfig?.fallbacks && globalConfig.fallbacks.length > 0)
+    ? globalConfig.fallbacks
+    : ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'];
+  const defaultOverrides = (globalConfig?.size_overrides && globalConfig.size_overrides.length > 0)
+    ? globalConfig.size_overrides
+    : [
+        {
+          max_lines: 300,
+          model: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+        },
+        {
+          max_lines: 100,
+          model: '@cf/moonshotai/kimi-k2.5',
+          fallbacks: ['@cf/zai-org/glm-4.7-flash'],
+        },
+      ];
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Update local state if props change (important for Reset)
+  useEffect(() => {
+    setEnabled(repo.enabled);
+    setMainModel(repo.mainModel);
+    setFallbacks(repo.fallbackModels);
+    setSizeOverrides(repo.sizeOverrides);
+  }, [repo]);
 
   const handleSave = async (e?: React.MouseEvent) => {
     e?.stopPropagation();
     setSaving(true);
     setError(null);
+    const tid = toast.loading(`Saving config for ${repo.owner}/${repo.repo}…`);
     try {
       await api.updateRepoConfig(repo.owner, repo.repo, {
         enabled,
         model: {
           main: mainModel,
-          fallbacks: fallbacks.length > 0 ? fallbacks : [],
-          size_overrides: sizeOverrides.length > 0 ? sizeOverrides : undefined,
+          fallbacks: fallbacks,
+          size_overrides: sizeOverrides,
         },
+      });
+      toast.success('Config saved', {
+        id: tid,
+        description: `${repo.owner}/${repo.repo} updated successfully`,
       });
       onRefresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      setError(msg);
+      toast.error('Failed to save config', { id: tid, description: msg });
     } finally {
       setSaving(false);
     }
@@ -59,43 +93,54 @@ function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
 
   const handleReset = async (e?: React.MouseEvent) => {
     e?.stopPropagation();
-    setMainModel(SYSTEM_DEFAULTS.main);
-    setFallbacks(SYSTEM_DEFAULTS.fallbacks);
-    setSizeOverrides(SYSTEM_DEFAULTS.size_overrides ?? []);
     setSaving(true);
+    const tid = toast.loading(`Resetting ${repo.owner}/${repo.repo} to defaults…`);
     try {
+      // By sending nulls, we tell the backend to use global defaults
       await api.updateRepoConfig(repo.owner, repo.repo, {
         enabled,
-        model: SYSTEM_DEFAULTS,
+        model: {
+          main: null,
+          fallbacks: null,
+          size_overrides: null,
+        },
+      });
+      toast.success('Reset to defaults', {
+        id: tid,
+        description: `${repo.owner}/${repo.repo} now follows global strategy`,
       });
       onRefresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Reset failed');
+      const msg = err instanceof Error ? err.message : 'Reset failed';
+      setError(msg);
+      toast.error('Reset failed', { id: tid, description: msg });
     } finally {
       setSaving(false);
     }
   };
 
+  const currentSizeOverrides: any[] = sizeOverrides ?? defaultOverrides;
+
   const addOverride = () =>
     setSizeOverrides([
-      ...sizeOverrides,
-      { max_lines: 300, model: MODELS[0].value, fallbacks: [...SYSTEM_DEFAULTS.fallbacks] },
+      ...currentSizeOverrides,
+      { max_lines: 300, model: MODELS[0].value, fallbacks: [] },
     ]);
 
   const updateOverride = (index: number, primary: string, fbs: string[]) => {
-    const next = [...sizeOverrides];
+    const next = [...currentSizeOverrides];
     next[index] = { ...next[index], model: primary, fallbacks: fbs };
     setSizeOverrides(next);
   };
 
   const updateOverrideThreshold = (index: number, threshold: number) => {
-    const next = [...sizeOverrides];
+    const next = [...currentSizeOverrides];
     next[index] = { ...next[index], max_lines: threshold };
     setSizeOverrides(next);
   };
 
   const removeOverride = (index: number) =>
-    setSizeOverrides(sizeOverrides.filter((_, i) => i !== index));
+    setSizeOverrides(currentSizeOverrides.filter((_: any, i: number) => i !== index));
 
   return (
     <div
@@ -126,13 +171,13 @@ function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
             <span className="text-sm font-semibold text-foreground tracking-tight">
               {repo.owner}/{repo.repo}
             </span>
-            {repo.configMissing ? (
+            {(!repo.mainModel && !repo.fallbackModels && !repo.sizeOverrides) ? (
               <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-muted text-muted-foreground border border-border">
-                Defaults
+                Global Strategy
               </span>
             ) : (
               <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-primary/10 text-primary border border-primary/20">
-                Overrides
+                Custom Config
               </span>
             )}
           </div>
@@ -187,13 +232,13 @@ function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
                     className="text-[10px] font-semibold text-primary/60 hover:text-primary flex items-center gap-0.5 transition-colors"
                     onClick={e => e.stopPropagation()}
                   >
-                    Global defaults <ArrowUpRight size={9} />
+                    Global strategy <ArrowUpRight size={9} />
                   </a>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={addOverride}
+                  onClick={(e) => { e.stopPropagation(); addOverride(); }}
                   className="h-7 text-[10px] font-semibold gap-1.5"
                 >
                   <ListPlus size={12} />
@@ -204,22 +249,23 @@ function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
               {/* Baseline */}
               <div className="relative border border-primary/20 rounded-md px-4 py-4 bg-primary/[0.01]">
                 <span className="absolute -top-2.5 left-3 bg-card px-2 text-[9px] font-bold uppercase tracking-widest text-primary border border-primary/20 rounded">
-                  Baseline{sizeOverrides.length > 0 && ` · >${Math.max(...sizeOverrides.map(o => o.max_lines))} lines`}
+                  Baseline{currentSizeOverrides.length > 0 && ` · >${Math.max(...currentSizeOverrides.map((o: any) => o.max_lines))} lines`}
                 </span>
                 <ModelChain
-                  primary={mainModel}
-                  fallbacks={fallbacks}
+                  primary={mainModel ?? defaultMain}
+                  fallbacks={fallbacks ?? defaultFallbacks}
                   onChange={(p, fbs) => { setMainModel(p); setFallbacks(fbs); }}
                 />
               </div>
 
               {/* Per-size overrides */}
-              {sizeOverrides.map((ov, i) => (
+              {currentSizeOverrides.map((ov: any, i: number) => (
                 <div key={i} className="relative border border-border rounded-md px-4 py-4 bg-muted/5">
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => removeOverride(i)}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); removeOverride(i); }}
                     className="absolute top-2 right-2 h-7 w-7 text-muted-foreground/30 hover:text-danger hover:bg-danger/5"
                   >
                     <Trash2 size={13} />
@@ -296,6 +342,7 @@ function RepoItem({ repo, isExpanded, onToggle, onRefresh }: RepoItemProps) {
 // ─── ReposPage ────────────────────────────────────────────────────────────
 export function ReposPage() {
   const [repos, setRepos] = useState<RepoConfigRecord[]>([]);
+  const [globalConfig, setGlobalConfig] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -303,14 +350,18 @@ export function ReposPage() {
 
   const loadRepos = (expandedRepoId?: string) => {
     setLoading(true);
-    api
-      .getRepos()
-      .then(res => {
-        setRepos(res.repos);
+    Promise.all([
+      api.getRepos(),
+      api.getGlobalConfig(),
+    ])
+      .then(([reposRes, globalRes]) => {
+        setRepos(reposRes.repos);
+        setGlobalConfig(globalRes.config);
+
         if (expandedRepoId) {
           setExpandedId(expandedRepoId);
-        } else if (res.repos.length > 0 && !expandedId) {
-          setExpandedId(`${res.repos[0].owner}/${res.repos[0].repo}`);
+        } else if (reposRes.repos.length > 0 && !expandedId) {
+          setExpandedId(`${reposRes.repos[0].owner}/${reposRes.repos[0].repo}`);
         }
         setLoading(false);
       })
@@ -326,11 +377,19 @@ export function ReposPage() {
     if (syncing) return;
     setSyncing(true);
     setError(null);
+    const tid = toast.loading('Syncing repositories from GitHub…');
     try {
-      await api.syncRepos();
+      const result = await api.syncRepos();
+      const syncedCount = result?.synced?.length ?? 0;
+      toast.success('Repositories synced', {
+        id: tid,
+        description: `${syncedCount} ${syncedCount === 1 ? 'repository' : 'repositories'} synced successfully`,
+      });
       loadRepos();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sync failed.');
+      const msg = e instanceof Error ? e.message : 'Sync failed.';
+      setError(msg);
+      toast.error('Sync failed', { id: tid, description: msg });
     } finally {
       setSyncing(false);
     }
@@ -402,6 +461,7 @@ export function ReposPage() {
                 isExpanded={expandedId === id}
                 onToggle={() => setExpandedId(expandedId === id ? null : id)}
                 onRefresh={() => loadRepos(id)}
+                globalConfig={globalConfig}
               />
             );
           })}
