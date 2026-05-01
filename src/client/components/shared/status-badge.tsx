@@ -1,6 +1,6 @@
 import { Badge, type BadgeProps } from '@client/components/ui/badge';
 import type { JobSummary } from '@shared/schema';
-import { LiveReviewStepper } from './live-review-stepper';
+import { LiveReviewStepper } from '@client/components/features/reviews/live-review-stepper';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 

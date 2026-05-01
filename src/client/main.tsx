@@ -2,16 +2,16 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { Toaster } from 'sonner';
-import { AppShell } from './components/app-shell';
-import { LandingPage } from './pages/Landing';
-import { DashboardPage } from './pages/Dashboard';
-import { LoginPage } from './pages/Login';
-import { JobsPage } from './pages/Jobs';
+import { AppShell } from './components/layout/app-shell';
+import { LandingPage } from './pages/landing';
+import { DashboardPage } from './pages/dashboard';
+import { LoginPage } from './pages/login';
+import { JobsPage } from './pages/jobs';
 import { JobDetailPage } from './pages/job-detail';
 import { ReposPage } from './pages/repos';
-import { StatsPage } from './pages/Stats';
-import { SettingsPage } from './pages/Settings';
-import { NotFoundPage } from './pages/NotFound';
+import { StatsPage } from './pages/stats';
+import { SettingsPage } from './pages/settings';
+import { NotFoundPage } from './pages/not-found';
 import './app.css';
 
 import { ThemeProvider } from './lib/theme';
@@ -42,11 +42,11 @@ const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { path: 'dashboard', element: <DashboardPage /> },
-      { path: 'jobs',      element: <JobsPage /> },
-      { path: 'jobs/:id',  element: <JobDetailPage /> },
-      { path: 'repos',     element: <ReposPage /> },
-      { path: 'stats',     element: <StatsPage /> },
-      { path: 'settings',  element: <SettingsPage /> },
+      { path: 'jobs', element: <JobsPage /> },
+      { path: 'jobs/:id', element: <JobDetailPage /> },
+      { path: 'repos', element: <ReposPage /> },
+      { path: 'stats', element: <StatsPage /> },
+      { path: 'settings', element: <SettingsPage /> },
     ],
   },
   {

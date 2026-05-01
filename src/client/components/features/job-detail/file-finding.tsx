@@ -2,7 +2,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { ChevronRight } from 'lucide-react';
-import { StatusBadge } from '@client/components/status-badge';
+import { StatusBadge } from '@client/components/shared/status-badge';
 import type { FileReviewRecord, ParsedReviewComment } from '@shared/schema';
 import { CommentCard } from './comment-card';
 
@@ -32,9 +32,12 @@ export function FileFinding({ file }: FileFindingProps) {
       <div className="border-t border-border/40 px-5 pb-5 pt-4">
         {/* File-level error */}
         {file.fileStatus === 'failed' && file.errorMessage && (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3">
-            <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-red-700">Review error</p>
-            <p className="font-mono text-xs text-red-600 break-all">{file.errorMessage}</p>
+          <div
+            className="mb-4 rounded-xl border p-3"
+            style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)' }}
+          >
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--danger)' }}>Review error</p>
+            <p className="font-mono text-xs break-all" style={{ color: 'var(--danger)' }}>{file.errorMessage}</p>
           </div>
         )}
 

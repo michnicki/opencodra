@@ -1,14 +1,13 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@client/lib/api';
-import { StatusBadge } from '@client/components/status-badge';
-import { Skeleton } from '@client/components/skeleton';
-import { EmptyState } from '@client/components/empty-state';
+import { JobsTable } from '@client/components/shared/jobs-table';
+import { EmptyState } from '@client/components/shared/empty-state';
 import { Button } from '@client/components/ui/button';
 import { Input } from '@client/components/ui/input';
 import { Select } from '@client/components/ui/select';
 import { Alert } from '@client/components/ui/alert';
-import { PageHeader } from '@client/components/page-header';
+import { PageHeader } from '@client/components/layout/page-header';
 import { usePolling } from '@client/hooks/use-polling';
 import { Inbox, ChevronLeft, ChevronRight, RefreshCw, AlertTriangle, RotateCcw, Trash2, Info } from 'lucide-react';
 import type { JobSummary } from '@shared/schema';
@@ -90,7 +89,6 @@ export function JobsPage() {
 
   const totalPages = Math.ceil(total / limit);
 
-  const thCls = 'px-4 py-3 text-left text-[10px] font-bold uppercase tracking-wider text-muted-foreground select-none';
 
   return (
     <section className="page-enter flex flex-col gap-6">
@@ -260,94 +258,7 @@ export function JobsPage() {
 
       {/* Table */}
       <div className="surface overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="border-b border-border bg-muted/40">
-                <th className={thCls}>Repository</th>
-                <th className={thCls}>Pull request</th>
-                <th className={thCls}>Trigger</th>
-                <th className={thCls}>Status</th>
-                <th className={thCls}>Verdict</th>
-                <th className={`${thCls} text-right`}>Files</th>
-                <th className={`${thCls} text-right`}>Tokens</th>
-                <th className={thCls}>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading && jobs.length === 0
-                ? Array.from({ length: 7 }).map((_, i) => (
-                    <tr key={i} className="border-b border-border/40">
-                      {[100, '75%', 55, 65, 65, 26, 54, 80].map((w, j) => (
-                        <td key={j} className="px-4 py-3.5">
-                          <Skeleton width={typeof w === 'number' ? w : w} />
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                : jobs.map((job) => (
-                    <tr
-                      key={job.id}
-                      className="border-b border-border/40 transition-colors hover:bg-primary/[0.03] cursor-default"
-                    >
-                      {/* Repo */}
-                      <td className="px-4 py-3.5">
-                        <Link
-                          to={`/jobs/${job.id}`}
-                          className="font-semibold text-primary hover:underline underline-offset-2 text-sm"
-                        >
-                          {job.owner}/{job.repo}
-                        </Link>
-                      </td>
-
-                      {/* PR */}
-                      <td className="px-4 py-3.5 max-w-[260px]">
-                        <div className="flex items-baseline gap-1.5 min-w-0">
-                          <span className="shrink-0 font-mono text-[11px] font-semibold text-muted-foreground">
-                            #{job.prNumber}
-                          </span>
-                          <span className="truncate text-foreground">
-                            {job.prTitle ?? 'Untitled PR'}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Trigger */}
-                      <td className="px-4 py-3.5">
-                        <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-secondary text-secondary-foreground">
-                          {job.trigger}
-                        </span>
-                      </td>
-
-                      {/* Status / Verdict */}
-                      <td className="px-4 py-3.5"><StatusBadge label={job.status} job={job} /></td>
-                      <td className="px-4 py-3.5">
-                        {job.verdict
-                          ? <StatusBadge label={job.verdict} />
-                          : <span className="text-muted-foreground/40">—</span>}
-                      </td>
-
-                      {/* Files */}
-                      <td className="px-4 py-3.5 text-right font-mono text-xs text-muted-foreground tabular-nums">
-                        {job.fileCount}
-                      </td>
-
-                      {/* Tokens */}
-                      <td className="px-4 py-3.5 text-right font-mono text-xs text-muted-foreground tabular-nums">
-                        {(job.totalInputTokens + job.totalOutputTokens).toLocaleString()}
-                      </td>
-
-                      {/* Date */}
-                      <td className="px-4 py-3.5 text-sm text-muted-foreground whitespace-nowrap">
-                        {new Date(job.createdAt).toLocaleDateString(undefined, {
-                          month: 'short', day: 'numeric', year: 'numeric',
-                        })}
-                      </td>
-                    </tr>
-                  ))}
-            </tbody>
-          </table>
-        </div>
+        <JobsTable jobs={jobs} loading={loading} />
 
         {!loading && jobs.length === 0 && (
           <EmptyState

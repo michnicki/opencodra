@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@client/lib/api';
-import { PageHeader } from '@client/components/page-header';
+import { PageHeader } from '@client/components/layout/page-header';
 import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
-import { Skeleton } from '@client/components/skeleton';
+import { Skeleton } from '@client/components/shared/skeleton';
 import {
   Cpu, Save, ShieldAlert, Layers, ListPlus, Trash2, RefreshCw,
 } from 'lucide-react';
 import type { ModelConfig } from '@shared/schema';
-import { ModelChain, MODELS } from '@client/components/model-chain';
+import { ModelChain, MODELS } from '@client/components/features/models/model-chain';
 import { cn } from '@client/lib/utils';
 
 // ─── Default global config matching the expected dashboard defaults ───────────

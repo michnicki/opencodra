@@ -1,11 +1,11 @@
 import { useParams } from 'react-router-dom';
 import { useJobDetail } from '@client/hooks/use-job-detail';
-import { JobHeader } from '@client/components/job-detail/job-header';
-import { JobProgress } from '@client/components/job-detail/job-progress';
-import { JobMetaCards } from '@client/components/job-detail/job-meta-cards';
-import { JobReviewOverview } from '@client/components/job-detail/job-review-overview';
-import { JobFindingsList } from '@client/components/job-detail/job-findings-list';
-import { JobDetailSkeleton } from '@client/components/job-detail/job-skeleton';
+import { JobHeader } from '@client/components/features/job-detail/job-header';
+import { JobProgress } from '@client/components/features/job-detail/job-progress';
+import { JobMetaCards } from '@client/components/features/job-detail/job-meta-cards';
+import { JobReviewOverview } from '@client/components/features/job-detail/job-review-overview';
+import { JobFindingsList } from '@client/components/features/job-detail/job-findings-list';
+import { JobDetailSkeleton } from '@client/components/features/job-detail/job-skeleton';
 import { Alert } from '@client/components/ui/alert';
 
 export function JobDetailPage() {

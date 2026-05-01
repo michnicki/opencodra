@@ -6,14 +6,16 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell,
 } from 'recharts';
-import { TrendingUp, CheckCircle2, Cpu, Terminal, Activity, ArrowUpRight, MessageSquare } from 'lucide-react';
-import { TimeRangeSelect } from '@client/components/time-range-select';
-import { PageHeader } from '@client/components/page-header';
-import { StatsGrid } from '@client/components/stats-grid';
+import { TrendingUp, CheckCircle2, Cpu, Terminal, Activity, ArrowUpRight, MessageSquare, RefreshCw } from 'lucide-react';
+import { TimeRangeSelect } from '@client/components/features/stats/time-range-select';
+import { PageHeader } from '@client/components/layout/page-header';
+import { OverviewStats } from '@client/components/features/stats/overview-stats';
 import { usePolling } from '@client/hooks/use-polling';
 import { useIsDarkMode } from '@client/hooks/use-is-dark-mode';
 import { fmtNumber } from '@client/lib/utils';
 import { Alert } from '@client/components/ui/alert';
+import { Button } from '@client/components/ui/button';
+import { useMemo } from 'react';
 
 /* ── Lime palette (static — needed for SVG attributes) ── */
 const LM      = '#84cc16'; // legible lime for light mode
@@ -321,77 +323,43 @@ function TopRepos({ repos }: { repos: StatsPayload['topRepos'] }) {
   );
 }
 
+
 /* ══════════════════════════════════════════════════════════
    Main page
  ══════════════════════════════════════════════════════════ */
 export function StatsPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(30);
 
   const isDark = useIsDarkMode();
 
-  const load = async () => {
+  const load = async (manual = false) => {
+    if (manual) setRefreshing(true);
     try {
       const res = await api.getStats(days);
       setStats(res.stats);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load stats.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
   };
 
   usePolling(load, 30_000, [days]);
 
-  if (!stats) {
-    return (
-      <section className="page-enter flex flex-col gap-6">
-        <PageHeader category="Analytics" title="System insights" />
-        {error ? (
-          <Alert variant="destructive">{error}</Alert>
-        ) : (
-          <div className="surface px-5 py-4 text-sm text-muted-foreground">
-            Loading…
-          </div>
-        )}
-      </section>
-    );
-  }
 
-  const kpiItems = [
-    {
-      icon: Activity,
-      label: 'Total reviews',
-      value: fmtNumber(stats.totals.jobs),
-      trend: stats.trend.map(d => d.jobs),
-    },
-    {
-      icon: ArrowUpRight,
-      label: 'Input tokens',
-      value: fmtNumber(stats.totals.inputTokens),
-      trend: stats.trend.map(d => d.inputTokens),
-    },
-    {
-      icon: Cpu,
-      label: 'Output tokens',
-      value: fmtNumber(stats.totals.outputTokens),
-      trend: stats.trend.map(d => d.outputTokens),
-    },
-    {
-      icon: MessageSquare,
-      label: 'Comments posted',
-      value: fmtNumber(stats.totals.comments),
-      trend: stats.trend.map(d => d.comments),
-    },
-  ];
-
-  const verdictData = stats.verdicts
+  const verdictData = stats?.verdicts
     .map((v) => ({
       name: v.verdict ?? 'none',
       value: v.count,
       color: VERDICT_COLORS[v.verdict as keyof typeof VERDICT_COLORS] ?? '#6b7280',
     }))
-    .filter((v) => v.value > 0);
+    .filter((v) => v.value > 0) ?? [];
 
   return (
     <section className="page-enter flex flex-col gap-5">
@@ -400,20 +368,48 @@ export function StatsPage() {
         category="Analytics" 
         title="System insights" 
         actions={
-          <TimeRangeSelect value={days} onValueChange={setDays} />
+          <>
+            <TimeRangeSelect value={days} onValueChange={setDays} />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => load(true)}
+              disabled={refreshing}
+              className="gap-2"
+            >
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+              Refresh
+            </Button>
+          </>
         }
       />
       
-      <StatsGrid items={kpiItems} />
+      {error && <Alert variant="destructive">{error}</Alert>}
 
-      <AreaVolumeChart data={stats.trend} isDark={isDark} days={days} />
+      <OverviewStats stats={stats} days={days} />
 
-      <div className="grid grid-cols-2 gap-5">
-        <ModelsBarChart models={stats.models} isDark={isDark} />
-        <VerdictDonut verdictData={verdictData} />
-      </div>
+      {stats && (
+        <>
+          <AreaVolumeChart data={stats.trend} isDark={isDark} days={days} />
 
-      {stats.topRepos.length > 0 && <TopRepos repos={stats.topRepos} />}
+          <div className="grid grid-cols-2 gap-5">
+            <ModelsBarChart models={stats.models} isDark={isDark} />
+            <VerdictDonut verdictData={verdictData} />
+          </div>
+
+          {stats.topRepos.length > 0 && <TopRepos repos={stats.topRepos} />}
+        </>
+      )}
+
+      {loading && !stats && (
+        <div className="flex flex-col gap-5">
+          <div className="chart-card h-[200px] animate-pulse" />
+          <div className="grid grid-cols-2 gap-5">
+            <div className="chart-card h-[200px] animate-pulse" />
+            <div className="chart-card h-[200px] animate-pulse" />
+          </div>
+        </div>
+      )}
 
     </section>
   );

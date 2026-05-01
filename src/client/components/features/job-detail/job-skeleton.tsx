@@ -1,4 +1,4 @@
-import { Skeleton } from '@client/components/skeleton';
+import { Skeleton } from '@client/components/shared/skeleton';
 import { Card, CardContent } from '@client/components/ui/card';
 
 interface JobDetailSkeletonProps {
@@ -9,7 +9,12 @@ export function JobDetailSkeleton({ error }: JobDetailSkeletonProps) {
   return (
     <section className="flex flex-col gap-6">
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+        <div
+          className="rounded-xl border px-4 py-3 text-sm"
+          style={{ background: 'var(--danger-bg)', borderColor: 'var(--danger-border)', color: 'var(--danger)' }}
+        >
+          {error}
+        </div>
       )}
       <header className="flex items-start justify-between">
         <div className="space-y-2">

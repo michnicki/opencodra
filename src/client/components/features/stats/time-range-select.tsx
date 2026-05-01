@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Calendar, ChevronDown, Clock } from 'lucide-react';
-import { Button } from './ui/button';
+import { Button } from '@client/components/ui/button';
 import { cn } from '@client/lib/utils';
 import {
   DropdownMenu,
@@ -8,9 +8,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-  DropdownMenuSeparator,
-  DropdownMenuLabel,
-} from './ui/dropdown-menu';
+} from '@client/components/ui/dropdown-menu';
 
 interface TimeRangeSelectProps {
   value: number;
@@ -47,7 +45,7 @@ export function TimeRangeSelect({ value, onValueChange, className }: TimeRangeSe
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-[180px]" align="end">
-        <DropdownMenuRadioGroup value={value.toString()} onValueChange={(v) => onValueChange(Number(v))}>
+        <DropdownMenuRadioGroup value={value.toString()} onValueChange={(v: string) => onValueChange(Number(v))}>
           {timeRanges.map((option) => (
             <DropdownMenuRadioItem
               key={option.value}

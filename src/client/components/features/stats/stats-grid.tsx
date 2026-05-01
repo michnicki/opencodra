@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { cn } from '@client/lib/utils';
 import { LucideIcon } from 'lucide-react';
-import { Skeleton } from './skeleton';
-import { Sparkline } from './sparkline';
+import { Skeleton } from '@client/components/shared/skeleton';
+import { Sparkline } from '@client/components/shared/sparkline';
 
 interface StatsItem {
   label: string;
