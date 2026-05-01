@@ -3,8 +3,8 @@
  */
 import { expect, it, describe, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { LoginPage } from '@client/pages/Login';
-import { DashboardPage } from '@client/pages/Dashboard';
+import { LoginPage } from '@client/pages/login';
+import { DashboardPage } from '@client/pages/dashboard';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '@client/lib/api';
 import { ThemeProvider } from '@client/lib/theme';

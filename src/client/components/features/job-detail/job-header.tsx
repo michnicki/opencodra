@@ -12,24 +12,33 @@ interface JobHeaderProps {
 export function JobHeader({ job, isRetrying, onRetry }: JobHeaderProps) {
   return (
     <header className="flex items-start justify-between gap-4">
-      <div>
+      <div className="min-w-0">
         <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-          <Link to="/jobs" className="hover:text-accent transition-colors">Jobs</Link>
-          <ChevronRight size={12} />
-          <span>{job.owner}/{job.repo}</span>
+          <Link to="/jobs" className="hover:text-foreground transition-colors">Jobs</Link>
+          <ChevronRight size={12} className="opacity-40" />
+          <span className="text-foreground/60">{job.owner}/{job.repo}</span>
+          <ChevronRight size={12} className="opacity-40" />
+          <span
+            className="font-mono text-[10px] font-medium lowercase tracking-normal text-muted-foreground/50 hover:text-muted-foreground transition-colors cursor-default"
+            title={job.id}
+          >
+            {job.id.slice(0, 8)}…
+          </span>
         </div>
-        <h1 className="mt-1.5 text-2xl font-bold tracking-tight text-foreground">
+        <h1 className="mt-2 text-2xl font-bold tracking-tight text-foreground">
           <a
             href={`https://github.com/${job.owner}/${job.repo}/pull/${job.prNumber}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 hover:text-accent transition-colors"
+            className="inline-flex items-center gap-2 hover:text-primary transition-colors"
           >
             PR #{job.prNumber}
-            <ExternalLink size={18} className="text-muted-foreground" />
+            <ExternalLink size={16} className="text-muted-foreground/50" />
           </a>
         </h1>
-        <p className="mt-0.5 text-sm text-muted-foreground">{job.prTitle ?? 'Untitled pull request'}</p>
+        <p className="mt-1 text-sm text-muted-foreground leading-snug max-w-[480px] truncate">
+          {job.prTitle ?? 'Untitled pull request'}
+        </p>
       </div>
 
       <Button

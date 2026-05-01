@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '@client/lib/api';
-import { Skeleton } from '@client/components/skeleton';
-import { EmptyState } from '@client/components/empty-state';
+import { Skeleton } from '@client/components/shared/skeleton';
+import { EmptyState } from '@client/components/shared/empty-state';
 import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
-import { PageHeader } from '@client/components/page-header';
+import { PageHeader } from '@client/components/layout/page-header';
 import { Switch } from '@client/components/ui/switch';
 import {
   GitBranch, RefreshCw, Layers, Save, ListPlus, Trash2,
@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@client/lib/utils';
 import { defaultRepoConfig, type RepoConfigRecord } from '@shared/schema';
-import { ModelChain, MODELS } from '@client/components/model-chain';
+import { ModelChain, MODELS } from '@client/components/features/models/model-chain';
 
 
 

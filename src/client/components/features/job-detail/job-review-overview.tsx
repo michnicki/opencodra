@@ -1,11 +1,9 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { Sparkles } from 'lucide-react';
-import { cn } from '@client/lib/utils';
+import { ClipboardList } from 'lucide-react';
 import type { JobDetail } from '@shared/schema';
 import { reviewSeverities } from '@shared/schema';
-import { severityConfig } from './constants';
 
 interface JobReviewOverviewProps {
   job: JobDetail;
@@ -23,25 +21,28 @@ export function JobReviewOverview({ job }: JobReviewOverviewProps) {
   const renderSummary = () => {
     if (!job.summaryMarkdown) return '';
     let content = job.summaryMarkdown.replace(/^(✅ \*\*Approved\*\*|💬 \*\*Comments posted\*\*)\n\n/, '').trim();
-    if (content.startsWith('### 💡 Codra Review') || content.includes('Codra Review')) return content;
-    
+
+    // Strip only the "### ... Codra Review" heading, keep the intro sentence
+    const stripHeader = (md: string) => md
+      .replace(/^###\s*(<picture>[\s\S]*?<\/picture>|💡)\s*Codra Review\s*\n+/, '')
+      .trim();
+
+    if (content.startsWith('### 💡 Codra Review') || content.includes('Codra Review')) {
+      return stripHeader(content);
+    }
+
     const shortSha = job.commitSha.slice(0, 10);
     const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-    const iconBase = `${baseUrl}/icons`;
-    
-    return `### <picture><source media="(prefers-color-scheme: dark)" srcset="${iconBase}/codra-icon-dark.svg"><source media="(prefers-color-scheme: light)" srcset="${iconBase}/codra-icon-light.svg"><img src="${iconBase}/codra-icon-light.svg" alt="Codra Icon" width="20" height="20" style="vertical-align: middle;"></picture> Codra Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About Codra</summary>\n\n<br/>\n\n[Your team has set up Codra to review pull requests in this repo](${baseUrl}/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf Codra has suggestions, it will comment; otherwise it will react with 👍.\n\nCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
+
+    return `Here are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About Codra</summary>\n\n<br/>\n\n[Your team has set up Codra to review pull requests in this repo](${baseUrl}/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf Codra has suggestions, it will comment; otherwise it will react with 👍.\n\nCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
   };
 
   return (
-    <div className="surface overflow-hidden mb-6 relative">
-      <div className="absolute top-0 right-0 p-4 opacity-[0.06] pointer-events-none">
-        <Sparkles size={60} />
-      </div>
-
+    <div className="surface overflow-hidden mb-6">
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <div className="flex items-center gap-2.5">
-          <Sparkles size={14} strokeWidth={1.75} className="text-primary" />
+          <ClipboardList size={14} strokeWidth={1.75} className="text-primary" />
           <span className="text-sm font-semibold text-foreground">Review Overview</span>
         </div>
         <div className="flex items-center gap-3">
@@ -80,38 +81,15 @@ export function JobReviewOverview({ job }: JobReviewOverviewProps) {
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Priority Triage</p>
             <div className="h-px flex-1 bg-border/30" />
           </div>
-          <div className="flex flex-wrap gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             {reviewSeverities.map((sev) => {
               const count = sevCounts[sev] || 0;
-              const cfg = severityConfig[sev];
               if (count === 0 && sev !== 'nit') return null;
 
               return (
-                <div
-                  key={sev}
-                  className={cn(
-                    'group flex items-center gap-3 rounded-xl border px-3.5 py-2 transition-all duration-200',
-                    count > 0
-                      ? `${cfg?.bg} ${cfg?.border} hover:-translate-y-[1px] hover:shadow-md`
-                      : 'bg-muted/30 border-border/30 opacity-50',
-                  )}
-                >
-                  {cfg?.svg ? (
-                    <img src={cfg.svg} alt={sev} className="w-[17px] h-[17px] transition-transform group-hover:scale-110" />
-                  ) : (
-                    <cfg.icon
-                      size={14}
-                      className={cn('transition-transform group-hover:scale-110', count > 0 ? cfg?.iconColor : 'text-muted-foreground')}
-                    />
-                  )}
-                  <div className="flex flex-col leading-none">
-                    <span className={cn('text-[9px] font-bold uppercase tracking-wider mb-0.5', count > 0 ? cfg?.text : 'text-muted-foreground')}>
-                      {sev}
-                    </span>
-                    <span className={cn('text-lg font-bold font-mono', count > 0 ? 'text-foreground' : 'text-muted-foreground/40')}>
-                      {count}
-                    </span>
-                  </div>
+                <div key={sev} className="flex items-center gap-1.5">
+                  <span className={`severity-tag ${sev} ${count === 0 ? 'opacity-40' : ''}`}>{sev}</span>
+                  <span className="font-mono text-sm font-bold text-foreground tabular-nums">{count}</span>
                 </div>
               );
             })}
