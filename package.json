@@ -1,8 +1,18 @@
 {
   "name": "codra",
   "version": "0.9.0",
+  "description": "Open-source code review engine",
+  "author": "Devarshi Shimpi",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devarshishimpi/codra.git"
+  },
+  "homepage": "https://codra.run",
+  "bugs": {
+    "url": "https://github.com/devarshishimpi/codra/issues"
+  },
   "scripts": {
     "build": "vite build && npm run cf-typegen",
     "cf-typegen": "wrangler types ./src/server/worker-env.d.ts",
