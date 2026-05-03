@@ -58,10 +58,18 @@ export type GitHubRepository = {
 
 /** Default timeout for every GitHub API call (30 s). */
 const GITHUB_TIMEOUT_MS = 30_000;
+const GITHUB_APP_INSTALL_URL_CACHE_KEY = 'github:app_installation_url';
+const GITHUB_REPOSITORIES_PER_PAGE = 100;
+const GITHUB_REPOSITORY_PAGE_LIMIT = 100;
 
 type InstallationTokenCacheRecord = {
   token: string;
   expiresAt: string;
+};
+
+type GitHubAppRecord = {
+  html_url?: string;
+  slug?: string;
 };
 
 type PullRequestRecord = {
@@ -82,6 +90,19 @@ export type GitHubReviewComment = {
 
 function installationCacheKey(installationId: string) {
   return `install:${installationId}`;
+}
+
+function normalizeGitHubAppSlug(slug: string | undefined) {
+  const normalized = slug?.trim().replace(/\[bot\]$/i, '');
+  return normalized || null;
+}
+
+function installUrlFromSlug(slug: string) {
+  return `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+}
+
+function encodeGitHubContentPath(path: string) {
+  return path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
 }
 
 function pemToArrayBuffer(pem: string) {
@@ -233,20 +254,77 @@ export class GitHubClient {
     });
   }
 
+  static async getAppInstallationUrl(
+    env: Pick<AppBindings, 'APP_KV' | 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME' | 'GITHUB_APP_SLUG'>,
+  ): Promise<string> {
+    const configuredSlug = normalizeGitHubAppSlug(env.GITHUB_APP_SLUG);
+    if (configuredSlug) {
+      return installUrlFromSlug(configuredSlug);
+    }
+
+    const cached = await env.APP_KV.get(GITHUB_APP_INSTALL_URL_CACHE_KEY);
+    if (cached) {
+      return cached;
+    }
+
+    return withRetry('getAppInstallationUrl', async () => {
+      const jwt = await createGitHubJwt(env.GITHUB_APP_ID, env.APP_PRIVATE_KEY);
+      const response = await withTimeout('GitHub app lookup', GITHUB_TIMEOUT_MS, (signal) =>
+        fetch('https://api.github.com/app', {
+          signal,
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${jwt}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': env.BOT_USERNAME ?? 'codra-bot',
+          },
+        }),
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          '/app',
+          `GitHub app lookup failed with ${response.status}: ${errText}`,
+        );
+      }
+
+      const app = (await response.json()) as GitHubAppRecord;
+      const fallbackSlug = normalizeGitHubAppSlug(app.slug);
+      const installUrl = app.html_url
+        ? `${app.html_url.replace(/\/$/, '')}/installations/new`
+        : fallbackSlug
+          ? installUrlFromSlug(fallbackSlug)
+          : null;
+
+      if (!installUrl) {
+        throw new Error('GitHub app lookup did not return a usable app URL.');
+      }
+
+      await env.APP_KV.put(GITHUB_APP_INSTALL_URL_CACHE_KEY, installUrl, { expirationTtl: 60 * 60 * 24 });
+      return installUrl;
+    });
+  }
+
   async listRepositories(): Promise<GitHubRepository[]> {
     return withRetry('listRepositories', async () => {
       const repositories: GitHubRepository[] = [];
-      const perPage = 100;
 
-      for (let page = 1; ; page += 1) {
-        const response = await this.requestAndCheck(`/installation/repositories?per_page=${perPage}&page=${page}`);
+      for (let page = 1; page <= GITHUB_REPOSITORY_PAGE_LIMIT; page += 1) {
+        const response = await this.requestAndCheck(`/installation/repositories?per_page=${GITHUB_REPOSITORIES_PER_PAGE}&page=${page}`);
         const data = (await response.json()) as { repositories: GitHubRepository[] };
         repositories.push(...data.repositories);
 
-        if (data.repositories.length < perPage) {
+        if (data.repositories.length < GITHUB_REPOSITORIES_PER_PAGE) {
           return repositories;
         }
       }
+
+      throw new Error(
+        `GitHub repository listing exceeded ${GITHUB_REPOSITORY_PAGE_LIMIT} pages without a terminating page.`,
+      );
     });
   }
 
@@ -311,7 +389,7 @@ export class GitHubClient {
 
   async getRepoFileOrNull(owner: string, repo: string, path: string) {
     return withRetry(`getRepoFileOrNull ${owner}/${repo}/${path}`, async () => {
-      const response = await this.request(`/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`);
+      const response = await this.request(`/repos/${owner}/${repo}/contents/${encodeGitHubContentPath(path)}`);
       if (response.status === 404) {
         return null;
       }

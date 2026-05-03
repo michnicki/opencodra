@@ -1,9 +1,12 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { ClipboardList } from 'lucide-react';
 import type { JobDetail } from '@shared/schema';
 import { reviewSeverities } from '@shared/schema';
+
+const safeRehypePlugins = [rehypeRaw, rehypeSanitize];
 
 interface JobReviewOverviewProps {
   job: JobDetail;
@@ -70,7 +73,7 @@ export function JobReviewOverview({ job }: JobReviewOverviewProps) {
       {/* Summary */}
       <div className="px-5 py-5">
         <div className="prose max-w-none">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={safeRehypePlugins}>
             {renderSummary()}
           </ReactMarkdown>
         </div>

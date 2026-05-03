@@ -81,6 +81,7 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     ASSETS: new MockAssets() as any,
     APP_PRIVATE_KEY: DUMMY_PRIVATE_KEY,
     GITHUB_APP_ID: '123',
+    GITHUB_APP_SLUG: 'codra-app',
     GITHUB_APP_WEBHOOK_SECRET: 'topsecret',
     GITHUB_CLIENT_ID: 'dashboard-client-id',
     GITHUB_CLIENT_SECRET: 'dashboard-client-secret',

@@ -1,10 +1,13 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { FileText } from 'lucide-react';
 import { cn } from '@client/lib/utils';
 import type { ParsedReviewComment } from '@shared/schema';
 import { severityConfig } from './constants';
+
+const safeRehypePlugins = [rehypeRaw, rehypeSanitize];
 
 interface CommentCardProps {
   comment: ParsedReviewComment;
@@ -47,7 +50,7 @@ export function CommentCard({ comment, filePath }: CommentCardProps) {
 
       {/* Body - stripped of suggestions to avoid duplication in UI */}
       <div className="prose prose-sm max-w-none text-foreground/90 leading-relaxed mb-4">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={safeRehypePlugins}>
           {comment.body.split('```suggestion')[0].trim()}
         </ReactMarkdown>
       </div>
@@ -60,7 +63,7 @@ export function CommentCard({ comment, filePath }: CommentCardProps) {
           </p>
           <div className="rounded-md overflow-hidden border" style={{ background: 'var(--code-bg)', borderColor: 'var(--code-border)', color: 'var(--code-fg)' }}>
             <div className="p-3 overflow-x-auto text-[13px] font-mono leading-relaxed prose-pre:m-0 prose-pre:bg-transparent prose-pre:border-none prose-pre:p-0">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={safeRehypePlugins}>
                 {`\`\`\`\n${comment.codeSuggestion.replace(/```suggestion\n?|```/g, '').trim()}\n\`\`\``}
               </ReactMarkdown>
             </div>

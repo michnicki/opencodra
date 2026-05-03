@@ -1,9 +1,23 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import type { AppEnv } from '@server/env';
 import { getRepoConfigRecord, listRepoConfigs, upsertRepoConfig, syncRepoConfig, updateRepoConfigEnabled } from '@server/db/repo-configs';
 import { jsonError } from '@server/core/http';
-import { GitHubClient, type GitHubInstallation, type GitHubRepository } from '@server/core/github';
+import { GitHubClient, type GitHubRepository } from '@server/core/github';
 import { invalidateRepoConfigCache } from '@server/core/config';
+import { repoConfigSchema } from '@shared/schema';
+
+const repoConfigPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    review: repoConfigSchema.shape.review.optional(),
+    model: repoConfigSchema.shape.model.optional(),
+  })
+  .strict()
+  .refine(
+    (patch) => patch.enabled !== undefined || patch.review !== undefined || patch.model !== undefined,
+    'Repository config patch cannot be empty.',
+  );
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -31,6 +45,15 @@ export function createReposRouter() {
   app.get('/', async (c) => {
     const repos = await listRepoConfigs(c.env);
     return c.json({ repos });
+  });
+
+  app.get('/install', async (c) => {
+    try {
+      return c.redirect(await GitHubClient.getAppInstallationUrl(c.env), 302);
+    } catch (error) {
+      console.error('Failed to resolve GitHub App installation URL:', error);
+      return jsonError(`Failed to resolve GitHub App installation URL: ${error instanceof Error ? error.message : String(error)}`, 500);
+    }
   });
 
   app.post('/sync', async (c) => {
@@ -84,38 +107,54 @@ export function createReposRouter() {
   app.patch('/:owner/:repo/config', async (c) => {
     const { owner, repo } = c.req.param();
     const body = await c.req.json();
+    const parsedPatch = repoConfigPatchSchema.safeParse(body);
+    if (!parsedPatch.success) {
+      return jsonError('Invalid repository config patch.', 400);
+    }
+
     const existing = await getRepoConfigRecord(c.env, owner, repo);
     
     if (!existing) {
       return jsonError('Repository config not found.', 404);
     }
-    
-    const hasModelPatch = Object.prototype.hasOwnProperty.call(body, 'model');
 
-    if (!hasModelPatch && Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+    const patch = parsedPatch.data;
+    const hasConfigPatch = patch.review !== undefined || patch.model !== undefined;
+
+    if (!hasConfigPatch && patch.enabled !== undefined) {
       await updateRepoConfigEnabled(c.env, {
         owner,
         repo,
-        enabled: Boolean(body.enabled),
+        enabled: patch.enabled,
       });
       await invalidateRepoConfigCache(c.env, owner, repo);
       return c.json({ ok: true });
     }
 
-    // Separate enabled from model config
-    const { enabled, ...modelConfig } = body;
+    const configPatch: Partial<z.infer<typeof repoConfigSchema>> = {};
+    if (patch.review !== undefined) {
+      configPatch.review = patch.review;
+    }
+    if (patch.model !== undefined) {
+      configPatch.model = patch.model;
+    }
     
     const updatedParsedJson = {
       ...existing.parsedJson,
-      ...modelConfig,
+      ...configPatch,
     };
+    const parsedConfig = repoConfigSchema.safeParse(updatedParsedJson);
+
+    if (!parsedConfig.success) {
+      return jsonError('Invalid repository config.', 400);
+    }
     
     await upsertRepoConfig(c.env, {
       installationId: existing.installationId,
       owner,
       repo,
-      parsedJson: updatedParsedJson,
-      enabled: enabled !== undefined ? Boolean(enabled) : undefined,
+      parsedJson: parsedConfig.data,
+      enabled: patch.enabled,
     });
     await invalidateRepoConfigCache(c.env, owner, repo);
     

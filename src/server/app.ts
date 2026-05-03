@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv } from '@server/env';
 import { requireSession } from '@server/middleware/auth';
+import { requireCsrfHeader } from '@server/middleware/csrf';
 import { observability } from '@server/middleware/observability';
 import { createAuthRouter } from '@server/routes/auth';
 import { createWebhookRouter } from '@server/routes/webhook';
@@ -20,12 +21,14 @@ export function createApp() {
   const app = new Hono<AppEnv>();
 
   app.use('*', observability);
+  app.use('/auth/logout', requireSession);
+  app.use('/auth/logout', requireCsrfHeader);
 
   app.route('/auth', createAuthRouter());
   app.route('/webhook', createWebhookRouter());
 
   app.use('/api/*', requireSession);
-  app.use('/auth/logout', requireSession);
+  app.use('/api/*', requireCsrfHeader);
 
   app.route('/api/auth', createAuthApiRouter());
   app.route('/api/jobs', createJobsRouter());
