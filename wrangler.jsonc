@@ -86,6 +86,7 @@
     "APP_URL": "https://app.codra.devarshi.dev",
     "AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/github/callback",
     "BOT_USERNAME": "codra-app",
+    "GITHUB_APP_SLUG": "codra-app-personal",
     "DASHBOARD_ALLOWED_USERS": "devarshishimpi",
     "ENVIRONMENT": "production"
   }

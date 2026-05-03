@@ -1,10 +1,13 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { ChevronRight } from 'lucide-react';
 import { StatusBadge } from '@client/components/shared/status-badge';
 import type { FileReviewRecord, ParsedReviewComment } from '@shared/schema';
 import { CommentCard } from './comment-card';
+
+const safeRehypePlugins = [rehypeRaw, rehypeSanitize];
 
 interface FileFindingProps {
   file: FileReviewRecord;
@@ -46,7 +49,7 @@ export function FileFinding({ file }: FileFindingProps) {
           <div className="mb-4 rounded-md border border-border/50 bg-muted/30 px-4 py-3">
             <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Model summary</p>
             <div className="prose prose-sm max-w-none text-foreground/90 leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{file.fileSummary}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={safeRehypePlugins}>{file.fileSummary}</ReactMarkdown>
             </div>
           </div>
         )}

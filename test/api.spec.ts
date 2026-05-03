@@ -3,6 +3,7 @@ import { insertJob } from '@server/db/jobs';
 import { insertFileReview } from '@server/db/file-reviews';
 import { getRepoConfigRecord } from '@server/db/repo-configs';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
+import { GitHubClient } from '@server/core/github';
 import { defaultRepoConfig, reviewJobMessageSchema } from '@shared/schema';
 import type {
   AuthSessionResponse,
@@ -122,6 +123,60 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as JobsResponse;
     expect(Array.isArray(data.jobs)).toBe(true);
+  });
+
+  it('rejects authenticated state-changing API requests without the CSRF header', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/jobs/non-existent-id/retry', {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}` },
+    }, env);
+
+    expect(response.status).toBe(403);
+  });
+
+  it('allows authenticated state-changing API requests with the CSRF header', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/jobs/non-existent-id/retry', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(404);
+  });
+
+  it('rejects logout without the CSRF header', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}` },
+    }, env);
+
+    expect(response.status).toBe(403);
+  });
+
+  it('allows logout with a valid session and CSRF header', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(200);
   });
 
   it('returns the authenticated GitHub session user', async () => {
@@ -248,6 +303,70 @@ describe('Dashboard API Suite', () => {
     expect(data.stats).toHaveProperty('topRepos');
   });
 
+  it('rejects invalid model config writes', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/models/gemma-4-31b-it', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        rpm: -1,
+        tpm: Number.NaN,
+        rpd: 100,
+        provider: 'unknown',
+      }),
+    }, env);
+
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects invalid global model config writes', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/models/global', {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        main: 'gemma-4-31b-it',
+        fallbacks: 'not-an-array',
+        size_overrides: {},
+      }),
+    }, env);
+
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects unknown fields in global model config writes', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/models/global', {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        main: 'gemma-4-31b-it',
+        fallbacks: [],
+        unexpected: true,
+      }),
+    }, env);
+
+    expect(response.status).toBe(400);
+  });
+
   it('returns repository list', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
@@ -259,6 +378,95 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as RepoConfigsResponse;
     expect(Array.isArray(data.repos)).toBe(true);
+  });
+
+  it('redirects Manage Access to the configured GitHub App install page', async () => {
+    const env = createTestEnv({ GITHUB_APP_SLUG: 'my-codra-install' });
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/repos/install', {
+      headers: { Cookie: `codra_session=${token}` },
+    }, env);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('https://github.com/apps/my-codra-install/installations/new');
+  });
+
+  it('rejects invalid repository config patches', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const repo = `invalid-config-${Date.now()}`;
+
+    await loadRepoConfig(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo,
+    });
+
+    const response = await app.request(`/api/repos/api-test-owner/${repo}/config`, {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        review: {
+          max_files: 0,
+        },
+      }),
+    }, env);
+
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects string booleans in repository config patches', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const repo = `invalid-enabled-${Date.now()}`;
+
+    await loadRepoConfig(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo,
+    });
+
+    const response = await app.request(`/api/repos/api-test-owner/${repo}/config`, {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        enabled: 'false',
+      }),
+    }, env);
+
+    expect(response.status).toBe(400);
+  });
+
+  it('preserves path separators when fetching nested GitHub contents', async () => {
+    const env = createTestEnv();
+    await env.APP_KV.put('install:123', JSON.stringify({
+      token: 'cached-installation-token',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }));
+
+    let requestedUrl = '';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      requestedUrl = String(input);
+      return Response.json({
+        content: Buffer.from('hello').toString('base64'),
+        encoding: 'base64',
+      });
+    });
+
+    const client = new GitHubClient(env, '123');
+    const content = await client.getRepoFileOrNull('owner', 'repo', 'src/path with spaces/app.ts');
+
+    expect(content).toBe('hello');
+    expect(requestedUrl).toBe('https://api.github.com/repos/owner/repo/contents/src/path%20with%20spaces/app.ts');
   });
 
   it('keeps repo model settings inherited when loading global strategy', async () => {

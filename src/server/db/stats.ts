@@ -4,7 +4,9 @@ import { statsSchema } from '@shared/schema';
 import { getModelUsageStats } from './file-reviews';
 
 export async function getStats(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, days = 30) {
-  const safeDays = Number(days) || 30;
+  const parsedDays = Number(days);
+  const safeDays = Number.isFinite(parsedDays) ? Math.trunc(parsedDays) : 30;
+  const clampedDays = Math.min(Math.max(safeDays, 1), 365);
   const [[totals], dailyRows, verdictRows, topRepos, modelRows] = await Promise.all([
     queryRows<{
       jobs: number;
@@ -32,10 +34,11 @@ export async function getStats(env: Pick<AppBindings, 'NEON_DATABASE_URL'>, days
           COALESCE(SUM(total_output_tokens), 0)::int AS output_tokens,
           COALESCE(SUM(comment_count), 0)::int AS comments
         FROM jobs
-        WHERE created_at >= now() - interval '${safeDays} days'
+        WHERE created_at >= now() - ($1::int * interval '1 day')
         GROUP BY DATE_TRUNC('day', created_at)
         ORDER BY day ASC
       `,
+      [clampedDays],
     ),
     queryRows<{ verdict: 'approve' | 'comment' | null; count: number }>(
       env,

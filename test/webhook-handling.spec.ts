@@ -56,6 +56,28 @@ describe('Webhook Handling Suite', () => {
     expect(response.status).toBe(401);
   });
 
+  it('rejects signed malformed webhook JSON with a 400', async () => {
+    const body = '{"not": "valid"';
+    const signature = await signPayload(env.GITHUB_APP_WEBHOOK_SECRET, body);
+
+    const response = await app.request(
+      'http://codra.test/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'x-github-event': 'pull_request',
+          'x-github-delivery': `malformed-${Date.now()}`,
+          'x-hub-signature-256': signature,
+          'content-type': 'application/json',
+        },
+        body,
+      },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   it('accepts valid pull_request.opened and queues a job', async () => {
     const repoName = `repo-${Date.now()}`;
     const rawPayload = createMockPRWebhook({

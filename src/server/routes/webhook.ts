@@ -26,7 +26,13 @@ export function createWebhookRouter() {
       return jsonError('Invalid webhook signature.', 401);
     }
 
-    const payload = JSON.parse(rawBody) as GitHubWebhookPayload;
+    let payload: GitHubWebhookPayload;
+    try {
+      payload = JSON.parse(rawBody) as GitHubWebhookPayload;
+    } catch {
+      return jsonError('Invalid webhook JSON payload.', 400);
+    }
+
     const insertedDelivery = await recordWebhookDelivery(c.env, {
       deliveryId,
       eventName,

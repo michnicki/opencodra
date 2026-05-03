@@ -432,7 +432,7 @@ export function ReposPage() {
             </Button>
             <Button asChild size="sm" className="gap-2">
               <a
-                href="https://github.com/apps/codra-app/installations/new"
+                href="/api/repos/install"
                 target="_blank"
                 rel="noopener noreferrer"
               >

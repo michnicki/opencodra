@@ -11,14 +11,24 @@ import type {
   SyncReposResponse,
 } from '@shared/api';
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 async function request<T>(input: string, init?: RequestInit) {
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  const headers = new Headers(init?.headers);
+
+  if (!headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+
+  if (!SAFE_METHODS.has(method)) {
+    headers.set('x-requested-with', 'XMLHttpRequest');
+  }
+
   const response = await fetch(input, {
     credentials: 'same-origin',
-    headers: {
-      'content-type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
     ...init,
+    headers,
   });
 
   if (response.status === 401) {
