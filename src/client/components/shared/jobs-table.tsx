@@ -82,7 +82,7 @@ export function JobsTable({ jobs, loading, columns }: JobsTableProps) {
             jobs.map((job) => (
               <tr
                 key={job.id}
-                className="border-b border-border/40 transition-colors hover:bg-primary/[0.03] cursor-default last:border-0"
+                className="border-b border-border/40 cursor-default last:border-0"
               >
                 {cols.includes('repo') && (
                   <td className={cn("px-4 py-5", COLUMN_CLASSES['repo'])}>

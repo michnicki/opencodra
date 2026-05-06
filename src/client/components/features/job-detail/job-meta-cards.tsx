@@ -13,7 +13,7 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {/* Details */}
-      <Card className="surface-static">
+      <Card className="surface-static surface-static-shadow">
         <CardHeader><CardTitle>Job details</CardTitle></CardHeader>
         <CardContent className="pt-0">
           <dl className="grid grid-cols-2 gap-x-4 gap-y-4">
@@ -86,7 +86,7 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
       </Card>
 
       {/* Steps */}
-      <Card className="surface-static">
+      <Card className="surface-static surface-static-shadow">
         <CardHeader><CardTitle>Progress steps</CardTitle></CardHeader>
         <CardContent className="pt-0">
           {(job.steps ?? []).length === 0 ? (

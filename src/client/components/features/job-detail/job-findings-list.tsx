@@ -47,7 +47,7 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
       {viewBy === 'files' ? (
         <div className="flex flex-col gap-3">
           {job.files.length === 0 ? (
-            <div className="surface flex flex-col items-center justify-center py-16 text-center">
+            <div className="surface surface-static-shadow flex flex-col items-center justify-center py-16 text-center">
               <FileText size={32} className="text-muted-foreground/20 mb-3" />
               <p className="text-sm font-medium text-muted-foreground">No files reviewed yet.</p>
               <p className="text-xs text-muted-foreground/60 mt-1">Results will appear here as the review progresses.</p>
@@ -72,7 +72,7 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
             const GroupIcon = sev?.icon ?? FileText;
 
             return (
-              <div key={groupName} className="surface overflow-hidden">
+              <div key={groupName} className="surface surface-static-shadow overflow-hidden">
                 {/* Group header */}
                 <div className="flex items-center gap-2.5 px-5 py-4 border-b border-border">
                   {sev?.svg ? (

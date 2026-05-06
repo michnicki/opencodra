@@ -25,7 +25,7 @@ export function StatsGrid({ items, columns = 4, className, ...props }: StatsGrid
   return (
     <div 
       className={cn(
-        'surface grid divide-x divide-y divide-border overflow-hidden',
+        'surface surface-static-shadow grid divide-x divide-y divide-border overflow-hidden',
         gridCols,
         columns === 4 && 'sm:divide-y-0',
         className
@@ -35,11 +35,11 @@ export function StatsGrid({ items, columns = 4, className, ...props }: StatsGrid
       {items.map(({ label, value, icon: Icon, trend }, i) => (
         <div 
           key={i} 
-          className="flex flex-col gap-2.5 px-5 py-4 sm:px-6 sm:py-5 relative overflow-hidden group"
+          className="flex flex-col gap-2.5 px-5 py-4 sm:px-6 sm:py-5 relative overflow-hidden"
         >
           {trend && <Sparkline data={trend} />}
           
-          <div className="relative z-10 flex items-center gap-2 text-muted-foreground group-hover:text-foreground transition-colors">
+          <div className="relative z-10 flex items-center gap-2 text-muted-foreground">
             <Icon size={13} strokeWidth={1.75} />
             <span className="stat-label">{label}</span>
           </div>
