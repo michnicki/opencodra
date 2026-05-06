@@ -18,6 +18,13 @@ import {
 } from 'lucide-react';
 import { cn } from '@client/lib/utils';
 import { useTheme } from '@client/lib/theme';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@client/components/ui/dropdown-menu';
 import codraDark from '@/assets/codra-fullicon-dark.svg';
 import codraLight from '@/assets/codra-fullicon-light.svg';
 import type { AuthSessionUser } from '@shared/api';
@@ -31,7 +38,7 @@ const links = [
 ];
 
 const collapsedTooltipClass = [
-  'lg:pointer-events-none lg:absolute lg:left-[calc(100%+0.75rem)]',
+  'lg:pointer-events-none lg:absolute lg:left-[calc(100%+1rem)]',
   'lg:z-50 lg:w-max lg:max-w-44 lg:rounded-lg',
   'lg:border lg:border-border lg:bg-white lg:dark:bg-popover',
   'lg:px-3 lg:py-1.5 lg:text-xs lg:font-semibold lg:text-black lg:dark:text-white',
@@ -50,11 +57,17 @@ function getStoredSidebarCollapsed(): boolean {
   }
 }
 
+function getIsDesktop(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia('(min-width: 1024px)').matches;
+}
+
 export function AppShell() {
   const { theme, toggleTheme } = useTheme();
   const [sessionUser, setSessionUser] = useState<AuthSessionUser | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => getStoredSidebarCollapsed());
+  const [isDesktop, setIsDesktop] = useState<boolean>(() => getIsDesktop());
 
   const shellStyle = {
     '--app-sidebar-width': sidebarCollapsed
@@ -64,6 +77,7 @@ export function AppShell() {
   const githubProfileHref = sessionUser ? `https://github.com/${sessionUser.login}` : 'https://github.com';
   const accountName = sessionUser?.name?.trim() || sessionUser?.login || 'GitHub';
   const accountInitial = accountName.charAt(0).toUpperCase();
+  const accountMenuBesideSidebar = sidebarCollapsed && isDesktop;
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +94,14 @@ export function AppShell() {
       // ignore storage failures
     }
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const query = window.matchMedia('(min-width: 1024px)');
+    const updateIsDesktop = () => setIsDesktop(query.matches);
+    updateIsDesktop();
+    query.addEventListener('change', updateIsDesktop);
+    return () => query.removeEventListener('change', updateIsDesktop);
+  }, []);
 
   return (
     <div className="flex min-h-svh bg-background" style={shellStyle}>
@@ -115,7 +137,8 @@ export function AppShell() {
         {/* ── Header ──────────────────────────────── */}
         <div className={cn(
           'relative flex shrink-0 items-center px-3 pt-4 pb-3',
-          sidebarCollapsed ? 'lg:flex-col lg:items-center lg:gap-2 lg:pb-4' : 'justify-between',
+          'justify-between',
+          sidebarCollapsed && 'lg:flex-col lg:items-center lg:justify-start lg:gap-2 lg:pb-4',
         )}>
 
           {/* Logo */}
@@ -130,7 +153,7 @@ export function AppShell() {
             onClick={() => setMobileMenuOpen(false)}
           >
             <img
-              src={theme === 'dark' ? '/icons/codra-icon-dark.svg' : '/icons/codra-icon-light.svg'}
+              src={theme === 'dark' ? '/icons/codra-icon-light.svg' : '/icons/codra-icon-dark.svg'}
               alt=""
               className={cn(
                 'hidden h-8 w-8 shrink-0 rounded-lg lg:block',
@@ -138,7 +161,7 @@ export function AppShell() {
               )}
             />
             <img
-              src={theme === 'dark' ? codraDark : codraLight}
+              src={theme === 'dark' ? codraLight : codraDark}
               alt="Codra"
               className={cn('h-6 w-auto', sidebarCollapsed && 'lg:hidden')}
             />
@@ -159,7 +182,7 @@ export function AppShell() {
           </button>
 
           {/* Collapse / theme / close controls (expanded) */}
-          <div className={cn('flex items-center gap-1', sidebarCollapsed && 'lg:hidden')}>
+          <div className={cn('ml-auto flex items-center gap-1 lg:ml-0', sidebarCollapsed && 'lg:hidden')}>
             <button
               onClick={() => setSidebarCollapsed(true)}
               className="hidden h-8 w-8 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:flex"
@@ -169,7 +192,7 @@ export function AppShell() {
             </button>
             <button
               onClick={toggleTheme}
-              className="hidden h-8 w-8 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:flex"
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:h-8 lg:w-8"
               aria-label="Toggle theme"
             >
               {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
@@ -233,7 +256,7 @@ export function AppShell() {
                         aria-hidden="true"
                       >
                         <span className="dashboard-sidebar-shine absolute inset-0 flex h-full w-full justify-center">
-                          <span className="relative h-full w-8 bg-white/25 dark:bg-white/20" />
+                          <span className="relative h-full w-8 bg-primary/35 dark:bg-primary/40" />
                         </span>
                       </span>
                     )}
@@ -282,14 +305,14 @@ export function AppShell() {
             target="_blank"
             rel="noopener noreferrer"
             title="Star on GitHub"
-            className={cn(
-              'dashboard-sidebar-action',
-              'group relative flex h-[2.375rem] w-full items-center justify-center gap-2 rounded-lg px-3',
-              'border border-dashed border-border/60 bg-transparent',
-              'text-xs font-bold text-black dark:text-white',
-              'transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
+              className={cn(
+                'dashboard-sidebar-action',
+                'group relative flex h-[2.375rem] w-full items-center justify-center gap-2 rounded-lg px-3',
+                'bg-transparent',
+                'text-xs font-bold text-black dark:text-white',
+                'transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
               'hover:border-primary/35 hover:bg-secondary/70 hover:text-black hover:shadow-[0_10px_20px_-18px_var(--primary)] active:translate-y-0 dark:hover:text-white',
-              sidebarCollapsed && 'lg:w-[2.375rem] lg:px-0',
+              sidebarCollapsed && 'lg:w-[2.375rem] lg:justify-center lg:px-0',
             )}
           >
             <Star
@@ -300,86 +323,102 @@ export function AppShell() {
             <span className={cn('dashboard-sidebar-action-label transition-transform duration-200 ease-[var(--ease-out-quart)]', sidebarCollapsed && 'lg:hidden')}>
               Star on GitHub
             </span>
-            <span className="dashboard-sidebar-tooltip">
-              Star on GitHub
-            </span>
           </a>
 
           {/* Account */}
           {sessionUser && (
-            <a
-              href={githubProfileHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={`${accountName} on GitHub`}
-              className={cn(
-                'dashboard-sidebar-action',
-                'group relative flex w-full items-center gap-3 rounded-xl p-2',
-                'border border-border/60 bg-transparent',
-                'text-black dark:text-white',
-                'transition-[background-color,border-color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
-                'hover:border-primary/35 hover:bg-secondary/75 hover:shadow-[0_10px_22px_-18px_var(--primary)]',
-                sidebarCollapsed && 'lg:h-[2.375rem] lg:w-[2.375rem] lg:justify-center lg:rounded-lg lg:border-dashed lg:p-0',
-              )}
-            >
-              <span className="relative shrink-0">
-                {sessionUser.avatarUrl ? (
-                  <img
-                    src={sessionUser.avatarUrl}
-                    alt=""
-                    className="h-9 w-9 rounded-full object-cover ring-1 ring-border/70 transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-105 lg:group-hover:scale-110"
-                  />
-                ) : (
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground ring-1 ring-border/70 transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-105 lg:group-hover:scale-110">
-                    {accountInitial}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  title={`${accountName} account menu`}
+                  className={cn(
+                    'dashboard-sidebar-action',
+                    'group relative flex w-full items-center gap-3 rounded-xl p-2 text-left',
+                    'bg-transparent',
+                    'text-black dark:text-white',
+                    'transition-[background-color,border-color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
+                    'hover:border-primary/35 hover:bg-secondary/75 hover:shadow-[0_10px_22px_-18px_var(--primary)]',
+                    sidebarCollapsed && 'lg:h-[2.375rem] lg:w-[2.375rem] lg:justify-center lg:rounded-lg lg:border-dashed lg:p-0',
+                  )}
+                >
+                  <span className="relative shrink-0">
+                    {sessionUser.avatarUrl ? (
+                      <img
+                        src={sessionUser.avatarUrl}
+                        alt=""
+                        className={cn(
+                          'h-9 w-9 rounded-full object-cover ring-1 ring-border/70 transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-105 lg:group-hover:scale-110',
+                          sidebarCollapsed && 'lg:h-7 lg:w-7',
+                        )}
+                      />
+                    ) : (
+                      <span className={cn(
+                        'flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground ring-1 ring-border/70 transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-105 lg:group-hover:scale-110',
+                        sidebarCollapsed && 'lg:h-7 lg:w-7 lg:text-xs',
+                      )}>
+                        {accountInitial}
+                      </span>
+                    )}
                   </span>
-                )}
-              </span>
-              <span className={cn('dashboard-sidebar-action-label min-w-0 flex-1', sidebarCollapsed && 'lg:hidden')}>
-                <span className="block truncate text-[13px] font-bold leading-tight text-black dark:text-white">
-                  {accountName}
-                </span>
-                <span className="mt-0.5 block truncate text-[11px] font-semibold leading-tight text-zinc-800 dark:text-zinc-200">
-                  @{sessionUser.login}
-                </span>
-              </span>
-              <span className="dashboard-sidebar-tooltip">
-                {accountName}
-              </span>
-            </a>
+                  <span className={cn('dashboard-sidebar-action-label min-w-0 flex-1', sidebarCollapsed && 'lg:hidden')}>
+                    <span className="block truncate text-[13px] font-bold leading-tight text-black dark:text-white">
+                      {accountName}
+                    </span>
+                    <span className="dashboard-sidebar-username mt-0.5 block truncate text-[11px] font-semibold leading-tight text-zinc-200 dark:text-zinc-800">
+                      @{sessionUser.login}
+                    </span>
+                  </span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side={accountMenuBesideSidebar ? 'right' : 'top'}
+                align={accountMenuBesideSidebar ? 'end' : 'start'}
+                sideOffset={accountMenuBesideSidebar ? 16 : 12}
+                alignOffset={accountMenuBesideSidebar ? -2 : 0}
+                className="w-60 rounded-xl border-white/10 bg-black p-2 text-white shadow-[0_18px_42px_-24px_oklch(0%_0_0/0.75)] dark:border-black/10 dark:bg-white dark:text-black dark:shadow-[0_18px_42px_-24px_oklch(0%_0_0/0.28)]"
+              >
+                <div className="mb-1 flex min-w-0 items-center gap-3 rounded-lg px-2 py-2">
+                  {sessionUser.avatarUrl ? (
+                    <img
+                      src={sessionUser.avatarUrl}
+                      alt=""
+                      className="h-9 w-9 rounded-full object-cover ring-1 ring-white/20 dark:ring-black/15"
+                    />
+                  ) : (
+                    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground ring-1 ring-white/20 dark:ring-black/15">
+                      {accountInitial}
+                    </span>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-bold leading-tight text-white dark:text-black">
+                      {accountName}
+                    </p>
+                    <p className="mt-0.5 truncate text-xs font-semibold text-zinc-200 dark:text-zinc-800">
+                      @{sessionUser.login}
+                    </p>
+                  </div>
+                </div>
+                <DropdownMenuSeparator className="mx-1 my-1 bg-white/10 dark:bg-black/10" />
+                <DropdownMenuItem asChild className="cursor-pointer rounded-lg px-2 py-2 text-xs font-semibold text-white focus:bg-white/10 focus:text-white dark:text-black dark:focus:bg-black/10 dark:focus:text-black">
+                  <a href={githubProfileHref} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3">
+                    <span>GitHub profile</span>
+                    <ChevronRight size={13} strokeWidth={2.35} className="opacity-60" />
+                  </a>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="cursor-pointer gap-2 rounded-lg px-2 py-2 text-xs font-semibold text-white focus:bg-white/10 focus:text-white dark:text-black dark:focus:bg-black/10 dark:focus:text-black"
+                  onClick={async () => {
+                    await api.logout();
+                    location.href = '/login';
+                  }}
+                >
+                  <LogOut size={13} strokeWidth={2.35} />
+                  Logout
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
-
-          {/* Logout */}
-          <button
-            id="logout-btn"
-            type="button"
-            title="Log out"
-            className={cn(
-              'dashboard-sidebar-action',
-              'group relative flex h-[2.375rem] w-full items-center justify-center gap-2 rounded-lg px-3',
-              'border border-dashed border-border/60 bg-transparent',
-              'text-xs font-bold text-black dark:text-white',
-              'transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
-              'hover:border-primary/35 hover:bg-secondary/70 hover:text-black hover:shadow-[0_10px_20px_-18px_var(--primary)] active:translate-y-0 dark:hover:text-white',
-              sidebarCollapsed && 'lg:w-[2.375rem] lg:px-0',
-            )}
-            onClick={async () => {
-              await api.logout();
-              location.href = '/login';
-            }}
-          >
-            <LogOut
-              size={14}
-              strokeWidth={2.35}
-              className="dashboard-sidebar-action-icon shrink-0 text-black transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-110 dark:text-white"
-            />
-            <span className={cn('dashboard-sidebar-action-label transition-transform duration-200 ease-[var(--ease-out-quart)]', sidebarCollapsed && 'lg:hidden')}>
-              Logout
-            </span>
-            <span className="dashboard-sidebar-tooltip">
-              Log out
-            </span>
-          </button>
         </div>
 
         <div className="h-1 shrink-0" />
