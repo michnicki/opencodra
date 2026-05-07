@@ -233,12 +233,7 @@ async function ensureModelCatalog() {
     `
       INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider)
       VALUES ($1, 10, 131072, 300, 'cloudflare')
-      ON CONFLICT (model_id) DO UPDATE SET
-        rpm = EXCLUDED.rpm,
-        tpm = EXCLUDED.tpm,
-        rpd = EXCLUDED.rpd,
-        provider = EXCLUDED.provider,
-        updated_at = now()
+      ON CONFLICT (model_id) DO NOTHING
     `,
     [kimiK26Model],
   );
