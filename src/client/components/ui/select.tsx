@@ -54,26 +54,26 @@ export function Select({
               triggerClassName
             )}
           >
-            <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 flex-1 items-center gap-2">
               {leadingIcon && (
                 <span className="shrink-0 text-primary/70">
                   {leadingIcon}
                 </span>
               )}
-              <span className="truncate">
+              <span className="min-w-0 truncate">
                 {selectedOption ? selectedOption.label : placeholder}
               </span>
             </span>
             <ChevronDown className="h-4 w-4 opacity-50 shrink-0 ml-2" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent className="min-w-[var(--radix-dropdown-menu-trigger-width)]">
+        <DropdownMenuContent className="w-max min-w-[var(--radix-dropdown-menu-trigger-width)]">
           {options.map((option) => (
             <DropdownMenuItem
               key={option.value}
               onClick={() => onValueChange(option.value)}
               className={cn(
-                'cursor-pointer',
+                'cursor-pointer whitespace-nowrap',
                 value === option.value && 'bg-accent font-medium dark:bg-primary/[0.12]'
               )}
             >

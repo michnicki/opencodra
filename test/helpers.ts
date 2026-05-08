@@ -108,6 +108,9 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     GEMINI_API_KEY: 'gemini-key',
     BOT_USERNAME: 'codra-app',
     ENVIRONMENT: 'test',
+    CF_API_TOKEN: 'cf-api-token',
+    CF_ACCOUNT_ID: 'cf-account-id',
+    CF_DLQ_ID: 'cf-dlq-id',
     ...overrides,
   };
 }

@@ -38,8 +38,9 @@ DATABASE_URL="postgresql://user:password@localhost:5432/codra_dev"
 # MUST be a separate database to avoid data loss during test sweeps.
 TEST_DATABASE_URL="postgresql://user:password@localhost:5432/codra_test"
 
-# --- Cloudflare Management (Optional) ---
-# Required only for inspecting/replaying Dead Letter Queues (DLQ) via /api/dlq
+# --- Cloudflare DLQ / Queue Management (Required) ---
+# Required for DLQ inspection, replay, and purge via /api/dlq
+# Create or identify the DLQ queue, then set CF_DLQ_ID to that queue's ID.
 # Generate token at https://dash.cloudflare.com/profile/api-tokens (Queues:Edit permission)
 CF_API_TOKEN="REPLACE_WITH_CLOUDFLARE_API_TOKEN"
 CF_ACCOUNT_ID="REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID"

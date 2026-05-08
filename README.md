@@ -55,12 +55,13 @@ What the deploy button does not provision for you:
 - GitHub App credentials
 - GitHub OAuth app credentials
 - Gemini API key
+- Cloudflare API credentials for DLQ inspection, replay, and purge
 
 That means the deploy flow is best thought of as "Cloudflare infrastructure bootstrap", followed by a short secrets setup step.
 
 For this repo's own production deployment, the checked-in route and binding IDs in [`wrangler.jsonc`](/wrangler.jsonc) are intentional. They are what keep `codra.run` deploying against the same Worker, KV namespace, and queues. If you fork Codra, replace those values with your own resources.
 
-## Required Secrets And Local DB Vars
+## Required Secrets, DLQ, And Local DB Vars
 
 Codra expects these secrets in Cloudflare production and in local `.dev.vars` for development:
 
@@ -70,16 +71,22 @@ Codra expects these secrets in Cloudflare production and in local `.dev.vars` fo
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `GEMINI_API_KEY`
+- `CF_API_TOKEN`
+- `CF_ACCOUNT_ID`
+
+DLQ setup is required during installation because Codra includes `/api/dlq` inspection, replay, and purge workflows. Create or identify the dead letter queue and copy its queue ID into `CF_DLQ_ID`:
+
+```bash
+npx wrangler queues create codra-review-dlq
+npx wrangler queues list
+```
+
+The Cloudflare API token must have Queues edit access for the account that owns the Worker queues. `CF_DLQ_ID` is a required environment variable, not a secret, and should point at the `codra-review-dlq` queue used by the `dead_letter_queue` consumer config in [`wrangler.jsonc`](/wrangler.jsonc).
 
 Local development and migrations also need:
 
 - `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` for local Worker DB access
 - `DATABASE_URL` for local/admin migrations
-
-Optional, only for DLQ inspection and replay APIs:
-
-- `CF_API_TOKEN`
-- `CF_ACCOUNT_ID`
 
 The expected local shape is already documented in [`.dev.vars.example`](/.dev.vars.example).
 
@@ -87,6 +94,7 @@ In the checked-in production Wrangler config, these values are regular environme
 
 - `AUTH_CALLBACK_URL`
 - `DASHBOARD_ALLOWED_USERS`
+- `CF_DLQ_ID`
 
 ## Dashboard Auth
 
