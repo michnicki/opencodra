@@ -19,7 +19,7 @@ import { logger } from '@server/core/logger';
  *
  * Note: Cloudflare's pull-queue API requires a CF_API_TOKEN with
  *       Queues:Edit permissions. Add CF_API_TOKEN and CF_ACCOUNT_ID as
- *       Worker secrets (see .dev.vars.example).
+ *       Worker secrets, and CF_DLQ_ID as a required var (see .dev.vars.example).
  */
 
 const CF_QUEUES_BASE = 'https://api.cloudflare.com/client/v4';
@@ -74,15 +74,16 @@ export function createDlqRouter() {
 
     const apiToken = c.env.CF_API_TOKEN;
     const accountId = c.env.CF_ACCOUNT_ID;
+    const dlqId = c.env.CF_DLQ_ID;
 
-    if (!apiToken || !accountId) {
-      return jsonError('CF_API_TOKEN and CF_ACCOUNT_ID secrets are required for DLQ inspection.', 503);
+    if (!apiToken || !accountId || !dlqId) {
+      return jsonError('CF_API_TOKEN, CF_ACCOUNT_ID, and CF_DLQ_ID are required DLQ installation configuration for inspection.', 503);
     }
 
     try {
       const result = await cfQueuesRequest(
         'POST',
-        `/accounts/${accountId}/queues/${c.env.CF_DLQ_ID}/messages/pull`,
+        `/accounts/${accountId}/queues/${dlqId}/messages/pull`,
         apiToken,
         { batch_size: batchSize, visibility_timeout_ms: 30_000 },
       ) as { messages?: CfQueueMessage[] };
@@ -119,9 +120,10 @@ export function createDlqRouter() {
 
     const apiToken = c.env.CF_API_TOKEN;
     const accountId = c.env.CF_ACCOUNT_ID;
+    const dlqId = c.env.CF_DLQ_ID;
 
-    if (!apiToken || !accountId) {
-      return jsonError('CF_API_TOKEN and CF_ACCOUNT_ID secrets are required for DLQ replay.', 503);
+    if (!apiToken || !accountId || !dlqId) {
+      return jsonError('CF_API_TOKEN, CF_ACCOUNT_ID, and CF_DLQ_ID are required DLQ installation configuration for replay.', 503);
     }
 
     // Step 1 – pull the specific messages so we have their bodies.
@@ -131,7 +133,7 @@ export function createDlqRouter() {
     try {
       const result = await cfQueuesRequest(
         'POST',
-        `/accounts/${accountId}/queues/${c.env.CF_DLQ_ID}/messages/pull`,
+        `/accounts/${accountId}/queues/${dlqId}/messages/pull`,
         apiToken,
         { batch_size: 100, visibility_timeout_ms: 60_000 },
       ) as { messages?: CfQueueMessage[] };
@@ -153,7 +155,7 @@ export function createDlqRouter() {
     try {
       await cfQueuesRequest(
         'POST',
-        `/accounts/${accountId}/queues/${c.env.CF_DLQ_ID}/messages/ack`,
+        `/accounts/${accountId}/queues/${dlqId}/messages/ack`,
         apiToken,
         { acks: targets.map((m) => ({ lease_id: m.lease_id })) },
       );
@@ -203,15 +205,16 @@ export function createDlqRouter() {
 
     const apiToken = c.env.CF_API_TOKEN;
     const accountId = c.env.CF_ACCOUNT_ID;
+    const dlqId = c.env.CF_DLQ_ID;
 
-    if (!apiToken || !accountId) {
-      return jsonError('CF_API_TOKEN and CF_ACCOUNT_ID secrets are required for DLQ purge.', 503);
+    if (!apiToken || !accountId || !dlqId) {
+      return jsonError('CF_API_TOKEN, CF_ACCOUNT_ID, and CF_DLQ_ID are required DLQ installation configuration for purge.', 503);
     }
 
     try {
       await cfQueuesRequest(
         'POST',
-        `/accounts/${accountId}/queues/${c.env.CF_DLQ_ID}/messages/ack`,
+        `/accounts/${accountId}/queues/${dlqId}/messages/ack`,
         apiToken,
         { acks: body.data.lease_ids.map((id) => ({ lease_id: id })) },
       );
