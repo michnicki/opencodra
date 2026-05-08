@@ -1,171 +1,92 @@
-# Codra
+<div align="center">
+  <h1>Codra</h1>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./public/assets/codra-gh-banner-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="./public/assets/codra-gh-banner-light.svg">
-  <img alt="Codra banner" src="./public/assets/codra-gh-banner-light.svg">
-</picture>
+  <p>
+    Self-hosted AI code review for GitHub pull requests.<br/>
+    Cloudflare-native, queue-backed, repository-aware, and built for teams that want to own their review engine.
+  </p>
 
-Open source PR review infrastructure for Cloudflare Workers.
+  <p>
+    <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
+    <a href="https://github.com/devarshishimpi/codra/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/devarshishimpi/codra?style=flat&logo=github"></a>
+    <a href="https://workers.cloudflare.com/"><img alt="Cloudflare Workers" src="https://img.shields.io/badge/runtime-Cloudflare%20Workers-f38020?logo=cloudflare"></a>
+    <a href="https://react.dev/"><img alt="Built with React" src="https://img.shields.io/badge/dashboard-React-61dafb?logo=react&logoColor=111"></a>
+    <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/language-TypeScript-3178c6?logo=typescript&logoColor=fff"></a>
+  </p>
 
-Codra listens to GitHub pull request events, runs AI-powered review jobs, posts inline findings back to the PR, and gives you a dashboard to inspect jobs, repos, models, and review history.
+  <br/>
+  <br/>
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/devarshishimpi/codra)
+  <p>
+    <a href="https://codra.run">Website</a>
+    |
+    <a href="https://codra.run/docs">Docs</a>
+    |
+    <a href="https://codra.run/docs/installation">Installation</a>
+    |
+    <a href="https://github.com/devarshishimpi/codra/issues">Issues</a>
+    |
+    <a href="CONTRIBUTING.md">Contributing</a>
+  </p>
+</div>
 
-## What Codra Does
+![Codra dashboard](./public/assets/codra-dashboard.png)
 
-- Reviews pull requests automatically on `opened`, `synchronize`, `ready_for_review`, and `reopened`
-- Supports mention-triggered reviews
-- Posts inline PR comments and updates GitHub check runs
-- Queues review jobs through Cloudflare Queues so webhook intake stays fast
-- Stores job history, repo settings, and review metadata in external Postgres through Cloudflare Hyperdrive
-- Ships with a built-in dashboard for jobs, repos, stats, settings, and replay/debug workflows
-- Lets each repository override review behavior, skip globs, labels, and model routing
+Codra listens to GitHub pull request events, runs AI-powered review jobs, posts inline findings back to the PR, and gives you a dashboard to inspect jobs, repositories, model routing, review history, and failed queue runs.
+
+## Why Codra
+
+- **Own the whole review loop**: Run the GitHub App, Cloudflare Worker, queue, database, model credentials, and dashboard under your own control.
+- **Review with repository context**: Codra checks pull request diffs for correctness, security, performance, maintainability, and repo-specific patterns.
+- **Configure each repository**: Tune triggers, skipped paths, draft handling, mention reviews, labels, custom rules, and review budgets from the dashboard.
+- **Route models deliberately**: Use global defaults, per-repo model chains, fallbacks, and size-based overrides for larger pull requests.
+- **Operate the system**: Inspect job history, PR findings, webhook deliveries, queue failures, DLQ replay, model usage, and dashboard stats.
+
+## Features
+
+- Automatic reviews on `opened`, `synchronize`, `ready_for_review`, and `reopened` pull request events
+- Mention-triggered reviews for on-demand analysis
+- Inline GitHub review comments plus summary reviews and check run updates
+- Queue-backed processing through Cloudflare Queues
+- Dead letter queue inspection, replay, and purge workflows
+- GitHub OAuth dashboard authentication
+- External PostgreSQL storage through Cloudflare Hyperdrive
+- Google Gemini and Cloudflare Workers AI model providers
+- Repository settings for labels, skipped globs, custom rules, and model routing
+
+## How It Works
+
+1. GitHub sends Codra a pull request webhook.
+2. Codra verifies the signature and loads repository review settings.
+3. A review job is stored in PostgreSQL and queued on Cloudflare Queues.
+4. The Worker consumes the job, fetches the PR diff, runs model review passes, and formats findings.
+5. Codra posts inline comments and a summary review back to GitHub.
+6. The dashboard keeps the job history, findings, logs, stats, and replay tools available for operators.
 
 ## Stack
 
-- Cloudflare Workers + Hono
-- React + Vite
-- Cloudflare Queues + KV + Workers AI
-- External Postgres via Cloudflare Hyperdrive and `postgres`
-- GitHub App webhooks + checks + PR review APIs
+- **Worker**: Cloudflare Workers, Hono, Wrangler
+- **Dashboard**: React, Vite, Tailwind CSS, Radix UI, Recharts
+- **Data**: PostgreSQL, Cloudflare Hyperdrive, Cloudflare KV
+- **Queues**: Cloudflare Queues with DLQ workflows
+- **Models**: Google Gemini and Cloudflare Workers AI
+- **GitHub**: GitHub App webhooks, checks, reviews, and OAuth
+- **Quality**: TypeScript, Zod, Vitest, Playwright browser tests
 
-## Architecture
+## Documentation
 
-1. GitHub sends a webhook to Codra.
-2. Codra validates the signature and loads repo config from the database.
-3. A review job is inserted into Postgres via Hyperdrive and queued on Cloudflare Queues.
-4. The worker consumes the job, fetches the PR diff, runs model review passes, and formats findings.
-5. Codra posts inline comments plus a summary review back to GitHub and stores the run for the dashboard.
+The full setup and operations guides live at [codra.run/docs](https://codra.run/docs).
 
-## Deploy To Cloudflare
+- [Installation guide](https://codra.run/docs/installation)
+- [Configuration guide](https://codra.run/docs/configuration)
+- [Deploy with Neon](https://codra.run/docs/neon)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
-Use the button above to clone and deploy Codra to your own Cloudflare account.
+## Contributing
 
-Cloudflare can provision or bind the Cloudflare-native resources defined in [`wrangler.jsonc`](/wrangler.jsonc), including:
-
-- `APP_KV`
-- `REVIEW_QUEUE`
-- Workers AI binding
-- static asset hosting from `dist/client`
-
-What the deploy button does not provision for you:
-
-- your Postgres database and Hyperdrive config
-- GitHub App credentials
-- GitHub OAuth app credentials
-- Gemini API key
-- Cloudflare API credentials for DLQ inspection, replay, and purge
-
-That means the deploy flow is best thought of as "Cloudflare infrastructure bootstrap", followed by a short secrets setup step.
-
-For this repo's own production deployment, the checked-in route and binding IDs in [`wrangler.jsonc`](/wrangler.jsonc) are intentional. They are what keep `codra.run` deploying against the same Worker, KV namespace, and queues. If you fork Codra, replace those values with your own resources.
-
-## Required Secrets, DLQ, And Local DB Vars
-
-Codra expects these secrets in Cloudflare production and in local `.dev.vars` for development:
-
-- `APP_PRIVATE_KEY`
-- `GITHUB_APP_ID`
-- `GITHUB_APP_WEBHOOK_SECRET`
-- `GITHUB_CLIENT_ID`
-- `GITHUB_CLIENT_SECRET`
-- `GEMINI_API_KEY`
-- `CF_API_TOKEN`
-- `CF_ACCOUNT_ID`
-
-DLQ setup is required during installation because Codra includes `/api/dlq` inspection, replay, and purge workflows. Create or identify the dead letter queue and copy its queue ID into `CF_DLQ_ID`:
-
-```bash
-npx wrangler queues create codra-review-dlq
-npx wrangler queues list
-```
-
-The Cloudflare API token must have Queues edit access for the account that owns the Worker queues. `CF_DLQ_ID` is a required environment variable, not a secret, and should point at the `codra-review-dlq` queue used by the `dead_letter_queue` consumer config in [`wrangler.jsonc`](/wrangler.jsonc).
-
-Local development and migrations also need:
-
-- `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` for local Worker DB access
-- `DATABASE_URL` for local/admin migrations
-
-The expected local shape is already documented in [`.dev.vars.example`](/.dev.vars.example).
-
-In the checked-in production Wrangler config, these values are regular environment vars rather than secrets:
-
-- `AUTH_CALLBACK_URL`
-- `DASHBOARD_ALLOWED_USERS`
-- `CF_DLQ_ID`
-
-## Dashboard Auth
-
-Codra now uses GitHub OAuth for dashboard access instead of a shared password. The main deployment only accepts GitHub users listed in `DASHBOARD_ALLOWED_USERS`.
-
-Production setup requires:
-
-- one GitHub OAuth App for the dashboard
-- the existing GitHub App for webhook/check/review automation
-
-## Postgres + Hyperdrive Setup
-
-Codra uses Cloudflare Hyperdrive to connect Workers to an external Postgres database. The database can be self-hosted or managed, and can sit behind PgBouncer.
-
-### 1. Create a Postgres database
-
-Create a Postgres database and keep a direct connection string available for migrations.
-
-### 2. Create a Hyperdrive config
-
-Point Hyperdrive at your database or PgBouncer endpoint:
-
-```bash
-npx wrangler hyperdrive create codra-postgres --connection-string "postgresql://<user>:<password>@<host>:5432/<db>"
-```
-
-Copy the returned Hyperdrive ID into the `HYPERDRIVE` binding in [`wrangler.jsonc`](/wrangler.jsonc).
-
-### 3. Run migrations
-
-Codra applies SQL migrations automatically during deploy:
-
-- [`db/migrations/001_initial.sql`](/db/migrations/001_initial.sql)
-- [`db/migrations/002_normalize_existing_schema.sql`](/db/migrations/002_normalize_existing_schema.sql)
-
-On a fresh database, `npm run deploy` initializes `001` and then applies newer migration files in order. On an existing database that predates migration tracking, deploy marks `001` as already applied and then runs later migrations.
-
-For local/admin runs, set `DATABASE_URL` and run:
-
-```bash
-npm run migrate
-```
-
-### 4. Configure local development
-
-For `wrangler dev`, set Hyperdrive's local connection-string override in `.dev.vars`:
-
-```text
-CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://<user>:<password>@localhost:5432/<db>"
-```
-
-Do not commit a real local connection string.
-
-### 5. Keep one direct URL around for admin work
-
-For schema/admin tooling, keep a direct Postgres or PgBouncer connection string handy as `DATABASE_URL`. The deployed worker should use the Hyperdrive binding, while migration tools connect directly.
-
-
-## Repository Config
-
-Each connected repo can be configured directly through the Codra dashboard. You can toggle reviews, customize model routing (including fallbacks and size-based overrides), set custom review rules, and manage labels.
-
-The dashboard provides a visual interface to manage all your repositories in one place, ensuring consistent and predictable AI review behavior across your organization.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Codra uses a Contributor License Agreement for contributions.
 
 ## License
 
-Codra is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
-
-### What this means:
-- **Keep it Open**: If you modify Codra and host it as a service (SaaS), you **must** make your modified source code available to your users.
-- **Hosted Version**: The maintainer (Devarshi Shimpi) reserves the right to provide a separate, proprietary hosted version of Codra.
-- **Contributions**: By contributing to this repository, you agree that your contributions will be licensed under the same AGPL-3.0 license.
-
-See the [LICENSE](LICENSE) file for the full text.
+Codra is licensed under the [GNU Affero General Public License v3.0](LICENSE).
