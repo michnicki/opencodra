@@ -49,8 +49,8 @@ export class MockAssets {
 export class MockQueue {
   public readonly sent: any[] = [];
 
-  async send(message: any) {
-    this.sent.push(message);
+  async send(message: any, options?: { delaySeconds?: number }) {
+    this.sent.push({ ...message, options });
   }
 }
 
@@ -72,6 +72,10 @@ function unusedEnv(key: string): string {
 
 export function getTestDatabaseUrl() {
   return requiredEnv('TEST_DATABASE_URL');
+}
+
+export function hasConfiguredTestDatabaseUrl() {
+  return Boolean(usableEnvValue(process.env.TEST_DATABASE_URL));
 }
 
 export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings {
