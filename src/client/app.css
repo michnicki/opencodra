@@ -599,14 +599,14 @@
 
   &.pending { background: color-mix(in oklch, var(--muted-foreground) 35%, transparent); }
   &.running {
-    @apply bg-info shadow-[0_0_0_3px_color-mix(in_oklch,var(--info)_25%,transparent)] animate-[pulse-ring_1.5s_var(--ease-out-quart)_infinite];
+    @apply bg-info;
   }
   &.done    { @apply bg-success; }
   &.failed  { @apply bg-danger; }
 }
 
 @utility pulsing-dot {
-  @apply w-[7px] h-[7px] rounded-full bg-info inline-block animate-[pulse-ring_1.5s_var(--ease-out-quart)_infinite];
+  @apply w-[7px] h-[7px] rounded-full bg-info inline-block;
 }
 
 /* ─────────────────────────────────────────────────────
