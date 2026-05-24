@@ -82,7 +82,34 @@ export function bytesToHex(value: ByteaValue) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+function latestTimestamp(...values: Array<string | null | undefined>) {
+  const now = Date.now();
+  return values.reduce<string | null>((latest, value) => {
+    if (!value) return latest;
+    if (new Date(value).getTime() > now) return latest;
+    if (!latest) return value;
+    return new Date(value).getTime() > new Date(latest).getTime() ? value : latest;
+  }, null);
+}
+
 export function mapJob(row: JobRow) {
+  const lastQueueMessageAt = row.last_queue_message_at ? new Date(row.last_queue_message_at).getTime() : null;
+  const nextRetryAt =
+    row.status === 'running' &&
+    row.lease_owner === null &&
+    lastQueueMessageAt !== null &&
+    Number.isFinite(lastQueueMessageAt) &&
+    lastQueueMessageAt > Date.now()
+      ? row.last_queue_message_at
+      : null;
+  const updatedAt = latestTimestamp(
+    row.created_at,
+    row.started_at,
+    row.finished_at,
+    row.heartbeat_at,
+    row.last_queue_message_at,
+  ) ?? row.created_at;
+
   return jobSummarySchema.parse({
     id: row.id,
     owner: row.owner,
@@ -100,6 +127,8 @@ export function mapJob(row: JobRow) {
     totalInputTokens: row.total_input_tokens ?? 0,
     totalOutputTokens: row.total_output_tokens ?? 0,
     createdAt: row.created_at,
+    updatedAt,
+    nextRetryAt,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     errorMessage: row.error_msg,
@@ -402,6 +431,12 @@ export async function claimJobLease(
             OR lease_expires_at < now()
             OR lease_owner = $2
           )
+          AND NOT (
+            status = 'running'
+            AND lease_owner IS NULL
+            AND last_queue_message_at IS NOT NULL
+            AND last_queue_message_at > now()
+          )
         RETURNING *
       )
       SELECT c.*, r.owner, r.repo, r.installation_id
@@ -424,8 +459,10 @@ export async function claimJobLease(
     return { status: 'terminal', row };
   }
 
-  const expiresAt = row.lease_expires_at ? new Date(row.lease_expires_at).getTime() : 0;
-  const secondsUntilExpiry = Math.ceil((expiresAt - Date.now()) / 1000);
+  const leaseExpiresAt = row.lease_expires_at ? new Date(row.lease_expires_at).getTime() : 0;
+  const delayedUntil = row.lease_owner === null && row.last_queue_message_at ? new Date(row.last_queue_message_at).getTime() : 0;
+  const retryAt = Math.max(leaseExpiresAt, delayedUntil);
+  const secondsUntilExpiry = Math.ceil((retryAt - Date.now()) / 1000);
   return {
     status: 'busy',
     row,
@@ -467,16 +504,20 @@ export async function releaseJobLease(env: Pick<AppBindings, 'HYPERDRIVE'>, jobI
   );
 }
 
-export async function markJobContinuationQueued(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string) {
+export async function markJobContinuationQueued(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, delaySeconds = 0) {
   await queryRows(
     env,
     `
       UPDATE jobs
-      SET last_queue_message_at = now()
+      SET heartbeat_at = now(),
+          last_queue_message_at = CASE
+            WHEN $2::int > 0 THEN now() + ($2::text || ' seconds')::interval
+            ELSE now()
+          END
       WHERE id = $1
         AND status = 'running'
     `,
-    [jobId],
+    [jobId, delaySeconds],
   );
 }
 
@@ -664,7 +705,8 @@ export async function updateJobStep(
     env,
     `
       UPDATE jobs
-      SET steps = CASE
+      SET heartbeat_at = now(),
+          steps = CASE
         WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(steps, '[]'::jsonb)) s WHERE s->>'name' = $2)
         THEN (
           SELECT jsonb_agg(
