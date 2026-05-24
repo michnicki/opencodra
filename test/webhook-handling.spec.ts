@@ -119,7 +119,7 @@ describe('Webhook Handling Suite', () => {
     expect(queue.sent[0].payload).toBeUndefined();
   });
 
-  it('also accepts GitHub webhooks posted to the site root', async () => {
+  it('rejects GitHub webhooks posted to the site root', async () => {
     const repoName = `root-repo-${Date.now()}`;
     const rawPayload = createMockPRWebhook({
       action: 'opened',
@@ -145,10 +145,10 @@ describe('Webhook Handling Suite', () => {
       env,
     );
 
-    const json = await response.json() as any;
-    expect(response.status).toBe(202);
-    expect(json.ok).toBe(true);
-    expect(json.message).toBe('queued');
+    expect(response.status).toBe(404);
+
+    const queue = env.REVIEW_QUEUE as any;
+    expect(queue.sent).toHaveLength(0);
   });
 
   it('acknowledges unsupported GitHub events without queueing review work', async () => {

@@ -5,11 +5,11 @@ import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPo
 import type { FileDiff } from './diff';
 import { jsonrepair } from 'jsonrepair';
 
-const MAX_LOGGED_MODEL_OUTPUT_CHARS = 2_000;
+const MAX_LOGGED_JSON_CHARS = 2_000;
 
-function truncateForLog(value: string) {
-  if (value.length <= MAX_LOGGED_MODEL_OUTPUT_CHARS) return value;
-  return `${value.slice(0, MAX_LOGGED_MODEL_OUTPUT_CHARS)}... [truncated ${value.length - MAX_LOGGED_MODEL_OUTPUT_CHARS} chars]`;
+function truncateJsonForLog(value: string) {
+  if (value.length <= MAX_LOGGED_JSON_CHARS) return value;
+  return `${value.slice(0, MAX_LOGGED_JSON_CHARS)}... [truncated ${value.length - MAX_LOGGED_JSON_CHARS} chars]`;
 }
 
 function hasReviewKeys(input: string) {
@@ -260,7 +260,10 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
       throw new Error('Model response did not contain review JSON keys.');
     }
   } catch (e) {
-    logger.error('Failed to extract JSON from model response', { raw: truncateForLog(raw), error: e });
+    logger.error('Failed to extract JSON from model response', {
+      rawLength: raw.length,
+      error: e instanceof Error ? e.message : String(e),
+    });
     throw new Error('Could not find JSON root in model response.');
   }
 
@@ -276,14 +279,14 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
   try {
     repaired = jsonrepair(preprocessed);
   } catch (e) {
-    logger.warn('jsonrepair failed to fix model output, using preprocessed text', { preprocessed: truncateForLog(preprocessed), error: e });
+    logger.warn('jsonrepair failed to fix model output, using preprocessed text', { preprocessed: truncateJsonForLog(preprocessed), error: e });
   }
 
   let parsedJson: any;
   try {
     parsedJson = JSON.parse(repaired);
   } catch (e) {
-    logger.error('Critical JSON parse error after extraction and repair', { repaired: truncateForLog(repaired), error: e });
+    logger.error('Critical JSON parse error after extraction and repair', { repaired: truncateJsonForLog(repaired), error: e });
     throw new Error(`Invalid JSON format: ${e instanceof Error ? e.message : 'Unknown error'}`);
   }
 

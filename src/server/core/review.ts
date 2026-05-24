@@ -19,8 +19,8 @@ type PersistedReviewJob = ReturnType<typeof mapJob>;
 export type ReviewJobRunResult = { action: 'ack' } | { action: 'retry'; delaySeconds: number };
 
 const REVIEW_CHUNK_FILE_LIMIT = 2;
-const REVIEW_CHUNK_WALL_CLOCK_MS = 8 * 60 * 1000;
-const JOB_LEASE_SECONDS = 10 * 60;
+const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
+const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
@@ -752,7 +752,7 @@ async function enqueueJobPhase(
   phase: 'prepare' | 'review' | 'finalize',
   delaySeconds = 0,
 ) {
-  await markJobContinuationQueued(env, jobId);
+  await markJobContinuationQueued(env, jobId, delaySeconds);
   await env.REVIEW_QUEUE.send(
     {
       jobId,

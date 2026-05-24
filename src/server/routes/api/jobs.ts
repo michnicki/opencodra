@@ -7,6 +7,10 @@ import { jsonError } from '@server/core/http';
 import { scheduleBestEffortJobMaintenance } from '@server/core/job-recovery';
 import { loadRepoConfig } from '@server/core/config';
 
+function jobEtag(input: { id: string; status: string; updatedAt: string; fileCount: number; commentCount: number }) {
+  return `"job-${input.id}-${input.status}-${input.fileCount}-${input.commentCount}-${new Date(input.updatedAt).getTime()}"`;
+}
+
 function getExecutionContext(c: Context<AppEnv>) {
   try {
     return c.executionCtx;
@@ -31,12 +35,34 @@ export function createJobsRouter() {
   app.get('/:id', async (c) => {
     scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
 
+    const rawJob = await getJobForProcessing(c.env, c.req.param('id'));
+    if (!rawJob) {
+      return jsonError('Job not found.', 404);
+    }
+
+    const summary = mapJob(rawJob);
+    const etag = jobEtag(summary);
+    const lastModified = new Date(summary.updatedAt).toUTCString();
+    if (c.req.header('if-none-match') === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ETag: etag,
+          'Last-Modified': lastModified,
+        },
+      });
+    }
+
     const job = await getJobDetail(c.env, c.req.param('id'));
     if (!job) {
       return jsonError('Job not found.', 404);
     }
 
-    return c.json({ job });
+    const response = c.json({ job });
+    response.headers.set('ETag', etag);
+    response.headers.set('Last-Modified', lastModified);
+    response.headers.set('Cache-Control', 'private, no-cache');
+    return response;
   });
 
   app.post('/:id/retry', async (c) => {

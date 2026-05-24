@@ -184,6 +184,8 @@ export const jobSummarySchema = z.object({
   totalInputTokens: z.number().int(),
   totalOutputTokens: z.number().int(),
   createdAt: dateStringSchema,
+  updatedAt: dateStringSchema,
+  nextRetryAt: dateStringSchema.nullable().optional(),
   startedAt: dateStringSchema.nullable(),
   finishedAt: dateStringSchema.nullable(),
   errorMessage: z.string().nullable(),

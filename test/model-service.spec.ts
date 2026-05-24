@@ -81,6 +81,43 @@ describe('ModelService', () => {
     expect(parsed.overall_explanation).toContain('inconclusive');
   });
 
+  it('asks Cloudflare chat models for strict review JSON', async () => {
+    let inputs: any;
+    const env = createTestEnv({
+      AI: {
+        async run(_model: string, request: any) {
+          inputs = request;
+          return {
+            choices: [
+              {
+                message: {
+                  content: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}',
+                },
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        },
+      } as any,
+    });
+
+    await reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
+      systemPrompt: 'system',
+      userPrompt: 'user',
+    });
+
+    expect(inputs.response_format).toMatchObject({
+      type: 'json_schema',
+      json_schema: {
+        name: 'codra_file_review',
+        strict: true,
+      },
+    });
+    expect(inputs.messages[0].content).toContain('Return only the JSON object');
+    expect(inputs.chat_template_kwargs).toBeUndefined();
+    expect(inputs.reasoning_effort).toBeUndefined();
+  });
+
   it('does not spend an extra queue slice retrying the same Cloudflare model inline', async () => {
     let attempts = 0;
     const env = createTestEnv({

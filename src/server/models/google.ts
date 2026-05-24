@@ -4,7 +4,7 @@ import { withTimeout } from '@server/core/timeout';
 import type { ModelResponse } from './types';
 
 /** Max wall-clock time allowed for a single Google AI Studio call. */
-const GOOGLE_TIMEOUT_MS = 120_000;
+const GOOGLE_TIMEOUT_MS = 180_000;
 const GOOGLE_MAX_RETRIES = 0;
 const GOOGLE_MAX_OUTPUT_TOKENS = 4096;
 
