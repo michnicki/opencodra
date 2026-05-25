@@ -119,6 +119,38 @@ describe('Webhook Handling Suite', () => {
     expect(queue.sent[0].payload).toBeUndefined();
   });
 
+  it('rejects GitHub webhooks posted to the site root', async () => {
+    const repoName = `root-repo-${Date.now()}`;
+    const rawPayload = createMockPRWebhook({
+      action: 'opened',
+      repository: { name: repoName, owner: { login: 'test-owner' } }
+    });
+    rawPayload.pull_request.head.sha = 'c'.repeat(40);
+    rawPayload.pull_request.base.sha = 'd'.repeat(40);
+    const body = JSON.stringify(rawPayload);
+    const signature = await signPayload(env.GITHUB_APP_WEBHOOK_SECRET, body);
+
+    const response = await app.request(
+      'http://codra.test/',
+      {
+        method: 'POST',
+        headers: {
+          'x-github-event': 'pull_request',
+          'x-github-delivery': `root-delivery-${Date.now()}`,
+          'x-hub-signature-256': signature,
+          'content-type': 'application/json',
+        },
+        body,
+      },
+      env,
+    );
+
+    expect(response.status).toBe(404);
+
+    const queue = env.REVIEW_QUEUE as any;
+    expect(queue.sent).toHaveLength(0);
+  });
+
   it('acknowledges unsupported GitHub events without queueing review work', async () => {
     const rawPayload = createMockPRWebhook({
       action: 'opened',

@@ -51,6 +51,52 @@ async function request<T>(input: string, init?: RequestInit) {
   return (await response.json()) as T;
 }
 
+async function requestWithMeta<T>(input: string, init?: RequestInit) {
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  const headers = new Headers(init?.headers);
+
+  if (!headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+
+  if (!SAFE_METHODS.has(method)) {
+    headers.set('x-requested-with', 'XMLHttpRequest');
+  }
+
+  const response = await fetch(input, {
+    credentials: 'same-origin',
+    ...init,
+    headers,
+  });
+
+  if (response.status === 401) {
+    if (location.pathname !== '/login') {
+      location.href = '/login';
+    }
+    throw new Error('Unauthorized');
+  }
+
+  const etag = response.headers.get('etag');
+  const lastModified = response.headers.get('last-modified');
+
+  if (response.status === 304) {
+    return { status: response.status, etag, lastModified, notModified: true as const };
+  }
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? `Request failed with ${response.status}`);
+  }
+
+  return {
+    status: response.status,
+    etag,
+    lastModified,
+    notModified: false as const,
+    data: (await response.json()) as T,
+  };
+}
+
 export const api = {
   getSession() {
     return request<AuthSessionResponse>('/api/auth/session');
@@ -79,8 +125,12 @@ export const api = {
     const query = searchParams.toString();
     return request<JobsResponse>(`/api/jobs${query ? `?${query}` : ''}`);
   },
-  getJob(id: string) {
-    return request<JobDetailResponse>(`/api/jobs/${id}`);
+  getJob(id: string, options: { etag?: string | null } = {}) {
+    const headers = new Headers();
+    if (options.etag) {
+      headers.set('if-none-match', options.etag);
+    }
+    return requestWithMeta<JobDetailResponse>(`/api/jobs/${id}`, { headers });
   },
   retryJob(id: string) {
     return request<RetryJobResponse>(`/api/jobs/${id}/retry`, {

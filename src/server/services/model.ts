@@ -18,7 +18,7 @@ const MODEL_ALIASES: Record<string, string> = {
   'gemma-4-31b': 'gemma-4-31b-it',
   'gemma-4-26b': 'gemma-4-26b-a4b-it',
 };
-type ModelProvider = 'cloudflare';
+type ModelProvider = 'cloudflare' | 'google';
 
 export class RetryableModelError extends Error {
   readonly retryable = true;
@@ -42,6 +42,10 @@ export function isRetryableModelError(error: unknown) {
 
 function isCloudflareModel(model: string) {
   return model.startsWith('@cf/');
+}
+
+function getModelProvider(model: string): ModelProvider {
+  return isCloudflareModel(model) ? 'cloudflare' : 'google';
 }
 
 function normalizeModel(model: string) {
@@ -209,7 +213,8 @@ export class ModelService {
     let lastTransientError: unknown;
     let sawTransientFailure = false;
     for (const currentModel of modelsToTry) {
-      if (isCloudflareModel(currentModel) && await this.isProviderUnavailable('cloudflare')) {
+      const provider = getModelProvider(currentModel);
+      if (provider === 'cloudflare' && await this.isProviderUnavailable('cloudflare')) {
         logger.warn(`Skipping Cloudflare model ${currentModel} because Cloudflare AI allocation is unavailable for job ${this.options.jobId ?? 'unknown'}`);
         continue;
       }

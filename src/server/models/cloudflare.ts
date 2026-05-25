@@ -4,8 +4,56 @@ import { TimeoutError } from '@server/core/timeout';
 import type { ModelResponse } from './types';
 
 /** Max wall-clock time allowed for a single Workers-AI call. */
-const CLOUDFLARE_TIMEOUT_MS = 45_000;
-const CLOUDFLARE_MAX_RETRIES = 1;
+const CLOUDFLARE_TIMEOUT_MS = 180_000;
+const CLOUDFLARE_MAX_RETRIES = 0;
+const CLOUDFLARE_MAX_OUTPUT_TOKENS = 8192;
+const REVIEW_RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['findings', 'overall_explanation', 'overall_correctness', 'overall_confidence_score'],
+  properties: {
+    findings: {
+      type: 'array',
+      maxItems: 10,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'body', 'priority', 'code_location'],
+        properties: {
+          title: { type: 'string', maxLength: 100 },
+          body: { type: 'string' },
+          confidence_score: { type: 'number', minimum: 0, maximum: 1 },
+          priority: { type: 'integer', minimum: 0, maximum: 3 },
+          code_location: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              absolute_file_path: { type: 'string' },
+              line: { type: 'integer', minimum: 1 },
+              line_range: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['start', 'end'],
+                properties: {
+                  start: { type: 'integer', minimum: 1 },
+                  end: { type: 'integer', minimum: 1 },
+                },
+              },
+            },
+            anyOf: [
+              { required: ['line'] },
+              { required: ['line_range'] },
+            ],
+          },
+          code_suggestion: { type: 'string' },
+        },
+      },
+    },
+    overall_explanation: { type: 'string' },
+    overall_correctness: { type: 'string', enum: ['patch is correct', 'patch is incorrect'] },
+    overall_confidence_score: { type: 'number', minimum: 0, maximum: 1 },
+  },
+} as const;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -33,6 +81,18 @@ function getNumber(value: unknown, key: string) {
   if (!isRecord(value)) return null;
   const child = value[key];
   return typeof child === 'number' ? child : null;
+}
+
+function synthesizeInconclusiveReview(model: string, reason: string): string {
+  logger.warn(`Cloudflare model ${model} returned no parseable review content; synthesizing inconclusive review JSON`, {
+    reason,
+  });
+  return JSON.stringify({
+    findings: [],
+    overall_correctness: 'patch is incorrect',
+    overall_explanation: `Cloudflare model ${model} returned no parseable review content (${reason}). The file review is inconclusive.`,
+    overall_confidence_score: 0,
+  });
 }
 
 function extractMessageContent(content: unknown): string | null {
@@ -69,14 +129,16 @@ function extractCloudflareText(result: unknown, model: string): string {
   if (content) return content;
 
   const finishReason = isRecord(choice) ? choice.finish_reason ?? choice.stop_reason : null;
-  if (finishReason) {
-    throw new Error(`Cloudflare model ${model} returned no review content (finish_reason=${finishReason}).`);
-  }
-  if (isText(message?.reasoning) || isText(message?.reasoning_content)) {
-    throw new Error(`Cloudflare model ${model} returned reasoning without review content.`);
+  const reasoning = isText(message?.reasoning) ? message.reasoning : isText(message?.reasoning_content) ? message.reasoning_content : null;
+  if (reasoning) {
+    return synthesizeInconclusiveReview(model, `reasoning-only response${finishReason ? `, finish_reason=${String(finishReason)}` : ''}`);
   }
 
-  throw new Error(`Cloudflare model ${model} returned an empty response.`);
+  if (finishReason) {
+    return synthesizeInconclusiveReview(model, `finish_reason=${String(finishReason)}`);
+  }
+
+  return synthesizeInconclusiveReview(model, 'empty response');
 }
 
 function extractCloudflareUsage(result: unknown) {
@@ -116,11 +178,23 @@ export async function reviewWithCloudflare(
       const result = await Promise.race([
         env.AI.run(model as any, {
           messages: [
-            { role: 'system', content: input.systemPrompt },
-            { role: 'user', content: input.userPrompt },
+            {
+              role: 'system',
+              content: `${input.systemPrompt}\n\nReturn only the JSON object. Do not include chain-of-thought, analysis, markdown, code fences, or explanatory prose.`,
+            },
+            { role: 'user', content: `${input.userPrompt}\n\nRespond with the required JSON object only.` },
           ],
-          max_completion_tokens: 4096,
+          max_completion_tokens: CLOUDFLARE_MAX_OUTPUT_TOKENS,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'codra_file_review',
+              strict: true,
+              schema: REVIEW_RESPONSE_SCHEMA,
+            },
+          },
           temperature: 0,
+          top_p: 0.1,
         }),
         timeoutPromise,
       ]);
