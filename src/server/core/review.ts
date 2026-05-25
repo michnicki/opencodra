@@ -18,11 +18,11 @@ type PersistedReviewJob = ReturnType<typeof mapJob>;
 
 export type ReviewJobRunResult = { action: 'ack' } | { action: 'retry'; delaySeconds: number };
 
-const REVIEW_CHUNK_FILE_LIMIT = 2;
-const REVIEW_CHUNK_WALL_CLOCK_MS = 8 * 60 * 1000;
-const JOB_LEASE_SECONDS = 10 * 60;
+const REVIEW_CHUNK_FILE_LIMIT = 3;
+const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
+const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
-const RETRYABLE_MODEL_FAILURE_RETRY_SECONDS = 60;
+const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
 
 function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
@@ -43,6 +43,21 @@ function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
     lower.includes('returned no review content') ||
     lower.includes('empty response')
   );
+}
+
+function retryableModelFailureDelaySeconds(failureCount: number | null | undefined) {
+  if (!failureCount || failureCount < 1) return RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS[0];
+  const index = Math.min(failureCount - 1, RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS.length - 1);
+  return RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS[index];
+}
+
+function getRetryableModelFailureDelaySeconds(error: unknown) {
+  const record = error && typeof error === 'object' ? error as { retryAfterSeconds?: unknown } : null;
+  const retryAfterSeconds =
+    typeof record?.retryAfterSeconds === 'number'
+      ? record.retryAfterSeconds
+      : null;
+  return retryAfterSeconds ?? RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS[0];
 }
 
 function shouldRetryExistingFileReview(review: { file_status: string; error_msg: string | null }) {
@@ -187,7 +202,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     if (phase === 'prepare') {
       await runPreparePhase(env, job, leaseOwner, github);
     } else if (phase === 'finalize') {
-      await runFinalizePhase(env, job, leaseOwner, github, model, formatter);
+      await runFinalizePhase(env, job, leaseOwner, github, formatter);
     } else {
       await runReviewPhase(env, job, leaseOwner, github, model);
     }
@@ -203,12 +218,13 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     }
 
     if (isRetryableModelError(error)) {
+      const delaySeconds = getRetryableModelFailureDelaySeconds(error);
       logger.warn(`Review job hit transient model/provider failure; scheduling delayed continuation: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
         error: messageText,
         phase,
-        delaySeconds: RETRYABLE_MODEL_FAILURE_RETRY_SECONDS,
+        delaySeconds,
       });
-      await enqueueJobPhase(env, job.id, phase, RETRYABLE_MODEL_FAILURE_RETRY_SECONDS);
+      await enqueueJobPhase(env, job.id, phase, delaySeconds);
       await releaseJobLease(env, job.id, leaseOwner);
       return { action: 'ack' };
     }
@@ -417,6 +433,8 @@ async function runReviewPhase(
   const currentReviews = new Map(allExistingReviews.filter((review) => review.job_id === job.id).map((review) => [review.file_path, review]));
   const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [review.file_path, review]));
 
+  const reviewTasks: Array<Promise<void>> = [];
+
   for (const file of files) {
     const existingReview = currentReviews.get(file.path);
     if (existingReview && countsAsHandledFileReview(existingReview)) {
@@ -424,12 +442,15 @@ async function runReviewPhase(
     }
 
     const inherited = parentReviews.get(file.path);
-    if (inherited) {
+    const reviewTask = async () => {
+      if (!inherited) {
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, existingReview);
+        return;
+      }
+
       if (!canInheritParentFileReview(config, inherited)) {
         logger.info(`Ignoring inherited review for ${file.path}; parent model ${inherited.model_used} is not in the current model strategy`);
         await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, existingReview);
-        processedThisChunk += 1;
-        await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
       } else {
         await upsertFileReview(env, job.id, {
           filePath: file.path,
@@ -450,18 +471,28 @@ async function runReviewPhase(
           errorMessage: null,
         });
         currentReviews.set(file.path, inherited);
-        processedThisChunk += 1;
-        await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
       }
-    } else {
-      await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, existingReview);
-      processedThisChunk += 1;
-      await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
-    }
+    };
+
+    reviewTasks.push(reviewTask());
+    processedThisChunk += 1;
 
     if (processedThisChunk >= REVIEW_CHUNK_FILE_LIMIT || Date.now() - startedAt >= REVIEW_CHUNK_WALL_CLOCK_MS) {
       break;
     }
+  }
+
+  const results = await Promise.allSettled(reviewTasks);
+  await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+
+  const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (rejected.length > 0) {
+    rejected.forEach((result, index) => {
+      logger.error(`Review chunk task ${index + 1}/${rejected.length} failed`, result.reason);
+    });
+    throw rejected.length === 1
+      ? rejected[0].reason
+      : new AggregateError(rejected.map((result) => result.reason), `${rejected.length} review chunk tasks failed`);
   }
 
   const latestReviews = await getFileReviewsForJobs(env, [job.id]);
@@ -567,6 +598,10 @@ async function reviewAndPersistFile(
         error: errorMessage,
         attempts: failureCount,
       });
+      Object.defineProperty(error, 'retryAfterSeconds', {
+        value: retryableModelFailureDelaySeconds(failureCount),
+        configurable: true,
+      });
       throw error;
     }
 
@@ -606,7 +641,6 @@ async function runFinalizePhase(
   job: PersistedReviewJob,
   leaseOwner: string,
   github: GitHubService,
-  model: ModelService,
   formatter: FormatterService,
 ) {
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'running' });
@@ -640,12 +674,6 @@ async function runFinalizePhase(
   const hasFailures = fileSummaries.some((file) => file.verdict === 'failed');
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
   const verdictSummary = formatter.summarizeVerdict(reviewedComments, hasFailures);
-  const summaryResponse = await model.generateSummary({
-    prTitle: pr.title ?? null,
-    verdict: verdictSummary.verdict,
-    fileSummaries,
-    config,
-  });
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
@@ -699,11 +727,11 @@ async function runFinalizePhase(
     verdict: verdictSummary.verdict,
     fileCount: files.length,
     commentCount: reviewedComments.length,
-    totalInputTokens: fileInputTokens + (summaryResponse.inputTokens ?? 0),
-    totalOutputTokens: fileOutputTokens + (summaryResponse.outputTokens ?? 0),
+    totalInputTokens: fileInputTokens,
+    totalOutputTokens: fileOutputTokens,
     summaryMarkdown: formattedSummary,
     reviewId: review.id,
-    summaryModel: summaryResponse.modelUsed,
+    summaryModel: null,
     errorMessage: partialErrorMessage,
   });
   await updateJobStep(env, job.id, 'Completing', { status: 'done' });
@@ -724,7 +752,7 @@ async function enqueueJobPhase(
   phase: 'prepare' | 'review' | 'finalize',
   delaySeconds = 0,
 ) {
-  await markJobContinuationQueued(env, jobId);
+  await markJobContinuationQueued(env, jobId, delaySeconds);
   await env.REVIEW_QUEUE.send(
     {
       jobId,

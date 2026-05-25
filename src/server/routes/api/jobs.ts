@@ -1,16 +1,29 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { jobsQuerySchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
 import { bytesToHex, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
-import { runBestEffortJobMaintenance } from '@server/core/job-recovery';
+import { scheduleBestEffortJobMaintenance } from '@server/core/job-recovery';
 import { loadRepoConfig } from '@server/core/config';
+
+function jobEtag(input: { id: string; status: string; updatedAt: string; fileCount: number; commentCount: number }) {
+  return `"job-${input.id}-${input.status}-${input.fileCount}-${input.commentCount}-${new Date(input.updatedAt).getTime()}"`;
+}
+
+function getExecutionContext(c: Context<AppEnv>) {
+  try {
+    return c.executionCtx;
+  } catch {
+    return undefined;
+  }
+}
 
 export function createJobsRouter() {
   const app = new Hono<AppEnv>();
 
   app.get('/', async (c) => {
-    await runBestEffortJobMaintenance(c.env);
+    scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
 
     const rawQuery = c.req.query();
     const query = jobsQuerySchema.parse(rawQuery);
@@ -20,14 +33,36 @@ export function createJobsRouter() {
   });
 
   app.get('/:id', async (c) => {
-    await runBestEffortJobMaintenance(c.env);
+    scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
+
+    const rawJob = await getJobForProcessing(c.env, c.req.param('id'));
+    if (!rawJob) {
+      return jsonError('Job not found.', 404);
+    }
+
+    const summary = mapJob(rawJob);
+    const etag = jobEtag(summary);
+    const lastModified = new Date(summary.updatedAt).toUTCString();
+    if (c.req.header('if-none-match') === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ETag: etag,
+          'Last-Modified': lastModified,
+        },
+      });
+    }
 
     const job = await getJobDetail(c.env, c.req.param('id'));
     if (!job) {
       return jsonError('Job not found.', 404);
     }
 
-    return c.json({ job });
+    const response = c.json({ job });
+    response.headers.set('ETag', etag);
+    response.headers.set('Last-Modified', lastModified);
+    response.headers.set('Cache-Control', 'private, no-cache');
+    return response;
   });
 
   app.post('/:id/retry', async (c) => {

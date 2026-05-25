@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isRetryableModelError, ModelService } from '@server/services/model';
 import { reviewWithCloudflare } from '@server/models/cloudflare';
+import { reviewWithGoogle } from '@server/models/google';
 import { createTestEnv } from './helpers';
 import { defaultRepoConfig } from '@shared/schema';
 
@@ -50,7 +51,7 @@ describe('ModelService', () => {
     });
   });
 
-  it('rejects Cloudflare reasoning-only responses instead of trying to parse the response envelope', async () => {
+  it('turns Cloudflare reasoning-only responses into inconclusive review JSON', async () => {
     const env = createTestEnv({
       AI: {
         async run() {
@@ -70,15 +71,114 @@ describe('ModelService', () => {
       } as any,
     });
 
-    await expect(
-      reviewWithCloudflare(env, '@cf/moonshotai/kimi-k2.6', {
-        systemPrompt: 'system',
-        userPrompt: 'user',
-      }),
-    ).rejects.toThrow('returned no review content');
+    const response = await reviewWithCloudflare(env, '@cf/moonshotai/kimi-k2.6', {
+      systemPrompt: 'system',
+      userPrompt: 'user',
+    });
+    const parsed = JSON.parse(response.rawText);
+
+    expect(parsed.findings).toEqual([]);
+    expect(parsed.overall_correctness).toBe('patch is incorrect');
+    expect(parsed.overall_explanation).toContain('inconclusive');
   });
 
-  it('retries the same Cloudflare model once before failing it', async () => {
+  it('does not parse Cloudflare reasoning as review JSON when final content is missing', async () => {
+    const env = createTestEnv({
+      AI: {
+        async run() {
+          return {
+            choices: [
+              {
+                message: {
+                  content: null,
+                  reasoning: 'Reasoning mentioned an object like {"foo":"bar"} but never produced final JSON.',
+                },
+                finish_reason: 'length',
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 8192 },
+          };
+        },
+      } as any,
+    });
+
+    const response = await reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
+      systemPrompt: 'system',
+      userPrompt: 'user',
+    });
+    const parsed = JSON.parse(response.rawText);
+
+    expect(parsed.findings).toEqual([]);
+    expect(parsed.overall_explanation).toContain('reasoning-only response');
+  });
+
+  it('asks Cloudflare chat models for strict review JSON', async () => {
+    let inputs: any;
+    const env = createTestEnv({
+      AI: {
+        async run(_model: string, request: any) {
+          inputs = request;
+          return {
+            choices: [
+              {
+                message: {
+                  content: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}',
+                },
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        },
+      } as any,
+    });
+
+    await reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
+      systemPrompt: 'system',
+      userPrompt: 'user',
+    });
+
+    expect(inputs.response_format).toMatchObject({
+      type: 'json_schema',
+      json_schema: {
+        name: 'codra_file_review',
+        strict: true,
+      },
+    });
+    expect(inputs.messages[0].content).toContain('Return only the JSON object');
+    expect(inputs.max_completion_tokens).toBe(8192);
+    expect(inputs.chat_template_kwargs).toBeUndefined();
+    expect(inputs.reasoning_effort).toBeUndefined();
+  });
+
+  it('retries Google once for transient 524 edge timeouts', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { code: 524, message: 'A timeout occurred.' } }),
+          { status: 524, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+            usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+
+    const response = await reviewWithGoogle(
+      { GEMINI_API_KEY: 'test-key' },
+      'gemma-4-31b-it',
+      { systemPrompt: 'system', userPrompt: 'user' },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(response.rawText).toContain('"findings"');
+  });
+
+  it('does not spend an extra queue slice retrying the same Cloudflare model inline', async () => {
     let attempts = 0;
     const env = createTestEnv({
       AI: {
@@ -95,7 +195,80 @@ describe('ModelService', () => {
         userPrompt: 'user',
       }),
     ).rejects.toThrow('temporary provider error');
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(1);
+  });
+
+  it('tries the smaller Google fallback after the primary Google model fails', async () => {
+    let cloudflareCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 500,
+              message: 'Internal error encountered.',
+              status: 'INTERNAL',
+            },
+          }),
+          { status: 500, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+            usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    const env = createTestEnv({
+      AI: {
+        async run() {
+          cloudflareCalls++;
+          return {
+            response: JSON.stringify({
+              findings: [],
+              overall_correctness: 'patch is correct',
+              overall_explanation: 'ok',
+              overall_confidence_score: 0.9,
+            }),
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        },
+      } as any,
+      GEMINI_API_KEY: 'test-key',
+    });
+    const service = new ModelService(env);
+
+    const response = await service.reviewFile({
+      file: {
+        path: 'src/app.ts',
+        lineCount: 1,
+        hunks: [],
+        isDeleted: false,
+        isBinary: false,
+        isNew: false,
+        previousPath: null,
+      },
+      prTitle: 'Test',
+      prDescription: null,
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+          size_overrides: [],
+        },
+      },
+      totalLineCount: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/models/gemma-4-26b-a4b-it:generateContent');
+    expect(cloudflareCalls).toBe(0);
+    expect(response.modelUsed).toBe('gemma-4-26b-a4b-it');
   });
 
   it('marks exhausted transient provider failures as retryable for the queue', async () => {
@@ -260,7 +433,7 @@ describe('ModelService', () => {
 
     const userPrompt = requestBody.contents[0].parts[0].text as string;
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(requestBody.generationConfig.maxOutputTokens).toBe(3072);
+    expect(requestBody.generationConfig.maxOutputTokens).toBe(4096);
     expect(userPrompt).toContain('[NOTE: This diff has been truncated from 900 lines to 800 lines for brevity.]');
     expect(userPrompt).toContain('const value799 = 799;');
     expect(userPrompt).not.toContain('const value800 = 800;');
