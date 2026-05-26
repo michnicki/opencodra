@@ -67,8 +67,28 @@ function getStoredRepoRoute(repo: RepoConfigRecord): ModelRouteConfig | null {
   };
 }
 
+function stringArraysEqual(a: string[] = [], b: string[] = []) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function tiersEqual(a: ModelRouteConfig['size_overrides'] = [], b: ModelRouteConfig['size_overrides'] = []) {
+  return a.length === b.length && a.every((tier, index) => {
+    const other = b[index];
+    return Boolean(
+      other &&
+      tier.max_lines === other.max_lines &&
+      tier.model === other.model &&
+      stringArraysEqual(tier.fallbacks ?? [], other.fallbacks ?? []),
+    );
+  });
+}
+
 function routesEqual(a: ModelRouteConfig, b: ModelRouteConfig) {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return (
+    a.main === b.main &&
+    stringArraysEqual(a.fallbacks ?? [], b.fallbacks ?? []) &&
+    tiersEqual(a.size_overrides ?? [], b.size_overrides ?? [])
+  );
 }
 
 function hasMeaningfulCustomStrategy(repo: RepoConfigRecord, globalConfig: GlobalModelConfig | ModelRouteConfig | null) {

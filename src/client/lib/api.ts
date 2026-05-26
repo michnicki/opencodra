@@ -24,8 +24,8 @@ function pathSegment(value: string) {
 }
 
 type QueryValue = string | number | boolean | null | undefined;
-type ModelConfigPayload = Pick<ModelConfig, 'providerId' | 'modelName' | 'rpm' | 'tpm' | 'rpd'>;
-type ProviderPayload = {
+export type ModelConfigPayload = Pick<ModelConfig, 'providerId' | 'modelName' | 'rpm' | 'tpm' | 'rpd'>;
+export type ProviderPayload = {
   name: string;
   apiFormat: LlmApiFormat;
   baseUrl: string | null;
@@ -162,7 +162,7 @@ export const api = {
     return request<RepoConfigsResponse>('/api/repos');
   },
   getRepo(owner: string, repo: string) {
-    return request<RepoConfigResponse>(`/api/repos/${owner}/${repo}/config`);
+    return request<RepoConfigResponse>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config`);
   },
   getStats(days?: number) {
     const query = days ? `?days=${days}` : '';
@@ -189,7 +189,7 @@ export const api = {
     });
   },
   updateRepoConfig(owner: string, repo: string, config: RepoConfigPatch) {
-    return request<{ ok: boolean }>(`/api/repos/${owner}/${repo}/config`, {
+    return request<{ ok: boolean }>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config`, {
       method: 'PATCH',
       body: JSON.stringify(config),
     });

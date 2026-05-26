@@ -439,6 +439,12 @@ async function runReviewPhase(
 
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+  const failureModelId = config.model?.main ?? 'unconfigured';
+  let failureModelProviderPromise: Promise<string | null> | null = null;
+  const resolveFailureModelProvider = () => {
+    failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
+    return failureModelProviderPromise;
+  };
   const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
   const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
@@ -462,13 +468,13 @@ async function runReviewPhase(
     const inherited = parentReviews.get(file.path);
     const reviewTask = async () => {
       if (!inherited) {
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, existingReview);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
         return;
       }
 
       if (!canInheritParentFileReview(config, inherited)) {
         logger.info(`Ignoring inherited review for ${file.path}; parent model ${inherited.model_used} is not in the current model strategy`);
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, existingReview);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
       } else {
         await upsertFileReview(env, job.id, {
           filePath: file.path,
@@ -540,6 +546,7 @@ async function reviewAndPersistFile(
   config: RepoConfig,
   totalLineCount: number,
   model: ModelService,
+  resolveFailureModelProvider: () => Promise<string | null>,
   previousReview?: { transient_error_count: number },
 ) {
   const startedAt = Date.now();
@@ -574,10 +581,10 @@ async function reviewAndPersistFile(
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown file review error';
+    const modelId = config.model?.main ?? 'unconfigured';
+    const modelProvider = await resolveFailureModelProvider();
 
     if (isRetryableModelError(error)) {
-      const modelId = config.model?.main ?? 'unconfigured';
-      const modelProvider = await resolveModelProviderName(env, modelId);
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
         modelUsed: modelId,
@@ -635,8 +642,6 @@ async function reviewAndPersistFile(
       throw error;
     }
 
-    const modelId = config.model?.main ?? 'unconfigured';
-    const modelProvider = await resolveModelProviderName(env, modelId);
     await upsertFileReview(env, job.id, {
       filePath: file.path,
       fileStatus: 'failed',
