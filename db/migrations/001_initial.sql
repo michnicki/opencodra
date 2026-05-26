@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS repositories (
   repo            TEXT   NOT NULL,
   UNIQUE(owner, repo)
 );
-CREATE INDEX IF NOT EXISTS repositories_owner_idx ON repositories(owner);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -207,33 +206,6 @@ WHERE main_model = '@cf/moonshotai/kimi-k2.5'
   OR parsed_json::text LIKE '%@cf/moonshotai/kimi-k2.5%';
 
 DROP FUNCTION IF EXISTS public.codra_replace_deprecated_model(jsonb, text, text);
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS repositories (
-  installation_id BIGINT NOT NULL,
-  id              SERIAL PRIMARY KEY,
-  owner           TEXT   NOT NULL,
-  repo            TEXT   NOT NULL,
-  UNIQUE(owner, repo)
-);
-
-CREATE INDEX IF NOT EXISTS repositories_owner_idx ON repositories(owner);
-
-CREATE TABLE IF NOT EXISTS review_comments (
-  file_review_id   UUID    NOT NULL REFERENCES file_reviews(id) ON DELETE CASCADE,
-  id               BIGSERIAL PRIMARY KEY,
-  line             INTEGER,
-  position         INTEGER,
-  path             TEXT    NOT NULL,
-  severity         TEXT    NOT NULL,
-  category         TEXT    NOT NULL DEFAULT 'quality',
-  title            TEXT    NOT NULL,
-  body             TEXT    COMPRESSION lz4 NOT NULL,
-  code_suggestion  TEXT    COMPRESSION lz4
-);
-
-CREATE INDEX IF NOT EXISTS review_comments_file_idx ON review_comments(file_review_id);
 
 DO $$
 DECLARE
@@ -600,6 +572,15 @@ WHERE mc.provider_id IS NULL
     OR (mc.provider = 'openai' AND provider_record.name = 'OpenAI')
     OR (mc.provider = 'anthropic' AND provider_record.name = 'Anthropic')
   );
+
+UPDATE model_configs mc
+SET
+  provider_id = provider_record.id,
+  model_name = COALESCE(mc.model_name, mc.model_id),
+  provider = 'cloudflare'
+FROM llm_providers provider_record
+WHERE mc.provider_id IS NULL
+  AND provider_record.name = 'Cloudflare';
 
 UPDATE model_configs
 SET model_name = model_id

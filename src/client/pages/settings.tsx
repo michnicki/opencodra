@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { api } from '@client/lib/api';
+import { api, type ProviderPayload } from '@client/lib/api';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
@@ -24,7 +24,7 @@ import {
   ChevronRight,
   X,
 } from 'lucide-react';
-import type { LlmApiFormat, LlmProvider, ModelConfig } from '@shared/schema';
+import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig } from '@shared/schema';
 import type { ModelConfigsResponse } from '@shared/api';
 import {
   ModelRouteEditor,
@@ -75,7 +75,9 @@ type NewModelDraft = {
 
 type SyncError = { providerId: string; providerName: string; error: string };
 
-export function normalizeGlobalConfig(config: any): ModelRouteConfig {
+type GlobalConfigInput = RepoConfig['model'] | Partial<ModelRouteConfig> | null | undefined;
+
+export function normalizeGlobalConfig(config: GlobalConfigInput): ModelRouteConfig {
   return {
     main: typeof config?.main === 'string' && config.main.trim() ? config.main : null,
     fallbacks: Array.isArray(config?.fallbacks) ? config.fallbacks : EMPTY_GLOBAL_CONFIG.fallbacks,
@@ -83,8 +85,30 @@ export function normalizeGlobalConfig(config: any): ModelRouteConfig {
   };
 }
 
+function stringArraysEqual(a: string[] = [], b: string[] = []) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function tiersEqual(a: ModelRouteConfig['size_overrides'] = [], b: ModelRouteConfig['size_overrides'] = []) {
+  return a.length === b.length && a.every((tier, index) => {
+    const other = b[index];
+    return Boolean(
+      other &&
+      tier.max_lines === other.max_lines &&
+      tier.model === other.model &&
+      stringArraysEqual(tier.fallbacks ?? [], other.fallbacks ?? []),
+    );
+  });
+}
+
 function routeEqual(a: ModelRouteConfig | null, b: ModelRouteConfig | null) {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.main === b.main &&
+    stringArraysEqual(a.fallbacks ?? [], b.fallbacks ?? []) &&
+    tiersEqual(a.size_overrides ?? [], b.size_overrides ?? [])
+  );
 }
 
 function configEqual(a?: ModelConfig, b?: ModelConfig) {
@@ -125,6 +149,10 @@ function providerToDraft(provider: LlmProvider): ProviderDraft {
 
 function formatLabel(format: LlmApiFormat) {
   return API_FORMAT_OPTIONS.find(option => option.value === format)?.label ?? format;
+}
+
+function domId(prefix: string, value: string) {
+  return `${prefix}-${value.replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
 }
 
 function isCustomProvider(provider: Pick<LlmProvider, 'name' | 'apiFormat'>) {
@@ -189,11 +217,11 @@ function SectionCard({
 }
 
 /* ─── Field label ─────────────────────────────────────────────────────────── */
-function FieldLabel({ children }: { children: React.ReactNode }) {
+function FieldLabel({ htmlFor, children }: { htmlFor: string; children: React.ReactNode }) {
   return (
-    <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+    <label htmlFor={htmlFor} className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
       {children}
-    </span>
+    </label>
   );
 }
 
@@ -424,7 +452,7 @@ export function SettingsPage() {
     setError(null);
     const tid = toast.loading('Saving provider...');
     try {
-      const payload: any = {
+      const payload: ProviderPayload = {
         name: provider.name,
         apiFormat: provider.apiFormat,
         baseUrl: provider.baseUrl || null,
@@ -533,11 +561,23 @@ export function SettingsPage() {
     setError(null);
     const tid = toast.loading(`Saving ${dirtyConfigs.length} model change${dirtyConfigs.length === 1 ? '' : 's'}...`);
     try {
-      const saved = await Promise.all(dirtyConfigs.map(cfg => api.updateModelConfig(cfg.modelId, modelPayload(cfg))));
+      const results = await Promise.allSettled(dirtyConfigs.map(cfg => api.updateModelConfig(cfg.modelId, modelPayload(cfg))));
+      const saved = results
+        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof api.updateModelConfig>>> => result.status === 'fulfilled')
+        .map(result => result.value);
+      const failed = results.length - saved.length;
+
       const savedById = new Map(saved.map(result => [result.config.modelId, result.config]));
       setConfigs(current => current.map(cfg => savedById.get(cfg.modelId) ?? cfg));
       setSavedConfigs(current => current.map(cfg => savedById.get(cfg.modelId) ?? cfg));
-      toast.success('Models saved', { id: tid });
+
+      if (failed > 0) {
+        const msg = `${failed} model update${failed === 1 ? '' : 's'} failed. Saved ${saved.length}.`;
+        setError(msg);
+        toast.error('Some models were not saved', { id: tid, description: msg });
+      } else {
+        toast.success('Models saved', { id: tid });
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Update failed';
       setError(msg);
@@ -690,26 +730,25 @@ export function SettingsPage() {
           <div className="border-b border-border bg-muted/[0.03] p-5">
             <p className="mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">New provider</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Select
+                label="Type"
+                value={newProvider.preset}
+                onValueChange={value => {
+                  const preset = PROVIDER_PRESETS.find(item => item.value === value) ?? PROVIDER_PRESETS[0];
+                  setNewProvider(current => ({
+                    ...current,
+                    preset: preset.value,
+                    name: preset.name,
+                    apiFormat: preset.apiFormat,
+                    baseUrl: preset.baseUrl,
+                  }));
+                }}
+                options={PROVIDER_PRESETS.map(preset => ({ value: preset.value, label: preset.label }))}
+              />
               <div>
-                <FieldLabel>Type</FieldLabel>
-                <Select
-                  value={newProvider.preset}
-                  onValueChange={value => {
-                    const preset = PROVIDER_PRESETS.find(item => item.value === value) ?? PROVIDER_PRESETS[0];
-                    setNewProvider(current => ({
-                      ...current,
-                      preset: preset.value,
-                      name: preset.name,
-                      apiFormat: preset.apiFormat,
-                      baseUrl: preset.baseUrl,
-                    }));
-                  }}
-                  options={PROVIDER_PRESETS.map(preset => ({ value: preset.value, label: preset.label }))}
-                />
-              </div>
-              <div>
-                <FieldLabel>Name</FieldLabel>
+                <FieldLabel htmlFor="new-provider-name">Name</FieldLabel>
                 <Input
+                  id="new-provider-name"
                   placeholder="My LLM Provider"
                   value={newProvider.name}
                   onChange={e => setNewProvider(current => ({ ...current, name: e.target.value }))}
@@ -719,16 +758,18 @@ export function SettingsPage() {
                 )}
               </div>
               <div>
-                <FieldLabel>Base URL</FieldLabel>
+                <FieldLabel htmlFor="new-provider-base-url">Base URL</FieldLabel>
                 <Input
+                  id="new-provider-base-url"
                   placeholder={selectedPreset.exampleUrl}
                   value={newProvider.baseUrl}
                   onChange={e => setNewProvider(current => ({ ...current, baseUrl: e.target.value }))}
                 />
               </div>
               <div>
-                <FieldLabel>API Key</FieldLabel>
+                <FieldLabel htmlFor="new-provider-api-key">API Key</FieldLabel>
                 <Input
+                  id="new-provider-api-key"
                   type="password"
                   placeholder="Paste key"
                   value={newProvider.apiKey}
@@ -771,6 +812,9 @@ export function SettingsPage() {
               const modelCount = providerModelCounts.get(provider.id) ?? 0;
               const expanded = expandedProviderId === provider.id;
               const canEnableProvider = providerHasCredential(provider);
+              const providerNameId = domId('provider-name', provider.id);
+              const providerBaseUrlId = domId('provider-base-url', provider.id);
+              const providerApiKeyId = domId('provider-api-key', provider.id);
 
               return (
                 <article
@@ -858,8 +902,9 @@ export function SettingsPage() {
                         {customProvider && (
                           <>
                             <div>
-                              <FieldLabel>Name</FieldLabel>
+                              <FieldLabel htmlFor={providerNameId}>Name</FieldLabel>
                               <Input
+                                id={providerNameId}
                                 value={provider.name}
                                 onChange={e => updateProviderDraft(provider.id, { name: e.target.value })}
                               />
@@ -871,8 +916,9 @@ export function SettingsPage() {
                               options={API_FORMAT_OPTIONS.filter(option => option.value !== 'cloudflare-workers-ai')}
                             />
                             <div>
-                              <FieldLabel>Base URL</FieldLabel>
+                              <FieldLabel htmlFor={providerBaseUrlId}>Base URL</FieldLabel>
                               <Input
+                                id={providerBaseUrlId}
                                 placeholder="https://llm.example.com/v1"
                                 value={provider.baseUrl ?? ''}
                                 onChange={e => updateProviderDraft(provider.id, { baseUrl: e.target.value || null })}
@@ -886,8 +932,9 @@ export function SettingsPage() {
                           </p>
                         ) : (
                           <div className={cn(customProvider ? 'col-span-full' : 'col-span-full')}>
-                            <FieldLabel>API Key</FieldLabel>
+                            <FieldLabel htmlFor={providerApiKeyId}>API Key</FieldLabel>
                             <Input
+                              id={providerApiKeyId}
                               type="password"
                               placeholder={provider.hasApiKey ? 'Enter a new key to replace the saved one' : 'Paste key'}
                               value={provider.apiKey}
@@ -991,16 +1038,18 @@ export function SettingsPage() {
             <p className="mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">New model</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <div>
-                <FieldLabel>Codra model ID</FieldLabel>
+                <FieldLabel htmlFor="new-model-id">Codra model ID</FieldLabel>
                 <Input
+                  id="new-model-id"
                   placeholder="e.g. gemma-4-31b-it"
                   value={newModel.modelId}
                   onChange={e => setNewModel(current => ({ ...current, modelId: e.target.value }))}
                 />
               </div>
               <div>
-                <FieldLabel>Provider model name</FieldLabel>
+                <FieldLabel htmlFor="new-model-name">Provider model name</FieldLabel>
                 <Input
+                  id="new-model-name"
                   placeholder="e.g. gemma-4-31b-it"
                   value={newModel.modelName}
                   onChange={e => setNewModel(current => ({ ...current, modelName: e.target.value }))}
@@ -1017,8 +1066,9 @@ export function SettingsPage() {
             <div className="mt-3 grid grid-cols-3 gap-3 sm:max-w-xs">
               {(['rpm', 'rpd', 'tpm'] as const).map(field => (
                 <div key={field}>
-                  <FieldLabel>{field.toUpperCase()}</FieldLabel>
+                  <FieldLabel htmlFor={`new-model-${field}`}>{field.toUpperCase()}</FieldLabel>
                   <Input
+                    id={`new-model-${field}`}
                     type="number"
                     min={1}
                     value={newModel[field] ?? ''}
@@ -1080,6 +1130,7 @@ export function SettingsPage() {
               const saved = savedConfigs.find(item => item.modelId === cfg.modelId);
               const dirty = !configEqual(cfg, saved);
               const expanded = expandedModelId === cfg.modelId;
+              const providerModelNameId = domId('model-provider-name', cfg.modelId);
 
               return (
                 <article
@@ -1172,17 +1223,21 @@ export function SettingsPage() {
                           options={providerOptions}
                         />
                         <div>
-                          <FieldLabel>Provider model name</FieldLabel>
+                          <FieldLabel htmlFor={providerModelNameId}>Provider model name</FieldLabel>
                           <Input
+                            id={providerModelNameId}
                             value={cfg.modelName}
                             onChange={e => updateModel(cfg.modelId, { modelName: e.target.value })}
                           />
                         </div>
                         <div className="grid grid-cols-3 gap-2">
-                          {(['rpm', 'rpd', 'tpm'] as const).map(field => (
+                          {(['rpm', 'rpd', 'tpm'] as const).map(field => {
+                            const limitId = domId(`model-${field}`, cfg.modelId);
+                            return (
                             <div key={field}>
-                              <FieldLabel>{field.toUpperCase()}</FieldLabel>
+                              <FieldLabel htmlFor={limitId}>{field.toUpperCase()}</FieldLabel>
                               <Input
+                                id={limitId}
                                 type="number"
                                 min={1}
                                 value={cfg[field] ?? ''}
@@ -1190,7 +1245,8 @@ export function SettingsPage() {
                                 onChange={e => updateQuota(cfg.modelId, field, parseOptionalLimit(e.target.value))}
                               />
                             </div>
-                          ))}
+                          );
+                          })}
                         </div>
                       </div>
                     </div>

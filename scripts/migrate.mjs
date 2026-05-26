@@ -282,14 +282,6 @@ async function ensureModelCatalog() {
 
   await query(
     `
-      INSERT INTO llm_providers (name, api_format, base_url, enabled)
-      VALUES ('Cloudflare', 'cloudflare-workers-ai', NULL, TRUE)
-      ON CONFLICT (name) DO NOTHING
-    `,
-  );
-
-  await query(
-    `
       UPDATE model_configs mc
       SET
         provider_id = provider_record.id,
@@ -303,6 +295,19 @@ async function ensureModelCatalog() {
           OR (mc.provider = 'openai' AND provider_record.name = 'OpenAI')
           OR (mc.provider = 'anthropic' AND provider_record.name = 'Anthropic')
         )
+    `,
+  );
+
+  await query(
+    `
+      UPDATE model_configs mc
+      SET
+        provider_id = provider_record.id,
+        model_name = COALESCE(mc.model_name, mc.model_id),
+        provider = 'cloudflare'
+      FROM llm_providers provider_record
+      WHERE mc.provider_id IS NULL
+        AND provider_record.name = 'Cloudflare'
     `,
   );
 
@@ -466,6 +471,7 @@ async function main() {
       }
     }
 
+    await query('DROP INDEX IF EXISTS repositories_owner_idx');
     await ensureModelCatalog();
     await normalizeRepoConfigs();
 
