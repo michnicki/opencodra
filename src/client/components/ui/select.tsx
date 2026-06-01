@@ -49,7 +49,7 @@ export function Select({
           <Button
             variant="outline"
             className={cn(
-              'h-9 w-full justify-between border-border/50 bg-background px-3 py-2 text-sm font-normal transition-all hover:bg-accent focus-visible:ring-0 focus-visible:ring-offset-0',
+              'h-9 w-full justify-between border-border bg-background px-3 py-2 text-sm font-normal transition-all hover:bg-muted/50 focus-visible:ring-0 focus-visible:ring-offset-0',
               !selectedOption && 'text-muted-foreground',
               triggerClassName
             )}
@@ -77,7 +77,7 @@ export function Select({
               onClick={() => onValueChange(option.value)}
               className={cn(
                 'cursor-pointer whitespace-normal break-words py-2',
-                value === option.value && 'bg-accent font-medium dark:bg-primary/[0.12]'
+                value === option.value && 'bg-primary/10 font-medium text-primary dark:bg-primary/[0.12]'
               )}
             >
               <span className="min-w-0">{option.label}</span>

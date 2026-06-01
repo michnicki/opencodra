@@ -17,8 +17,6 @@ import {
   PlugZap,
   Plus,
   Trash2,
-  CheckCircle2,
-  AlertTriangle,
   Search,
   ChevronDown,
   ChevronRight,
@@ -191,7 +189,7 @@ function SectionCard({
   action,
   children,
 }: {
-  icon: React.ReactNode;
+  icon?: React.ReactNode;
   title: string;
   description: string;
   action?: React.ReactNode;
@@ -201,9 +199,11 @@ function SectionCard({
     <section className="surface min-w-0 overflow-hidden">
       <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            {icon}
-          </span>
+          {icon && (
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              {icon}
+            </span>
+          )}
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-foreground">{title}</h2>
             <p className="truncate text-xs text-muted-foreground">{description}</p>
@@ -234,23 +234,7 @@ function StatPill({ label }: { label: string }) {
   );
 }
 
-/* ─── Provider status badge ───────────────────────────────────────────────── */
-function ProviderBadge({ provider }: { provider: Pick<LlmProvider, 'enabled' | 'hasApiKey' | 'apiFormat'> }) {
-  const ready = providerIsReady(provider);
-  return (
-    <span className={cn(
-      'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide',
-      ready
-        ? 'bg-success-bg text-success'
-        : provider.enabled
-          ? 'bg-warning-bg text-warning'
-          : 'bg-muted/40 text-muted-foreground',
-    )}>
-      {ready ? <CheckCircle2 size={9} /> : <AlertTriangle size={9} />}
-      {providerStatusLabel(provider)}
-    </span>
-  );
-}
+
 
 export function SettingsPage() {
   const [providers, setProviders] = useState<ProviderDraft[]>([]);
@@ -697,64 +681,76 @@ export function SettingsPage() {
       )}
 
       {/* ── LLM Providers ──────────────────────────────────────────────────── */}
-      <SectionCard
-        icon={<PlugZap size={15} strokeWidth={1.9} />}
-        title="LLM Providers"
-        description={`${configuredProviderCount} of ${providers.length} configured`}
-        action={
+      <section className="surface min-w-0 overflow-hidden">
+
+        {/* Header */}
+        <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-4 sm:px-5">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">LLM Providers</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {loading ? 'Loading…' : `${configuredProviderCount} of ${providers.length} configured`}
+            </p>
+          </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
+            <button
+              type="button"
               onClick={() => refreshModelCatalog()}
               disabled={loading || catalogRefreshing || saving !== null}
-              className="h-8 gap-1.5 text-xs text-muted-foreground"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             >
-              <RefreshCw size={12} className={cn(catalogRefreshing && 'animate-spin')} />
-              {catalogRefreshing ? 'Refreshing…' : 'Refresh'}
-            </Button>
-            <Button
-              size="sm"
-              variant={addingProvider ? 'outline' : 'default'}
+              <RefreshCw size={13} className={cn(catalogRefreshing && 'animate-spin')} />
+              {catalogRefreshing ? 'Syncing…' : 'Sync'}
+            </button>
+            <button
+              type="button"
               onClick={() => setAddingProvider(v => !v)}
-              className="h-8 gap-1.5 text-xs"
+              className={cn(
+                'inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors',
+                addingProvider
+                  ? 'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground'
+                  : 'bg-primary text-primary-foreground hover:opacity-90',
+              )}
             >
-              {addingProvider ? <X size={12} /> : <Plus size={12} />}
-              {addingProvider ? 'Cancel' : 'Add provider'}
-            </Button>
+              {addingProvider ? <X size={13} /> : <Plus size={13} />}
+              {addingProvider ? 'Cancel' : 'Add'}
+            </button>
           </div>
-        }
-      >
+        </div>
+
         {/* Add provider form */}
         {addingProvider && (
-          <div className="border-b border-border bg-muted/[0.03] p-5">
-            <p className="mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">New provider</p>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Select
-                label="Type"
-                value={newProvider.preset}
-                onValueChange={value => {
-                  const preset = PROVIDER_PRESETS.find(item => item.value === value) ?? PROVIDER_PRESETS[0];
-                  setNewProvider(current => ({
-                    ...current,
-                    preset: preset.value,
-                    name: preset.name,
-                    apiFormat: preset.apiFormat,
-                    baseUrl: preset.baseUrl,
-                  }));
-                }}
-                options={PROVIDER_PRESETS.map(preset => ({ value: preset.value, label: preset.label }))}
-              />
+          <div className="animate-slide-down border-b border-border bg-muted/[0.04] px-4 py-5 sm:px-5 sm:py-6">
+            <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              New provider
+            </p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
-                <FieldLabel htmlFor="new-provider-name">Name</FieldLabel>
+                <FieldLabel htmlFor="new-provider-type">Protocol</FieldLabel>
+                <Select
+                  value={newProvider.preset}
+                  onValueChange={value => {
+                    const preset = PROVIDER_PRESETS.find(item => item.value === value) ?? PROVIDER_PRESETS[0];
+                    setNewProvider(current => ({
+                      ...current,
+                      preset: preset.value,
+                      name: preset.name,
+                      apiFormat: preset.apiFormat,
+                      baseUrl: preset.baseUrl,
+                    }));
+                  }}
+                  options={PROVIDER_PRESETS.map(preset => ({ value: preset.value, label: preset.label }))}
+                />
+              </div>
+              <div>
+                <FieldLabel htmlFor="new-provider-name">Display name</FieldLabel>
                 <Input
                   id="new-provider-name"
-                  placeholder="My LLM Provider"
+                  placeholder="My provider"
                   value={newProvider.name}
                   onChange={e => setNewProvider(current => ({ ...current, name: e.target.value }))}
                 />
                 {selectedProviderNameExists && (
-                  <p className="mt-1 text-[11px] text-warning">{newProvider.name.trim()} already exists</p>
+                  <p className="mt-1.5 text-xs text-warning">{newProvider.name.trim()} already exists</p>
                 )}
               </div>
               <div>
@@ -767,43 +763,57 @@ export function SettingsPage() {
                 />
               </div>
               <div>
-                <FieldLabel htmlFor="new-provider-api-key">API Key</FieldLabel>
+                <FieldLabel htmlFor="new-provider-api-key">API key</FieldLabel>
                 <Input
                   id="new-provider-api-key"
                   type="password"
-                  placeholder="Paste key"
+                  placeholder="sk-…"
                   value={newProvider.apiKey}
                   onChange={e => setNewProvider(current => ({ ...current, apiKey: e.target.value }))}
                 />
               </div>
             </div>
-            <div className="mt-3 flex justify-end">
-              <Button
-                size="sm"
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setAddingProvider(false)}
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
                 onClick={createProvider}
                 disabled={saving !== null || !newProviderReady}
-                className="h-8 gap-1.5 text-xs"
+                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
               >
-                {saving === 'provider:new' ? <RefreshCw size={12} className="animate-spin" /> : <Plus size={12} />}
-                Create provider
-              </Button>
+                {saving === 'provider:new' ? <RefreshCw size={11} className="animate-spin" /> : <Plus size={11} />}
+                Create
+              </button>
             </div>
           </div>
         )}
 
         {/* Provider list */}
         {loading ? (
-          <div className="space-y-3 p-5">
-            <Skeleton height={20} />
-            <Skeleton height={20} width="70%" />
-            <Skeleton height={20} width="85%" />
+          <div className="divide-y divide-border/40">
+            {[148, 148, 148].map((h, i) => (
+              <div key={i} className="flex items-center gap-4 px-4 py-4 sm:px-5">
+                <div className="flex-1 space-y-2">
+                  <Skeleton height={13} width="40%" />
+                  <Skeleton height={11} width="25%" />
+                </div>
+                <Skeleton height={20} width={36} />
+              </div>
+            ))}
           </div>
-        ) : providers.length === 0 ? (
-          <div className="px-5 py-10 text-center text-sm text-muted-foreground">
-            No providers configured yet.
+        ) : providers.length === 0 && !addingProvider ? (
+          <div className="px-5 py-14 text-center">
+            <p className="text-sm font-medium text-foreground">No providers yet</p>
+            <p className="mt-1 text-xs text-muted-foreground">Add one to start routing models.</p>
           </div>
         ) : (
-          <div className="divide-y divide-border/60">
+          <div className="divide-y divide-border/40">
             {providers.map(provider => {
               const nativeCloudflare = provider.apiFormat === 'cloudflare-workers-ai';
               const customProvider = isCustomProvider(provider);
@@ -812,6 +822,7 @@ export function SettingsPage() {
               const modelCount = providerModelCounts.get(provider.id) ?? 0;
               const expanded = expandedProviderId === provider.id;
               const canEnableProvider = providerHasCredential(provider);
+              const ready = providerIsReady(provider);
               const providerNameId = domId('provider-name', provider.id);
               const providerBaseUrlId = domId('provider-base-url', provider.id);
               const providerApiKeyId = domId('provider-api-key', provider.id);
@@ -820,36 +831,49 @@ export function SettingsPage() {
                 <article
                   key={provider.id}
                   className={cn(
-                    'min-w-0 transition-colors',
-                    dirty && 'bg-primary/[0.02]',
+                    'group min-w-0 transition-colors duration-150',
+                    dirty && 'bg-primary/[0.018]',
                   )}
                 >
                   {/* Row */}
-                  <div className="flex min-w-0 items-center gap-3 px-5 py-3">
-                    {/* Status dot */}
-                    <ProviderBadge provider={provider} />
+                  <div className="flex min-w-0 items-center gap-3 px-4 py-4 sm:gap-4 sm:px-5">
 
                     {/* Name + meta */}
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-foreground">{provider.name}</p>
-                      <p className="text-[11px] text-muted-foreground">
-                        {formatLabel(provider.apiFormat)}
-                        {modelCount > 0 && <span className="ml-2 opacity-70">· {modelCount} model{modelCount !== 1 ? 's' : ''}</span>}
+                      <p className="truncate text-sm font-semibold text-foreground">{provider.name}</p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        <span className="font-mono">{provider.apiFormat}</span>
+                        {modelCount > 0 && (
+                          <span className="ml-2 opacity-70">· {modelCount} model{modelCount !== 1 ? 's' : ''}</span>
+                        )}
                       </p>
                     </div>
 
-                    {/* Credential hint */}
-                    <p className="hidden text-[11px] text-muted-foreground sm:block">
+                    {/* Credential — hidden on smallest screens */}
+                    <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
                       {nativeCloudflare
                         ? 'Worker binding'
                         : provider.hasApiKey
                           ? 'Key saved'
                           : <span className="text-warning">No key</span>
                       }
-                    </p>
+                    </span>
 
                     {/* Controls */}
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex shrink-0 items-center gap-1">
+                      {/* Save — only visible when dirty */}
+                      {dirty && (
+                        <button
+                          type="button"
+                          onClick={() => saveProvider(provider)}
+                          disabled={saving !== null}
+                          className="animate-fade-in mr-1 inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                        >
+                          {saving === `provider:${provider.id}` ? <RefreshCw size={10} className="animate-spin" /> : <Save size={10} />}
+                          Save
+                        </button>
+                      )}
+
                       <Switch
                         checked={provider.enabled && canEnableProvider}
                         onCheckedChange={enabled => {
@@ -861,48 +885,43 @@ export function SettingsPage() {
                           updateProviderDraft(provider.id, { enabled });
                         }}
                       />
-                      <Button
-                        size="sm"
-                        variant="ghost"
+
+                      <button
+                        type="button"
                         onClick={() => setExpandedProviderId(expanded ? null : provider.id)}
-                        className="h-7 w-7 rounded p-0 text-muted-foreground"
-                        aria-label={expanded ? 'Collapse' : 'Expand'}
+                        aria-label={expanded ? 'Collapse' : 'Configure'}
+                        className={cn(
+                          'ml-0.5 inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                          expanded
+                            ? 'text-foreground'
+                            : 'text-muted-foreground/60 hover:text-muted-foreground',
+                        )}
                       >
-                        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={dirty ? 'default' : 'ghost'}
-                        onClick={() => saveProvider(provider)}
-                        disabled={saving !== null || !dirty}
-                        className="h-7 gap-1 px-2.5 text-xs"
-                      >
-                        {saving === `provider:${provider.id}` ? <RefreshCw size={11} className="animate-spin" /> : <Save size={11} />}
-                        Save
-                      </Button>
+                        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      </button>
+
                       {customProvider && (
-                        <Button
-                          size="icon"
-                          variant="ghost"
+                        <button
+                          type="button"
                           aria-label="Delete provider"
                           onClick={() => removeProvider(provider.id)}
                           disabled={saving !== null}
-                          className="h-7 w-7 text-muted-foreground/40 hover:bg-danger/5 hover:text-danger"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground/40 transition-colors hover:text-danger disabled:pointer-events-none group-hover:text-muted-foreground/70"
                         >
                           <Trash2 size={12} />
-                        </Button>
+                        </button>
                       )}
                     </div>
                   </div>
 
                   {/* Expanded edit panel */}
                   {expanded && (
-                    <div className="border-t border-border/50 bg-muted/[0.03] px-5 py-4">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="animate-slide-down border-t border-border/40 bg-muted/[0.04] px-4 py-5 sm:px-5">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                         {customProvider && (
                           <>
                             <div>
-                              <FieldLabel htmlFor={providerNameId}>Name</FieldLabel>
+                              <FieldLabel htmlFor={providerNameId}>Display name</FieldLabel>
                               <Input
                                 id={providerNameId}
                                 value={provider.name}
@@ -910,7 +929,7 @@ export function SettingsPage() {
                               />
                             </div>
                             <Select
-                              label="Type"
+                              label="Protocol"
                               value={provider.apiFormat}
                               onValueChange={value => updateProviderDraft(provider.id, { apiFormat: value as LlmApiFormat })}
                               options={API_FORMAT_OPTIONS.filter(option => option.value !== 'cloudflare-workers-ai')}
@@ -928,18 +947,18 @@ export function SettingsPage() {
                         )}
                         {nativeCloudflare ? (
                           <p className="col-span-full text-xs text-muted-foreground">
-                            Native provider — calls use the Worker AI binding configured in Wrangler.
+                            Uses the Worker AI binding defined in your Wrangler configuration.
                           </p>
                         ) : (
-                          <div className={cn(customProvider ? 'col-span-full' : 'col-span-full')}>
-                            <FieldLabel htmlFor={providerApiKeyId}>API Key</FieldLabel>
+                          <div className="col-span-full">
+                            <FieldLabel htmlFor={providerApiKeyId}>API key</FieldLabel>
                             <Input
                               id={providerApiKeyId}
                               type="password"
-                              placeholder={provider.hasApiKey ? 'Enter a new key to replace the saved one' : 'Paste key'}
+                              placeholder={provider.hasApiKey ? 'Enter a new key to replace the saved one' : 'sk-…'}
                               value={provider.apiKey}
                               onChange={e => updateProviderDraft(provider.id, { apiKey: e.target.value })}
-                              className="max-w-md"
+                              className="max-w-sm"
                             />
                           </div>
                         )}
@@ -952,23 +971,22 @@ export function SettingsPage() {
           </div>
         )}
 
-        {/* Catalog status footer */}
+        {/* Footer */}
         {!loading && (
-          <div className="border-t border-border/40 px-5 py-2.5">
-            <p className="text-[11px] text-muted-foreground/60">
+          <div className="border-t border-border/30 px-4 py-2.5 sm:px-5">
+            <p className="text-xs text-muted-foreground/60">
               {catalogRefreshing
-                ? 'Refreshing model lists…'
+                ? 'Syncing model lists…'
                 : catalogRefreshedOnce
-                  ? 'Model lists refreshed this session.'
-                  : 'Loaded from the database.'}
+                  ? 'Synced this session'
+                  : 'Loaded from database'}
             </p>
           </div>
         )}
-      </SectionCard>
+      </section>
 
       {/* ── Global model strategy ───────────────────────────────────────────── */}
       <SectionCard
-        icon={<Layers size={15} strokeWidth={1.9} />}
         title="Global model strategy"
         description="Account-wide baseline route and file-size tiers"
         action={
@@ -1003,7 +1021,6 @@ export function SettingsPage() {
 
       {/* ── Models & Usage Limits ────────────────────────────────────────────── */}
       <SectionCard
-        icon={<ShieldAlert size={15} strokeWidth={1.9} />}
         title="Models & usage limits"
         description={`${configs.length} models · provider mappings and rate limits`}
         action={
