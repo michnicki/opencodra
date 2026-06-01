@@ -271,97 +271,92 @@ export function ModelRouteEditor({
     : null;
 
   return (
-    <div className={cn('min-w-0 space-y-4', className)}>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">Model routing</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Baseline route plus file-size tiers for smaller changes.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
+    <div className={cn('min-w-0 space-y-5', className)}>
+
+      {/* Toolbar row */}
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-xs text-muted-foreground">
+          Baseline route plus file-size tiers for smaller changes.
+        </p>
+        <button
           type="button"
           onClick={addTier}
-          className="h-8 shrink-0 gap-1.5 text-xs"
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
         >
-          <ListPlus size={12} />
+          <ListPlus size={13} />
           Add tier
-        </Button>
+        </button>
       </div>
 
-      <section className="rounded-md border border-primary/20 bg-primary/[0.02] p-4">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Baseline route</span>
+      {/* Baseline route card */}
+      <div className="overflow-hidden rounded-lg border border-border">
+        <div className="flex items-center gap-2 border-b border-border/60 bg-muted/[0.04] px-4 py-2.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Baseline route</span>
           {largestTier !== null && (
-            <span className="text-[11px] text-muted-foreground">Files over {largestTier} lines</span>
+            <span className="text-xs text-muted-foreground">· files over {largestTier} lines</span>
           )}
         </div>
-        <ModelChain
-          primary={value.main}
-          fallbacks={value.fallbacks ?? []}
-          models={models}
-          providers={providers}
-          density={density}
-          onChange={(main, fallbacks) => onChange({ ...value, main, fallbacks })}
-        />
-      </section>
-
-      <div className="space-y-3">
-        {tiers.map((tier, index) => (
-          <section key={index} className="rounded-md border border-border bg-muted/5 p-4">
-            <div className="mb-4 flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                  Size tier
-                </h4>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Files up to the selected line count use this route.
-                </p>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                type="button"
-                aria-label="Remove size tier"
-                onClick={() => removeTier(index)}
-                className="h-8 w-8 shrink-0 text-muted-foreground/45 hover:bg-danger/5 hover:text-danger"
-              >
-                <Trash2 size={13} />
-              </Button>
-            </div>
-
-            <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[150px_minmax(0,1fr)]">
-              <div className="min-w-0 space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                  Max lines
-                </label>
-                <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 focus-within:ring-1 focus-within:ring-ring">
-                  <input
-                    type="number"
-                    min={1}
-                    value={tier.max_lines}
-                    onChange={e => updateTier(index, { max_lines: Number(e.target.value) || 1 })}
-                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none"
-                  />
-                  <span className="shrink-0 text-[10px] text-muted-foreground/50">lines</span>
-                </div>
-              </div>
-              <ModelChain
-                primary={tier.model}
-                fallbacks={tier.fallbacks || []}
-                models={models}
-                providers={providers}
-                density={density}
-                onChange={(model, fallbacks) => {
-                  if (model) updateTier(index, { model, fallbacks });
-                }}
-              />
-            </div>
-          </section>
-        ))}
+        <div className="p-4">
+          <ModelChain
+            primary={value.main}
+            fallbacks={value.fallbacks ?? []}
+            models={models}
+            providers={providers}
+            density={density}
+            onChange={(main, fallbacks) => onChange({ ...value, main, fallbacks })}
+          />
+        </div>
       </div>
+
+      {/* Size tier cards */}
+      {tiers.length > 0 && (
+        <div className="space-y-3">
+          {tiers.map((tier, index) => (
+            <div key={index} className="overflow-hidden rounded-lg border border-border">
+              <div className="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/[0.04] px-4 py-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Size tier {tiers.length > 1 ? index + 1 : ''}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Remove size tier"
+                  onClick={() => removeTier(index)}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground/40 transition-colors hover:bg-danger/5 hover:text-danger"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[160px_minmax(0,1fr)]">
+                <div className="min-w-0 space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                    Max lines
+                  </label>
+                  <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 focus-within:ring-1 focus-within:ring-ring">
+                    <input
+                      type="number"
+                      min={1}
+                      value={tier.max_lines}
+                      onChange={e => updateTier(index, { max_lines: Number(e.target.value) || 1 })}
+                      className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none"
+                    />
+                    <span className="shrink-0 text-xs text-muted-foreground">lines</span>
+                  </div>
+                </div>
+                <ModelChain
+                  primary={tier.model}
+                  fallbacks={tier.fallbacks || []}
+                  models={models}
+                  providers={providers}
+                  density={density}
+                  onChange={(model, fallbacks) => {
+                    if (model) updateTier(index, { model, fallbacks });
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
