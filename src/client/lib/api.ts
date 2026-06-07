@@ -118,6 +118,8 @@ async function requestWithMeta<T>(input: string, init?: RequestInit) {
   };
 }
 
+let updatesEmailPromise: Promise<UpdatesEmailResponse> | null = null;
+
 export const api = {
   getSession() {
     return request<AuthSessionResponse>('/api/auth/session');
@@ -128,13 +130,23 @@ export const api = {
     });
   },
   getUpdatesEmailStatus() {
-    return request<UpdatesEmailResponse>('/api/auth/updates-email');
+    if (!updatesEmailPromise) {
+      updatesEmailPromise = request<UpdatesEmailResponse>('/api/auth/updates-email').catch((err) => {
+        updatesEmailPromise = null;
+        throw err;
+      });
+    }
+    return updatesEmailPromise;
   },
   subscribeUpdates(email: string) {
-    return request<UpdatesEmailResponse>('/api/auth/updates-email', {
+    updatesEmailPromise = request<UpdatesEmailResponse>('/api/auth/updates-email', {
       method: 'POST',
       body: JSON.stringify({ email }),
+    }).catch((err) => {
+      updatesEmailPromise = null;
+      throw err;
     });
+    return updatesEmailPromise;
   },
   getJobs(params: Record<string, QueryValue> = {}) {
     const searchParams = new URLSearchParams();
