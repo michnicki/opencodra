@@ -1,5 +1,5 @@
 import { ChevronDown } from 'lucide-react';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { cn } from '@client/lib/utils';
 import {
   DropdownMenu,
@@ -22,6 +22,7 @@ interface SelectProps {
   label?: string;
   className?: string;
   triggerClassName?: string;
+  triggerStyle?: CSSProperties;
   leadingIcon?: ReactNode;
   /**
    * 'page'  — trigger sits on the gray page background (e.g. "Last 30 days").
@@ -41,6 +42,7 @@ export function Select({
   label,
   className,
   triggerClassName,
+  triggerStyle,
   leadingIcon,
 }: SelectProps) {
   const selectedOption = options.find((opt) => opt.value === value);
@@ -61,6 +63,7 @@ export function Select({
               !selectedOption && 'text-muted-foreground',
               triggerClassName,
             )}
+            style={triggerStyle}
           >
             <span className="flex min-w-0 flex-1 items-center gap-2">
               {leadingIcon && (
