@@ -25,7 +25,12 @@ async function withRetry<T>(
       return await fn();
     } catch (error: any) {
       attempt++;
+      const isSecondaryRateLimit = error instanceof GitHubError && 
+        error.status === 403 && 
+        error.body.toLowerCase().includes('secondary rate limit');
+
       const isRetryable =
+        isSecondaryRateLimit ||
         (error instanceof GitHubError && (error.status === 429 || error.status >= 500)) ||
         error.name === 'TimeoutError' ||
         error.message.includes('timeout');
@@ -34,7 +39,7 @@ async function withRetry<T>(
         throw error;
       }
 
-      const delay = Math.pow(2, attempt) * 1000;
+      const delay = isSecondaryRateLimit ? Math.pow(2, attempt) * 30000 : Math.pow(2, attempt) * 1000;
       logger.warn(`Retrying GitHub operation ${operation} (attempt ${attempt}/${maxRetries}) in ${delay}ms`, {
         status: error instanceof GitHubError ? error.status : undefined,
         error: error.message,

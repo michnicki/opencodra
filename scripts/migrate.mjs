@@ -451,8 +451,9 @@ async function normalizeRepoConfigs() {
           ELSE pg_temp.${functionName}(parsed_json, $1, $2)
         END
       WHERE main_model = $1
-        OR fallback_models::text LIKE '%' || $1 || '%'
-        OR size_overrides::text LIKE '%' || $1 || '%'
+        OR fallback_models @> jsonb_build_array($1::text)
+        OR size_overrides @> jsonb_build_array(jsonb_build_object('model', $1::text))
+        OR size_overrides @> jsonb_build_array(jsonb_build_object('fallbacks', jsonb_build_array($1::text)))
         OR parsed_json::text LIKE '%' || $1 || '%'
     `,
     [kimiK25Model, kimiK26Model],
@@ -469,23 +470,31 @@ async function main() {
     await query('SELECT pg_advisory_lock($1)', [migrationLockId]);
 
     console.log('Starting database migrations...');
-    await ensureMigrationTable();
+    await query('BEGIN');
+    try {
+      await ensureMigrationTable();
 
-    const migrationFiles = (await readdir(migrationsDir))
-      .filter((name) => /^\d+_.+\.sql$/.test(name))
-      .sort();
+      const migrationFiles = (await readdir(migrationsDir))
+        .filter((name) => /^\d+_.+\.sql$/.test(name))
+        .sort();
 
-    const applied = await appliedMigrations();
-    for (const migration of migrationFiles) {
-      if (!applied.has(migration)) {
-        await runMigration(migration);
+      const applied = await appliedMigrations();
+      for (const migration of migrationFiles) {
+        if (!applied.has(migration)) {
+          await runMigration(migration);
+        }
       }
-    }
 
-    console.log('Running catalog and config normalizations...');
-    await query('DROP INDEX IF EXISTS repositories_owner_idx');
-    await ensureModelCatalog();
-    await normalizeRepoConfigs();
+      console.log('Running catalog and config normalizations...');
+      await query('DROP INDEX IF EXISTS repositories_owner_idx');
+      await ensureModelCatalog();
+      await normalizeRepoConfigs();
+
+      await query('COMMIT');
+    } catch (error) {
+      await query('ROLLBACK');
+      throw error;
+    }
 
     console.log('Database migrations are up to date.');
   } finally {
