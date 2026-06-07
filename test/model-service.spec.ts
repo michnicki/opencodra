@@ -322,7 +322,7 @@ describe('ModelService', () => {
             ignore_drafts: true,
             mention_trigger: '@codra-app',
             skip_files: [],
-            max_files: 15,
+            max_files: 100,
             large_file_threshold_lines: 200,
             max_diff_lines_per_file: 800,
             max_total_diff_chars: 150_000,
