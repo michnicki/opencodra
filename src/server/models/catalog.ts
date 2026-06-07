@@ -65,29 +65,56 @@ const CLOUDFLARE_TEXT_GENERATION_MODELS = [
   '@cf/meta/llama-3.1-8b-instruct-fast',
 ];
 
+interface OpenAIModelsResponse {
+  data?: Array<{ id?: unknown }>;
+}
+
+interface AnthropicModelsResponse {
+  data?: Array<{ id?: unknown }>;
+}
+
+interface GeminiModelsResponse {
+  models?: Array<{
+    name?: unknown;
+    supportedGenerationMethods?: unknown;
+  }>;
+}
+
+interface CloudflareModelItem {
+  id?: unknown;
+  name?: unknown;
+  model?: unknown;
+  model_id?: unknown;
+}
+
+interface CloudflareModelsResponse {
+  result?: CloudflareModelItem[] | { data?: CloudflareModelItem[] };
+  data?: CloudflareModelItem[];
+}
+
 function cleanGeminiModelName(name: string) {
   return name.startsWith('models/') ? name.slice('models/'.length) : name;
 }
 
-function extractOpenAiModels(data: any) {
+function extractOpenAiModels(data: OpenAIModelsResponse) {
   return Array.isArray(data?.data)
-    ? data.data.map((item: any) => item?.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+    ? data.data.map((item) => item?.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
     : [];
 }
 
-function extractAnthropicModels(data: any) {
+function extractAnthropicModels(data: AnthropicModelsResponse) {
   return Array.isArray(data?.data)
-    ? data.data.map((item: any) => item?.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+    ? data.data.map((item) => item?.id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
     : [];
 }
 
-function extractGeminiModels(data: any) {
+function extractGeminiModels(data: GeminiModelsResponse) {
   if (!Array.isArray(data?.models)) return [];
   return data.models
-    .filter((model: any) => Array.isArray(model?.supportedGenerationMethods)
+    .filter((model) => Array.isArray(model?.supportedGenerationMethods)
       ? model.supportedGenerationMethods.includes('generateContent')
       : true)
-    .map((model: any) => typeof model?.name === 'string' ? cleanGeminiModelName(model.name) : null)
+    .map((model) => typeof model?.name === 'string' ? cleanGeminiModelName(model.name) : null)
     .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
 }
 
@@ -112,7 +139,7 @@ export async function listProviderModels(input: {
       }),
     );
     if (!response.ok) throw new Error(`OpenAI model list failed with ${response.status}: ${await limitedErrorBody(response)}`);
-    return extractOpenAiModels(await response.json());
+    return extractOpenAiModels(await response.json() as OpenAIModelsResponse);
   }
 
   if (input.apiFormat === 'anthropic') {
@@ -128,18 +155,23 @@ export async function listProviderModels(input: {
       }),
     );
     if (!response.ok) throw new Error(`Anthropic model list failed with ${response.status}: ${await limitedErrorBody(response)}`);
-    return extractAnthropicModels(await response.json());
+    return extractAnthropicModels(await response.json() as AnthropicModelsResponse);
   }
 
   if (input.apiFormat === 'gemini') {
     if (!input.apiKey) throw new Error('Google API key is required to list models.');
     const apiKey = input.apiKey;
-    const url = `${baseUrl}/models?key=${encodeURIComponent(apiKey)}`;
+    const url = `${baseUrl}/models`;
     const response = await withTimeout('Google model list', MODEL_LIST_TIMEOUT_MS, (signal) =>
-      fetch(url, { signal }),
+      fetch(url, {
+        signal,
+        headers: {
+          'x-goog-api-key': apiKey,
+        },
+      }),
     );
     if (!response.ok) throw new Error(`Google model list failed with ${response.status}: ${await limitedErrorBody(response)}`);
-    return extractGeminiModels(await response.json());
+    return extractGeminiModels(await response.json() as GeminiModelsResponse);
   }
 
   return listCloudflareModels(input.cloudflareAccountId, input.cloudflareApiToken);
@@ -165,21 +197,21 @@ async function listCloudflareModels(accountId?: string, apiToken?: string) {
     return CLOUDFLARE_TEXT_GENERATION_MODELS;
   }
   if (!response.ok) throw new Error(`Cloudflare model list failed with ${response.status}: ${await limitedErrorBody(response)}`);
-  const models = extractCloudflareModels(await response.json());
+  const models = extractCloudflareModels(await response.json() as CloudflareModelsResponse);
   return models.length > 0 ? models : CLOUDFLARE_TEXT_GENERATION_MODELS;
 }
 
-function extractCloudflareModels(data: any) {
+function extractCloudflareModels(data: CloudflareModelsResponse) {
   const items = Array.isArray(data?.result)
     ? data.result
-    : Array.isArray(data?.result?.data)
-      ? data.result.data
+    : typeof data?.result === 'object' && data.result !== null && 'data' in data.result && Array.isArray((data.result as { data?: unknown[] }).data)
+      ? (data.result as { data?: unknown[] }).data
       : Array.isArray(data?.data)
         ? data.data
         : [];
 
   return Array.from(new Set(
-    items
+    (items || [])
       .map((item: any) => normalizeCloudflareModelId(item?.id ?? item?.name ?? item?.model ?? item?.model_id))
       .filter((id: unknown): id is string => typeof id === 'string' && id.startsWith('@cf/')),
   ));

@@ -337,16 +337,23 @@ export function createModelsRouter() {
           return jsonError(`Provider ${config.providerName} does not have a saved API key.`, 400);
         }
         const apiKey = await decryptLlmApiKey(c.env, config.encryptedApiKey);
-        if (config.apiFormat === 'gemini') {
-          response = await reviewWithGoogle({ apiKey, baseUrl: config.baseUrl, providerName: config.providerName }, config.modelName, input);
-        } else if (config.apiFormat === 'openai') {
-          response = await reviewWithOpenAI({
-            apiKey,
-            baseUrl: config.baseUrl || 'https://api.openai.com/v1',
-            providerName: config.providerName,
-          }, config.modelName, input);
-        } else {
-          response = await reviewWithAnthropic({ apiKey, baseUrl: config.baseUrl, providerName: config.providerName }, config.modelName, input);
+        
+        switch (config.apiFormat) {
+          case 'gemini':
+            response = await reviewWithGoogle({ apiKey, baseUrl: config.baseUrl, providerName: config.providerName }, config.modelName, input);
+            break;
+          case 'openai':
+            response = await reviewWithOpenAI({
+              apiKey,
+              baseUrl: config.baseUrl || 'https://api.openai.com/v1',
+              providerName: config.providerName,
+            }, config.modelName, input);
+            break;
+          case 'anthropic':
+            response = await reviewWithAnthropic({ apiKey, baseUrl: config.baseUrl, providerName: config.providerName }, config.modelName, input);
+            break;
+          default:
+            return jsonError(`Unsupported API format: ${config.apiFormat}`, 400);
         }
       }
 
