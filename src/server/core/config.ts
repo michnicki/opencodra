@@ -1,4 +1,4 @@
-import { defaultRepoConfig, normalizeRepoModelConfig, type RepoConfig } from '@shared/schema';
+import { defaultRepoConfig, normalizeRepoModelConfig, repoConfigSchema, type RepoConfig } from '@shared/schema';
 import { REPO_CONFIG_CACHE_VERSION } from '@shared/config';
 import type { AppBindings } from '@server/env';
 import { getRepoConfigRecord, syncRepoConfig } from '@server/db/repo-configs';
@@ -38,7 +38,12 @@ function hasRepoModelOverride(existing: Awaited<ReturnType<typeof getRepoConfigR
 
 export async function getGlobalConfig(env: Pick<AppBindings, 'APP_KV'>): Promise<RepoConfig['model']> {
   const cached = await env.APP_KV.get(GLOBAL_CONFIG_KEY, 'json');
-  if (cached) return normalizeRepoModelConfig(cached as RepoConfig['model']);
+  if (cached) {
+    const parsed = repoConfigSchema.shape.model.safeParse(cached);
+    if (parsed.success) {
+      return normalizeRepoModelConfig(parsed.data);
+    }
+  }
 
   return EMPTY_GLOBAL_CONFIG;
 }

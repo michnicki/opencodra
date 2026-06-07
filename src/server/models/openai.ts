@@ -5,7 +5,22 @@ import { ProviderRequestError, providerErrorMessage, type ModelResponse } from '
 const OPENAI_TIMEOUT_MS = 180_000;
 const OPENAI_MAX_OUTPUT_TOKENS = 4096;
 
-function extractOpenAiText(data: any) {
+export interface OpenAIResponse {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ text?: string }>;
+    };
+  }>;
+  output_text?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+  };
+}
+
+function extractOpenAiText(data: OpenAIResponse) {
   const messageContent = data?.choices?.[0]?.message?.content;
   if (typeof messageContent === 'string') return messageContent.trim();
   if (Array.isArray(messageContent)) {
@@ -80,7 +95,7 @@ export async function reviewWithOpenAI(
     throw new ProviderRequestError(config.providerName, response.status, providerErrorMessage(errorText));
   }
 
-  const data = await response.json() as any;
+  const data = await response.json() as OpenAIResponse;
   const rawText = extractOpenAiText(data);
   if (!rawText) {
     throw new Error('OpenAI provider returned an empty response.');

@@ -15,7 +15,11 @@ export default {
 
   async queue(batch: MessageBatch<unknown>, env: AppBindings, _ctx: ExecutionContext) {
     return runWithDb(env, async () => {
-      await runBestEffortJobMaintenance(env);
+      try {
+        await runBestEffortJobMaintenance(env);
+      } catch (error) {
+        logger.error('Pre-batch maintenance task failed', error instanceof Error ? error : new Error(String(error)));
+      }
 
       for (const message of batch.messages) {
         const parseResult = reviewJobMessageSchema.safeParse(message.body);
@@ -42,7 +46,11 @@ export default {
         }
       }
 
-      await runBestEffortJobMaintenance(env);
+      try {
+        await runBestEffortJobMaintenance(env);
+      } catch (error) {
+        logger.error('Post-batch maintenance task failed', error instanceof Error ? error : new Error(String(error)));
+      }
     });
   },
 } satisfies ExportedHandler<AppBindings>;

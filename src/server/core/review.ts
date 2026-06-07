@@ -246,6 +246,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
     await failJobAndCheckRun(env, job, github, messageText);
+    await releaseJobLease(env, job.id, leaseOwner);
     return { action: 'ack' };
   }
 }
