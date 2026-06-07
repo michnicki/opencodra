@@ -56,11 +56,6 @@ export function LandingPage() {
         <div className="bg-card flex flex-col justify-between px-8 py-12 sm:px-14 sm:py-16 lg:border-r border-b lg:border-b-0 border-border">
 
           <div className="space-y-8 max-w-lg">
-            {/* Badge */}
-            <span className="inline-flex items-center gap-1.5 text-[0.7rem] font-semibold uppercase tracking-widest text-primary border border-primary/30 bg-primary/5 px-2.5 py-1 rounded-full">
-              AI-powered · GitHub App
-            </span>
-
             <div className="space-y-4">
               <h1 className="text-4xl sm:text-5xl font-bold tracking-tight leading-[1.08] font-mono uppercase">
                 AI code review<br />on every PR.
@@ -116,7 +111,7 @@ export function LandingPage() {
                 </span>
                 <div className="space-y-1">
                   <h3 className="text-sm font-semibold text-foreground">{item.title}</h3>
-                  <p className="text-sm text-muted-foreground leading-relaxed">{item.desc}</p>
+                  <p className="text-sm text-foreground/65 dark:text-muted-foreground leading-relaxed">{item.desc}</p>
                 </div>
               </div>
             ))}
