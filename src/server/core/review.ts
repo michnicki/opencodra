@@ -698,18 +698,33 @@ async function runFinalizePhase(
 
   const hasFailures = fileSummaries.some((file) => file.verdict === 'failed');
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
-  const verdictSummary = formatter.summarizeVerdict(reviewedComments, hasFailures);
+  const severityRanks: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
+  const minRank = severityRanks[config.review.min_severity] ?? 4;
+  
+  let finalComments = reviewedComments.filter(c => (severityRanks[c.severity] ?? 4) <= minRank);
+  finalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
+  
+  const omittedCount = reviewedComments.length - Math.min(finalComments.length, config.review.max_comments);
+  if (finalComments.length > config.review.max_comments) {
+    finalComments = finalComments.slice(0, config.review.max_comments);
+  }
+
+  const verdictSummary = formatter.summarizeVerdict(finalComments, hasFailures);
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
-  const formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
+  let formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
+  
+  if (omittedCount > 0) {
+    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${config.review.max_comments}). Showing the most critical issues.`;
+  }
 
   await updateJobStep(env, job.id, 'Completing', { status: 'running' });
   const review = await github.createReview(job.owner, job.repo, job.prNumber, {
     commitSha: pr.head.sha,
     event: formatter.toReviewEvent(verdictSummary.verdict),
     body: formattedSummary,
-    comments: reviewedComments.map(comment => ({
+    comments: finalComments.map(comment => ({
       path: comment.path,
       position: comment.position ?? undefined,
       body: formatter.formatInlineComment(comment),
@@ -740,7 +755,7 @@ async function runFinalizePhase(
       status: 'completed',
       conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
       title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
-      summary: `${reviewedComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
+      summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
     });
   }
 
@@ -752,7 +767,7 @@ async function runFinalizePhase(
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
-    commentCount: reviewedComments.length,
+    commentCount: finalComments.length,
     totalInputTokens: fileInputTokens,
     totalOutputTokens: fileOutputTokens,
     summaryMarkdown: formattedSummary,

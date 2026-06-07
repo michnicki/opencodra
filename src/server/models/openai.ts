@@ -16,6 +16,26 @@ function extractOpenAiText(data: any) {
   return '';
 }
 
+function isValidPublicUrl(urlString: string) {
+  try {
+    const url = new URL(urlString);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    // Block common cloud metadata and loopback IPs for SSRF protection
+    const hostname = url.hostname;
+    if (
+      hostname === '169.254.169.254' ||
+      hostname === 'metadata.google.internal' ||
+      hostname === '100.100.100.200' ||
+      hostname.startsWith('169.254.')
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function reviewWithOpenAI(
   config: { apiKey: string | null; baseUrl: string; providerName: string },
   model: string,
@@ -23,6 +43,11 @@ export async function reviewWithOpenAI(
   tracker?: { incrementSubrequests(count?: number): void },
 ): Promise<ModelResponse> {
   logger.info(`Calling OpenAI-format model: ${model}`);
+  
+  if (!isValidPublicUrl(config.baseUrl)) {
+    throw new ProviderRequestError(config.providerName, 400, 'Invalid provider base URL.');
+  }
+  
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
   if (tracker) tracker.incrementSubrequests(1);

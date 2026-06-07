@@ -446,7 +446,13 @@ export function SettingsPage() {
         baseUrl: provider.baseUrl || null,
         enabled: provider.enabled,
       };
-      if (provider.apiKey.trim()) payload.apiKey = provider.apiKey.trim();
+      if (provider.apiKey !== undefined && providerDraftDirty(provider)) {
+        if (provider.apiKey.trim()) {
+          payload.apiKey = provider.apiKey.trim();
+        } else {
+          payload.clearApiKey = true;
+        }
+      }
       const { provider: saved } = await api.updateProvider(provider.id, payload);
       setProviders(current => current.map(item => item.id === saved.id ? providerToDraft(saved) : item));
       setSavedProviders(current => current.map(item => item.id === saved.id ? saved : item));

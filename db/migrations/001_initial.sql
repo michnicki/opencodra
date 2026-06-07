@@ -201,8 +201,9 @@ SET
     ELSE pg_temp.codra_replace_deprecated_model(parsed_json, '@cf/moonshotai/kimi-k2.5', '@cf/moonshotai/kimi-k2.6')
   END
 WHERE main_model = '@cf/moonshotai/kimi-k2.5'
-  OR fallback_models::text LIKE '%@cf/moonshotai/kimi-k2.5%'
-  OR size_overrides::text LIKE '%@cf/moonshotai/kimi-k2.5%'
+  OR fallback_models @> '["@cf/moonshotai/kimi-k2.5"]'::jsonb
+  OR size_overrides @> '[{"model": "@cf/moonshotai/kimi-k2.5"}]'::jsonb
+  OR size_overrides @> '[{"fallbacks": ["@cf/moonshotai/kimi-k2.5"]}]'::jsonb
   OR parsed_json::text LIKE '%@cf/moonshotai/kimi-k2.5%';
 
 DROP FUNCTION IF EXISTS pg_temp.codra_replace_deprecated_model(jsonb, text, text);

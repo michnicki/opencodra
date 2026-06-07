@@ -326,6 +326,8 @@ describe('ModelService', () => {
             large_file_threshold_lines: 200,
             max_diff_lines_per_file: 800,
             max_total_diff_chars: 150_000,
+            max_comments: 10,
+            min_severity: 'nit',
             focus: ['quality'],
             custom_rules: [],
             labels: false,

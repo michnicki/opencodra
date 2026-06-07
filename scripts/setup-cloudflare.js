@@ -9,6 +9,24 @@ import prompts from 'prompts';
 
 const execAsync = util.promisify(exec);
 
+function spawnAsync(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.platform === 'win32' ? `${command}.cmd` : command, args);
+    let stdout = '', stderr = '';
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('close', code => {
+      if (code === 0) resolve({ stdout });
+      else {
+        const err = new Error(`Command failed with code ${code}`);
+        err.stderr = stderr;
+        reject(err);
+      }
+    });
+    child.on('error', err => reject(err));
+  });
+}
+
 const WRANGLER_JSONC_PATH = path.join(process.cwd(), 'wrangler.jsonc');
 const DEV_VARS_PATH = path.join(process.cwd(), '.dev.vars');
 
@@ -43,7 +61,9 @@ async function handleKVNamespace(baseBinding, isPreview) {
   while (true) {
     const spinner = ora(`Creating ${isPreview ? 'preview' : 'production'} KV namespace (${currentBinding})...`).start();
     try {
-      const { stdout } = await execAsync(`npx wrangler kv namespace create ${currentBinding}${previewFlag}`);
+      const args = ['wrangler', 'kv', 'namespace', 'create', currentBinding];
+      if (isPreview) args.push('--preview');
+      const { stdout } = await spawnAsync('npx', args);
       spinner.succeed();
       return extractId(stdout);
     } catch (error) {
@@ -127,7 +147,7 @@ async function handleHyperdrive(dbUrl) {
   while (true) {
     const spinner = ora(`Creating Hyperdrive (${currentBinding})...`).start();
     try {
-      const { stdout } = await execAsync(`npx wrangler hyperdrive create ${currentBinding} --connection-string="${dbUrl}"`);
+      const { stdout } = await spawnAsync('npx', ['wrangler', 'hyperdrive', 'create', currentBinding, `--connection-string=${dbUrl}`]);
       spinner.succeed();
       return extractId(stdout);
     } catch (error) {

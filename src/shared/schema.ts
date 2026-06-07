@@ -78,6 +78,8 @@ export const reviewConfigSchema = z.object({
   large_file_threshold_lines: z.number().int().min(1).max(5_000).default(200),
   max_diff_lines_per_file: z.number().int().min(1).max(5_000).default(800),
   max_total_diff_chars: z.number().int().min(1).max(500_000).default(150_000),
+  max_comments: z.number().int().min(1).max(150).default(10),
+  min_severity: z.enum(reviewSeverities).default('nit'),
   focus: z.array(z.enum(reviewCategories)).default([...reviewCategories]),
   custom_rules: z.array(z.string().min(1)).default([]),
   labels: labelsSchema.default({
@@ -108,6 +110,8 @@ export const repoConfigSchema = z.object({
     large_file_threshold_lines: 200,
     max_diff_lines_per_file: 800,
     max_total_diff_chars: 150_000,
+    max_comments: 10,
+    min_severity: 'nit',
     focus: [...reviewCategories],
     custom_rules: [],
     labels: {

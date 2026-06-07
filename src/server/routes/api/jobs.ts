@@ -35,14 +35,13 @@ export function createJobsRouter() {
   app.get('/:id', async (c) => {
     scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
 
-    const rawJob = await getJobForProcessing(c.env, c.req.param('id'));
-    if (!rawJob) {
+    const job = await getJobDetail(c.env, c.req.param('id'));
+    if (!job) {
       return jsonError('Job not found.', 404);
     }
 
-    const summary = mapJob(rawJob);
-    const etag = jobEtag(summary);
-    const lastModified = new Date(summary.updatedAt).toUTCString();
+    const etag = jobEtag(job);
+    const lastModified = new Date(job.updatedAt).toUTCString();
     if (c.req.header('if-none-match') === etag) {
       return new Response(null, {
         status: 304,
@@ -51,11 +50,6 @@ export function createJobsRouter() {
           'Last-Modified': lastModified,
         },
       });
-    }
-
-    const job = await getJobDetail(c.env, c.req.param('id'));
-    if (!job) {
-      return jsonError('Job not found.', 404);
     }
 
     const response = c.json({ job });
