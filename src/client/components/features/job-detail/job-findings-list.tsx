@@ -21,7 +21,6 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
         <div className="flex items-center gap-2.5">
           <FileText size={14} strokeWidth={1.75} className="text-primary" />
           <h2 className="text-sm font-semibold text-foreground">Findings</h2>
-          {job.status === 'running' && <span className="pulsing-dot" />}
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">View by</span>

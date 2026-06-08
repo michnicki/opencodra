@@ -1,8 +1,6 @@
 import { createApp } from '@server/app';
-import { createMockPRWebhook, createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
+import { createMockPRWebhook, createTestEnv } from './helpers';
 import { vi } from 'vitest';
-
-const dbIt = hasConfiguredTestDatabaseUrl() ? it : it.skip;
 
 // Mock GitHubClient to avoid real JWT signing and network calls
 vi.mock('@server/core/github', async (importOriginal) => {
@@ -80,7 +78,7 @@ describe('Webhook Handling Suite', () => {
     expect(response.status).toBe(400);
   });
 
-  dbIt('accepts valid pull_request.opened and queues a job', async () => {
+  it('accepts valid pull_request.opened and queues a job', async () => {
     const repoName = `repo-${Date.now()}`;
     const rawPayload = createMockPRWebhook({
         action: 'opened',
@@ -116,11 +114,44 @@ describe('Webhook Handling Suite', () => {
     expect(queue.sent).toHaveLength(1);
     expect(queue.sent[0].jobId).toBe(json.job.id);
     expect(queue.sent[0].deliveryId).toBeDefined();
+    expect(queue.sent[0].phase).toBe('prepare');
     expect(queue.sent[0].eventName).toBeUndefined();
     expect(queue.sent[0].payload).toBeUndefined();
   });
 
-  dbIt('acknowledges unsupported GitHub events without queueing review work', async () => {
+  it('rejects GitHub webhooks posted to the site root', async () => {
+    const repoName = `root-repo-${Date.now()}`;
+    const rawPayload = createMockPRWebhook({
+      action: 'opened',
+      repository: { name: repoName, owner: { login: 'test-owner' } }
+    });
+    rawPayload.pull_request.head.sha = 'c'.repeat(40);
+    rawPayload.pull_request.base.sha = 'd'.repeat(40);
+    const body = JSON.stringify(rawPayload);
+    const signature = await signPayload(env.GITHUB_APP_WEBHOOK_SECRET, body);
+
+    const response = await app.request(
+      'http://codra.test/',
+      {
+        method: 'POST',
+        headers: {
+          'x-github-event': 'pull_request',
+          'x-github-delivery': `root-delivery-${Date.now()}`,
+          'x-hub-signature-256': signature,
+          'content-type': 'application/json',
+        },
+        body,
+      },
+      env,
+    );
+
+    expect(response.status).toBe(404);
+
+    const queue = env.REVIEW_QUEUE as any;
+    expect(queue.sent).toHaveLength(0);
+  });
+
+  it('acknowledges unsupported GitHub events without queueing review work', async () => {
     const rawPayload = createMockPRWebhook({
       action: 'opened',
       repository: { name: `repo-${Date.now()}-check-suite`, owner: { login: 'test-owner' } },
@@ -153,7 +184,7 @@ describe('Webhook Handling Suite', () => {
     expect(queue.sent).toHaveLength(0);
   });
 
-  dbIt('ignores webhooks for draft PRs', async () => {
+  it('ignores webhooks for draft PRs', async () => {
       const draftPayload = createMockPRWebhook({ 
           action: 'opened',
           pull_request: { draft: true, number: 99, head: { sha: 'abc' }, base: { sha: 'def' }, user: { login: 'a' } }

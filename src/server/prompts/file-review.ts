@@ -2,7 +2,7 @@ import type { RepoConfig } from '@shared/schema';
 import type { FileDiff } from '@server/core/diff';
 import { getLanguageForFile } from './languages';
 
-export const fileReviewSystemPrompt = `You are a world-class software engineer performing a precise, security-focused code review.
+export const fileReviewSystemPromptBase = `You are a world-class software engineer performing a precise, security-focused code review.
 Your goal is to identify bugs, security vulnerabilities, performance bottlenecks, and quality issues in the provided diff.
 
 ### STRICT RULES:
@@ -12,6 +12,8 @@ Your goal is to identify bugs, security vulnerabilities, performance bottlenecks
 4. Output EXACTLY ONE JSON object matching the schema below.
 5. Focus on identifying critical issues (P0-P2). Nits (P3) should be minimized.
 6. For each finding, provide a clear 'title', a 'body' explaining the issue, and 'code_location' (line or line_range).
+7. Return at most {{MAX_COMMENTS}} findings. Prioritize the most critical and severe issues (P0/P1) first. Keep each body under 160 words.
+8. If there are no material issues, return an empty findings array and a short explanation.
 
 ### SCHEMA FORMAT:
 {
@@ -34,9 +36,10 @@ Your goal is to identify bugs, security vulnerabilities, performance bottlenecks
 
 Identify security risks such as XSS, SQLi, CSRF, insecure randomness, and potential data leaks immediately.`;
 
-export function buildFileReviewSystemPrompt(languagePersona?: string) {
+export function buildFileReviewSystemPrompt(config: RepoConfig['review'], languagePersona?: string) {
   const persona = languagePersona ? ` as ${languagePersona}` : '';
-  return `You are a world-class professional senior code reviewer${persona}. ${fileReviewSystemPrompt}`;
+  const prompt = fileReviewSystemPromptBase.replace('{{MAX_COMMENTS}}', config.max_comments.toString());
+  return `You are a world-class professional senior code reviewer${persona}. ${prompt}`;
 }
 
 export function buildFileReviewPrompts(input: {
@@ -47,8 +50,7 @@ export function buildFileReviewPrompts(input: {
 }) {
   const languageInfo = getLanguageForFile(input.file.path);
   const rules = input.config.custom_rules.length > 0 ? input.config.custom_rules.map((rule) => `- ${rule}`).join('\n') : '- None';
-  
-  const systemPrompt = buildFileReviewSystemPrompt(languageInfo?.persona);
+  const systemPrompt = buildFileReviewSystemPrompt(input.config, languageInfo?.persona);
   const languageGuidelines = languageInfo 
     ? `Language: ${languageInfo.language}\nSpecific Guidelines:\n${languageInfo.guidelines.map(g => `- ${g}`).join('\n')}`
     : 'Language: Generic\nSpecific Guidelines: Follow general best practices.';
@@ -58,6 +60,8 @@ export function buildFileReviewPrompts(input: {
     `File path: ${input.file.path}`,
     languageGuidelines,
     `Custom rules:\n${rules}`,
+    'Review only the diff shown below. If the diff note says it was truncated, do not infer issues from omitted lines.',
+    'Prioritize correctness, security, and production-impacting bugs. Avoid speculative style feedback.',
     '',
     `## Output JSON Schema (STRICTLY REQUIRED)`,
     `{

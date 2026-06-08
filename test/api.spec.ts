@@ -1,5 +1,5 @@
 import { createApp } from '@server/app';
-import { insertJob } from '@server/db/jobs';
+import { getJobForProcessing, insertJob } from '@server/db/jobs';
 import { insertFileReview } from '@server/db/file-reviews';
 import { getRepoConfigRecord } from '@server/db/repo-configs';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
@@ -10,14 +10,13 @@ import type {
   AuthSessionResponse,
   JobDetailResponse,
   JobsResponse,
+  ModelConfigsResponse,
   RepoConfigsResponse,
   StatsResponse,
   UpdatesEmailResponse,
 } from '@shared/api';
-import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
+import { createTestEnv, saveTestProviderApiKey } from './helpers';
 import { vi } from 'vitest';
-
-const dbIt = hasConfiguredTestDatabaseUrl() ? it : it.skip;
 
 function mockGitHubProfile(login = 'devarshishimpi') {
   return {
@@ -117,7 +116,7 @@ describe('Dashboard API Suite', () => {
     expect(response.headers.get('location')).toBe('/login?error=not_allowed');
   });
 
-  dbIt('allows access to /api/jobs with a valid GitHub session', async () => {
+  it('allows access to /api/jobs with a valid GitHub session', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
     const response = await app.request('/api/jobs', {
@@ -264,7 +263,7 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(404);
   });
 
-  dbIt('fetches job details accurately', async () => {
+  it('fetches job details accurately', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
 
@@ -295,7 +294,7 @@ describe('Dashboard API Suite', () => {
     expect(data.job.files).toBeDefined();
   });
 
-  dbIt('fetches job details when stored comments have null code suggestions', async () => {
+  it('fetches job details when stored comments have null code suggestions', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
 
@@ -349,7 +348,7 @@ describe('Dashboard API Suite', () => {
     expect(data.job.files[0].parsedComments[0].codeSuggestion).toBeNull();
   });
 
-  dbIt('returns stats successfully', async () => {
+  it('returns stats successfully', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
 
@@ -384,6 +383,211 @@ describe('Dashboard API Suite', () => {
     }, env);
 
     expect(response.status).toBe(400);
+  });
+
+  it('returns model configs without refreshing remote provider catalogs', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    await saveTestProviderApiKey(env);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unexpected catalog fetch'));
+    fetchSpy.mockClear();
+
+    const response = await app.request('/api/models', {
+      headers: { Cookie: `codra_session=${token}` },
+    }, env);
+
+    expect(response.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects enabling non-Cloudflare providers without a saved API key', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const createResponse = await app.request('/api/models/providers', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'No Key Provider',
+        apiFormat: 'openai',
+        baseUrl: 'https://api.example.com/v1',
+        enabled: true,
+      }),
+    }, env);
+    expect(createResponse.status).toBe(400);
+
+    const disabledCreateResponse = await app.request('/api/models/providers', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Disabled No Key Provider ${Date.now()}`,
+        apiFormat: 'openai',
+        baseUrl: 'https://api.example.com/v1',
+        enabled: false,
+      }),
+    }, env);
+    expect(disabledCreateResponse.status).toBe(201);
+    const { provider } = await disabledCreateResponse.json() as { provider: { id: string; name: string; apiFormat: string; baseUrl: string } };
+
+    const updateResponse = await app.request(`/api/models/providers/${provider.id}`, {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: provider.name,
+        apiFormat: provider.apiFormat,
+        baseUrl: provider.baseUrl,
+        enabled: true,
+      }),
+    }, env);
+    expect(updateResponse.status).toBe(400);
+  });
+
+  it('refreshes provider model catalogs on the explicit sync endpoint', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    await saveTestProviderApiKey(env);
+    const discoveredModelName = `test-discovered-${Date.now()}`;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/ai/models/search')) {
+        return Response.json({
+          success: false,
+          errors: [{ code: 10000, message: 'Authentication error' }],
+          messages: [],
+          result: null,
+        }, { status: 403 });
+      }
+      return Response.json({
+        models: [
+          {
+            name: `models/${discoveredModelName}`,
+            supportedGenerationMethods: ['generateContent'],
+          },
+        ],
+      });
+    });
+
+    const response = await app.request('/api/models/sync', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+    }, env);
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as ModelConfigsResponse;
+    const discoveredGoogleModel = data.configs.find(config => config.modelName === discoveredModelName);
+    expect(discoveredGoogleModel).toMatchObject({ rpm: null, rpd: null, tpm: null });
+    expect(data.configs.some(config => config.providerName === 'Cloudflare' && config.modelName === '@cf/openai/gpt-oss-120b')).toBe(true);
+    expect(data.syncErrors).toEqual([]);
+  });
+
+  it('tests models whose ids contain URL path separators', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const modelId = '@cf/zai-org/glm-4.7-flash';
+
+    const response = await app.request(`/api/models/${encodeURIComponent(modelId)}/test`, {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as { modelUsed: string; provider: string };
+    expect(data.modelUsed).toBe(modelId);
+    expect(data.provider).toBe('Cloudflare');
+  });
+
+  it('returns provider status codes for model test failures', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    await saveTestProviderApiKey(env);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      error: {
+        code: 429,
+        message: 'Quota exceeded. Please retry later.',
+        status: 'RESOURCE_EXHAUSTED',
+      },
+    }, { status: 429 }));
+
+    const response = await app.request('/api/models/gemma-4-31b-it/test', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(429);
+    const data = await response.json() as { error: string };
+    expect(data.error).toContain('Quota exceeded');
+    expect(data.error).not.toContain('"details"');
+  });
+
+  it('reports local Cloudflare Workers AI binding limitations clearly', async () => {
+    const env = createTestEnv({
+      AI: {
+        async run() {
+          throw new Error('Binding AI needs to be run remotely');
+        },
+      } as any,
+    });
+    const token = await getAuthCookie(env);
+
+    const response = await app.request(`/api/models/${encodeURIComponent('@cf/zai-org/glm-4.7-flash')}/test`, {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(400);
+    const data = await response.json() as { error: string };
+    expect(data.error).toContain('Cloudflare Workers AI is not available in local Wrangler');
+  });
+
+  it('maps upstream provider server errors to bad gateway after retry', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    await saveTestProviderApiKey(env);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({
+      error: {
+        code: 500,
+        message: 'Internal error encountered.',
+      },
+    }, { status: 500 }));
+    fetchMock.mockClear();
+
+    const response = await app.request('/api/models/gemma-4-31b-it/test', {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const data = await response.json() as { error: string };
+    expect(data.error).toContain('Internal error encountered.');
   });
 
   it('rejects invalid global model config writes', async () => {
@@ -428,7 +632,7 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(400);
   });
 
-  dbIt('returns repository list', async () => {
+  it('returns repository list', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
 
@@ -453,7 +657,7 @@ describe('Dashboard API Suite', () => {
     expect(response.headers.get('location')).toBe('https://github.com/apps/my-codra-install/installations/new');
   });
 
-  dbIt('rejects invalid repository config patches', async () => {
+  it('rejects invalid repository config patches', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
     const repo = `invalid-config-${Date.now()}`;
@@ -481,7 +685,7 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(400);
   });
 
-  dbIt('rejects string booleans in repository config patches', async () => {
+  it('rejects string booleans in repository config patches', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
     const repo = `invalid-enabled-${Date.now()}`;
@@ -530,7 +734,7 @@ describe('Dashboard API Suite', () => {
     expect(requestedUrl).toBe('https://api.github.com/repos/owner/repo/contents/src/path%20with%20spaces/app.ts');
   });
 
-  dbIt('keeps repo model settings inherited when loading global strategy', async () => {
+  it('keeps repo model settings inherited when loading global strategy', async () => {
     const env = createTestEnv();
     const repo = `global-inherit-${Date.now()}`;
 
@@ -547,6 +751,7 @@ describe('Dashboard API Suite', () => {
     });
 
     expect(loaded.parsedJson.model.main).toBe('@cf/zai-org/glm-4.7-flash');
+    expect(loaded.parsedJson.model.fallbacks).toEqual([]);
 
     const record = await getRepoConfigRecord(env, 'api-test-owner', repo);
     expect(record?.mainModel).toBeNull();
@@ -566,6 +771,73 @@ describe('Dashboard API Suite', () => {
     });
 
     expect(reloaded.parsedJson.model.main).toBe('gemma-4-26b-a4b-it');
+  });
+
+  it('uses the current global model strategy when retrying an older job', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const repo = `retry-current-config-${Date.now()}`;
+
+    const source = await insertJob(env, {
+      installationId: '123',
+      owner: 'api-test-owner',
+      repo,
+      prNumber: 12,
+      prTitle: 'Retry Current Config',
+      prAuthor: 'author',
+      commitSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+          size_overrides: [],
+        },
+      },
+    });
+
+    await updateGlobalConfig(env, {
+      main: 'gemma-4-31b-it',
+      fallbacks: ['gemma-4-26b-a4b-it'],
+      size_overrides: [
+        {
+          max_lines: 300,
+          model: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it'],
+        },
+      ],
+    });
+
+    const response = await app.request(`/api/jobs/${source.id}/retry`, {
+      method: 'POST',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+      },
+    }, env);
+
+    expect(response.status).toBe(202);
+    const body = await response.json() as { job: { id: string } };
+    const retry = await getJobForProcessing(env, body.job.id);
+    const snapshot = typeof retry?.config_snapshot === 'string'
+      ? JSON.parse(retry.config_snapshot)
+      : retry?.config_snapshot;
+
+    expect(snapshot.model).toEqual({
+      main: 'gemma-4-31b-it',
+      fallbacks: ['gemma-4-26b-a4b-it'],
+      size_overrides: [
+        {
+          max_lines: 300,
+          model: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it'],
+        },
+      ],
+    });
   });
 
   it('accepts legacy jobId-only queue messages during schema transition', () => {

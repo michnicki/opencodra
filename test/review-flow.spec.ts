@@ -1,8 +1,10 @@
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, insertJob } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
+import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
 import { defaultRepoConfig } from '@shared/schema';
+import { runWithDb } from '@server/db/client';
 
 const sha = (char: string) => char.repeat(40);
 
@@ -26,6 +28,7 @@ vi.mock('@server/services/github', () => {
         async createReview() { return { id: 456 }; }
         async ensureLabel() { return {}; }
         async addIssueLabels() { return {}; }
+        async removeIssueLabelsIfPresent() { return {}; }
         async removeIssueLabel() { return {}; }
     }
     return { GitHubService: MockGitHubService };
@@ -61,24 +64,43 @@ vi.mock('@server/services/model', () => {
         async generateSummary() {
             return {
                 modelUsed: 'sum-model',
+                provider: 'google',
                 rawText: '{"summary": "test"}',
+                inputTokens: 3,
+                outputTokens: 2,
             };
         }
     }
-    return { ModelService: MockModelService };
+    return {
+        ModelService: MockModelService,
+        isRetryableModelError: (error: unknown) => Boolean(error && typeof error === 'object' && (error as any).retryable === true),
+    };
 });
 
 const dbDescribe = hasConfiguredTestDatabaseUrl() ? describe : describe.skip;
+const REVIEW_FLOW_TIMEOUT_MS = 60_000;
 
 dbDescribe('Review Flow Lifecycle', () => {
   const env = createTestEnv();
+
+  async function runAndDrain(message: Parameters<typeof runReviewJob>[1]) {
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      await runReviewJob(env, message);
+      const queue = env.REVIEW_QUEUE as any;
+      while (queue.sent.length > 0) {
+        const next = queue.sent.shift();
+        await runReviewJob(env, next);
+      }
+    });
+  }
 
   it('completes a full review from pending job to finished', async () => {
     const repo = `test-repo-${Date.now()}-full`;
     const headSha = sha('a');
     const baseSha = sha('b');
 
-    await runReviewJob(env, {
+    await runAndDrain({
       deliveryId: 'delivery-123',
       eventName: 'pull_request',
       payload: {
@@ -104,7 +126,7 @@ dbDescribe('Review Flow Lifecycle', () => {
       trigger: 'auto',
     });
     expect(finalJob?.status).toBe('done');
-  });
+  }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('stops processing if the job is superseded mid-way', async () => {
       const { GitHubService } = await import('@server/services/github');
@@ -133,7 +155,7 @@ dbDescribe('Review Flow Lifecycle', () => {
           return generateMockDiff([{ path: 'test.ts', content: 'a' }]);
       });
 
-      await runReviewJob(env, {
+      await runAndDrain({
         deliveryId: 'delivery-456',
         eventName: 'pull_request',
         payload: {
@@ -160,7 +182,7 @@ dbDescribe('Review Flow Lifecycle', () => {
       });
       expect(finalJob?.status).toBe('superseded');
       expect(finalJob?.verdict).toBeNull();
-  });
+  }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('processes a pre-created retry job from a queue message', async () => {
     const repo = `test-repo-${Date.now()}-retry`;
@@ -199,14 +221,95 @@ dbDescribe('Review Flow Lifecycle', () => {
       retryOfJobId: source.id,
     });
 
-    await runReviewJob(env, {
+    await runAndDrain({
       jobId: retry.id,
       deliveryId: 'delivery-retry',
     });
 
     const finalJob = await getJobForProcessing(env, retry.id);
     expect(finalJob?.status).toBe('done');
-  });
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('does not inherit parent file reviews from models outside the current retry strategy', async () => {
+    const { ModelService } = await import('@server/services/model');
+    const reviewSpy = vi.spyOn(ModelService.prototype, 'reviewFile');
+    const repo = `test-repo-${Date.now()}-retry-model-filter`;
+    const sourceHeadSha = sha('8');
+    const retryHeadSha = sha('9');
+    const baseSha = sha('0');
+
+    const source = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 6,
+      prTitle: 'Retry Model Filter',
+      prAuthor: 'author',
+      commitSha: sourceHeadSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+          size_overrides: [],
+        },
+      },
+    });
+
+    await upsertFileReview(env, source.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: '@cf/zai-org/glm-4.7-flash',
+      modelProvider: 'cloudflare',
+      diffLineCount: 1,
+      diffInput: 'old diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'old',
+      errorMessage: null,
+    });
+
+    const retry = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 6,
+      prTitle: 'Retry Model Filter',
+      prAuthor: 'author',
+      commitSha: retryHeadSha,
+      baseSha,
+      trigger: 'retry',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it'],
+          size_overrides: [],
+        },
+      },
+      retryOfJobId: source.id,
+    });
+
+    await runAndDrain({
+      jobId: retry.id,
+      deliveryId: 'delivery-retry-model-filter',
+    });
+
+    expect(reviewSpy).toHaveBeenCalled();
+    const reviews = await getFileReviewsForJobs(env, [retry.id]);
+    expect(reviews.find((review) => review.file_path === 'src/app.ts')?.model_used).toBe('test-model');
+    reviewSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('resumes an existing queued duplicate job instead of stranding it', async () => {
     const repo = `test-repo-${Date.now()}-duplicate`;
@@ -228,7 +331,7 @@ dbDescribe('Review Flow Lifecycle', () => {
       configSnapshot: defaultRepoConfig,
     });
 
-    await runReviewJob(env, {
+    await runAndDrain({
       deliveryId: 'delivery-duplicate',
       eventName: 'pull_request',
       payload: {
@@ -248,5 +351,215 @@ dbDescribe('Review Flow Lifecycle', () => {
 
     const finalJob = await getJobForProcessing(env, existing.id);
     expect(finalJob?.status).toBe('done');
-  });
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('schedules a delayed continuation instead of spending queue retries on transient model failures', async () => {
+    const { ModelService } = await import('@server/services/model');
+    const retryableError = Object.assign(new Error('Google API timed out after 45000ms'), { retryable: true });
+    const reviewSpy = vi.spyOn(ModelService.prototype, 'reviewFile').mockRejectedValue(retryableError);
+    const repo = `test-repo-${Date.now()}-transient`;
+    const headSha = sha('6');
+    const baseSha = sha('7');
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 5,
+      prTitle: 'Transient Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 1);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      const result = await runReviewJob(env, {
+        jobId: job.id,
+        deliveryId: 'delivery-transient',
+        phase: 'review',
+      });
+
+      expect(result).toEqual({ action: 'ack' });
+      expect(reviewSpy).toHaveBeenCalled();
+      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(1);
+      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({
+        jobId: job.id,
+        phase: 'review',
+        options: { delaySeconds: 60 },
+      });
+    });
+
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('running');
+    expect(finalJob?.lease_owner).toBeNull();
+
+    reviewSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('reviews files in a chunk concurrently', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const { ModelService } = await import('@server/services/model');
+    const repo = `test-repo-${Date.now()}-concurrent`;
+    const headSha = sha('8');
+    const baseSha = sha('9');
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([
+        { path: 'src/one.ts', content: 'console.log(1);' },
+        { path: 'src/two.ts', content: 'console.log(2);' },
+        { path: 'src/three.ts', content: 'console.log(3);' },
+      ]),
+    );
+    let active = 0;
+    let maxActive = 0;
+    const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      active -= 1;
+      return {
+        parsed: {
+          comments: [],
+          verdict: 'approve',
+          fileSummary: `Reviewed ${params.file.path}`,
+          overallCorrectness: 'no issues',
+          confidenceScore: 0.9,
+        },
+        modelUsed: 'test-model',
+        provider: 'test-provider',
+        inputTokens: 10,
+        outputTokens: 5,
+        rawText: '{}',
+        userPrompt: '',
+      };
+    });
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 6,
+      prTitle: 'Concurrent Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 3);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      const result = await runReviewJob(env, {
+        jobId: job.id,
+        deliveryId: 'delivery-concurrent',
+        phase: 'review',
+      });
+
+      expect(result).toEqual({ action: 'ack' });
+      expect(maxActive).toBe(3);
+      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({ jobId: job.id, phase: 'finalize' });
+    });
+
+    const reviews = await getFileReviewsForJobs(env, [job.id]);
+    expect(reviews.filter((review) => review.file_status === 'done')).toHaveLength(3);
+
+    reviewSpy.mockRestore();
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('marks completed jobs with skipped files as partial reviews', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const { ModelService } = await import('@server/services/model');
+    const repo = `test-repo-${Date.now()}-partial`;
+    const headSha = sha('e');
+    const baseSha = sha('f');
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([
+        { path: 'src/app.ts', content: 'console.log(1);' },
+        { path: 'src/failed.ts', content: 'console.log(2);' },
+      ]),
+    );
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 7,
+      prTitle: 'Partial Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    const summarySpy = vi.spyOn(ModelService.prototype as any, 'generateSummary');
+    await updateJobFileCount(env, job.id, 2);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok',
+      errorMessage: null,
+    });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/failed.ts',
+      fileStatus: 'failed',
+      modelUsed: 'gemma-4-31b-it',
+      modelProvider: 'google',
+      diffLineCount: 1,
+      diffInput: '',
+      rawAiOutput: null,
+      parsedComments: [],
+      inputTokens: null,
+      outputTokens: null,
+      durationMs: 1,
+      verdict: null,
+      fileSummary: null,
+      errorMessage: 'Review skipped after 3 repeated model provider outages.',
+    });
+
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      const result = await runReviewJob(env, {
+        jobId: job.id,
+        deliveryId: 'delivery-partial',
+        phase: 'finalize',
+      });
+      expect(result).toEqual({ action: 'ack' });
+    });
+
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('done');
+    expect(finalJob?.error_msg).toContain('Partial review: 1 of 2 files');
+    const steps = typeof finalJob?.steps === 'string' ? JSON.parse(finalJob.steps) : finalJob?.steps;
+    expect(steps?.find((step: { name: string }) => step.name === 'Completing')?.status).toBe('done');
+    expect(finalJob?.summary_markdown).toMatch(/^### Codra Review/);
+    expect(finalJob?.summary_model).toBeNull();
+    expect(summarySpy).not.toHaveBeenCalled();
+    summarySpy.mockRestore();
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
 });

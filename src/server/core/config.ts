@@ -1,4 +1,4 @@
-import { defaultRepoConfig, normalizeRepoModelConfig, type RepoConfig } from '@shared/schema';
+import { defaultRepoConfig, normalizeRepoModelConfig, repoConfigSchema, type RepoConfig } from '@shared/schema';
 import { REPO_CONFIG_CACHE_VERSION } from '@shared/config';
 import type { AppBindings } from '@server/env';
 import { getRepoConfigRecord, syncRepoConfig } from '@server/db/repo-configs';
@@ -22,21 +22,10 @@ async function cacheKey(env: Pick<AppBindings, 'APP_KV'>, owner: string, repo: s
 
 const GLOBAL_CONFIG_KEY = 'config:global_model';
 
-const SERVER_DEFAULT_GLOBAL_CONFIG: RepoConfig['model'] = {
-  main: 'gemma-4-31b-it',
-  fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
-  size_overrides: [
-    {
-      max_lines: 300,
-      model: 'gemma-4-31b-it',
-      fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
-    },
-    {
-      max_lines: 100,
-      model: '@cf/moonshotai/kimi-k2.6',
-      fallbacks: ['@cf/zai-org/glm-4.7-flash'],
-    },
-  ],
+const EMPTY_GLOBAL_CONFIG: RepoConfig['model'] = {
+  main: null,
+  fallbacks: [],
+  size_overrides: [],
 };
 
 function hasRepoModelOverride(existing: Awaited<ReturnType<typeof getRepoConfigRecord>> | null) {
@@ -49,9 +38,14 @@ function hasRepoModelOverride(existing: Awaited<ReturnType<typeof getRepoConfigR
 
 export async function getGlobalConfig(env: Pick<AppBindings, 'APP_KV'>): Promise<RepoConfig['model']> {
   const cached = await env.APP_KV.get(GLOBAL_CONFIG_KEY, 'json');
-  if (cached) return normalizeRepoModelConfig(cached as RepoConfig['model']);
+  if (cached) {
+    const parsed = repoConfigSchema.shape.model.safeParse(cached);
+    if (parsed.success) {
+      return normalizeRepoModelConfig(parsed.data);
+    }
+  }
 
-  return SERVER_DEFAULT_GLOBAL_CONFIG;
+  return EMPTY_GLOBAL_CONFIG;
 }
 
 export async function updateGlobalConfig(env: Pick<AppBindings, 'APP_KV'>, config: RepoConfig['model']) {

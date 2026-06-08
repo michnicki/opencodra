@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookPayload } from '@shared/github';
 import type { AppEnv } from '@server/env';
 import { loadRepoConfig } from '@server/core/config';
@@ -8,10 +9,7 @@ import { jsonError } from '@server/core/http';
 import { findExistingJobForHead, insertJob, supersedeOlderJobs } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 
-export function createWebhookRouter() {
-  const app = new Hono<AppEnv>();
-
-  app.post('/', async (c) => {
+export async function handleGitHubWebhook(c: Context<AppEnv>) {
     const eventName = c.req.header('x-github-event');
     const deliveryId = c.req.header('x-github-delivery');
     const signature = c.req.header('x-hub-signature-256');
@@ -115,6 +113,7 @@ export function createWebhookRouter() {
       await c.env.REVIEW_QUEUE.send({
         jobId: job.id,
         deliveryId,
+        phase: 'prepare',
         requestId: c.get('requestId'),
       });
 
@@ -130,7 +129,12 @@ export function createWebhookRouter() {
     });
 
     return c.json({ ok: true, message: 'queued' }, 202);
-  });
+}
+
+export function createWebhookRouter() {
+  const app = new Hono<AppEnv>();
+
+  app.post('/', handleGitHubWebhook);
 
   return app;
 }

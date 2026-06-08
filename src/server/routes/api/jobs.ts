@@ -1,13 +1,30 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { defaultRepoConfig, jobsQuerySchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
 import { bytesToHex, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
+import { scheduleBestEffortJobMaintenance } from '@server/core/job-recovery';
+import { loadRepoConfig } from '@server/core/config';
+
+function jobEtag(input: { id: string; status: string; updatedAt: string; fileCount: number; commentCount: number }) {
+  return `"job-${input.id}-${input.status}-${input.fileCount}-${input.commentCount}-${new Date(input.updatedAt).getTime()}"`;
+}
+
+function getExecutionContext(c: Context<AppEnv>) {
+  try {
+    return c.executionCtx;
+  } catch {
+    return undefined;
+  }
+}
 
 export function createJobsRouter() {
   const app = new Hono<AppEnv>();
 
   app.get('/', async (c) => {
+    scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
+
     const rawQuery = c.req.query();
     const query = jobsQuerySchema.parse(rawQuery);
 
@@ -16,12 +33,30 @@ export function createJobsRouter() {
   });
 
   app.get('/:id', async (c) => {
+    scheduleBestEffortJobMaintenance(c.env, getExecutionContext(c));
+
     const job = await getJobDetail(c.env, c.req.param('id'));
     if (!job) {
       return jsonError('Job not found.', 404);
     }
 
-    return c.json({ job });
+    const etag = jobEtag(job);
+    const lastModified = new Date(job.updatedAt).toUTCString();
+    if (c.req.header('if-none-match') === etag) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ETag: etag,
+          'Last-Modified': lastModified,
+        },
+      });
+    }
+
+    const response = c.json({ job });
+    response.headers.set('ETag', etag);
+    response.headers.set('Last-Modified', lastModified);
+    response.headers.set('Cache-Control', 'private, no-cache');
+    return response;
   });
 
   app.post('/:id/retry', async (c) => {
@@ -30,6 +65,17 @@ export function createJobsRouter() {
       return jsonError('Job not found.', 404);
     }
     const source = mapJob(rawSource);
+    let configSnapshot;
+    try {
+      const currentConfig = await loadRepoConfig(c.env, {
+        installationId: source.installationId,
+        owner: source.owner,
+        repo: source.repo,
+      });
+      configSnapshot = currentConfig?.parsedJson ?? defaultRepoConfig;
+    } catch (e) {
+      configSnapshot = defaultRepoConfig;
+    }
 
     const job = await insertJob(c.env, {
       installationId: source.installationId,
@@ -43,7 +89,7 @@ export function createJobsRouter() {
       trigger: 'retry',
       headRef: rawSource.head_ref,
       baseRef: rawSource.base_ref,
-      configSnapshot: source.configSnapshot ?? defaultRepoConfig,
+      configSnapshot,
       retryOfJobId: source.id,
     });
 
@@ -60,6 +106,7 @@ export function createJobsRouter() {
     await c.env.REVIEW_QUEUE.send({
       jobId: job.id,
       deliveryId: crypto.randomUUID(),
+      phase: 'prepare',
       requestId: c.get('requestId'),
     });
 

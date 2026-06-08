@@ -8,45 +8,71 @@ export function useJobDetail(id: string) {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
-  const pollInterval = useRef<number | null>(null);
+  const pollTimeout = useRef<number | null>(null);
+  const etag = useRef<string | null>(null);
+  const latestJob = useRef<JobDetail | null>(null);
+
+  const isTerminal = (candidate: JobDetail | null) => candidate?.status === 'done' || candidate?.status === 'failed' || candidate?.status === 'superseded';
+
+  const getPollDelay = (candidate: JobDetail | null) => {
+    if (!candidate || isTerminal(candidate)) return null;
+
+    const nextRetryAt = candidate.nextRetryAt ? new Date(candidate.nextRetryAt).getTime() : null;
+    const waitingForRetry = nextRetryAt !== null && Number.isFinite(nextRetryAt) && nextRetryAt > Date.now();
+    const baseDelay = waitingForRetry ? Math.min(Math.max(nextRetryAt - Date.now(), 10_000), 15_000) : 3_000;
+
+    return document.visibilityState === 'hidden' ? Math.max(baseDelay, 45_000) : baseDelay;
+  };
 
   const fetchJob = async (silent = false) => {
     try {
-      const response = await api.getJob(id);
-      setJob(response.job);
+      const response = await api.getJob(id, { etag: etag.current });
+      if (response.etag) etag.current = response.etag;
+      if (!response.notModified && response.data) {
+        latestJob.current = response.data.job;
+        setJob(response.data.job);
+      }
       setError(null);
-      if (response.job.status === 'done' || response.job.status === 'failed') stopPolling();
+      schedulePolling();
     } catch (loadError) {
       if (!silent) setError(loadError instanceof Error ? loadError.message : 'Failed to load job.');
+      schedulePolling();
     }
-  };
-
-  const startPolling = () => {
-    if (pollInterval.current) return;
-    pollInterval.current = window.setInterval(() => fetchJob(true), 3000);
   };
 
   const stopPolling = () => {
-    if (pollInterval.current) {
-      window.clearInterval(pollInterval.current);
-      pollInterval.current = null;
+    if (pollTimeout.current) {
+      window.clearTimeout(pollTimeout.current);
+      pollTimeout.current = null;
     }
+  };
+
+  const schedulePolling = () => {
+    stopPolling();
+    const delay = getPollDelay(latestJob.current);
+    if (delay === null) return;
+    pollTimeout.current = window.setTimeout(() => fetchJob(true), delay);
   };
 
   useEffect(() => {
     if (id) {
+      etag.current = null;
+      latestJob.current = null;
       fetchJob();
     }
     return () => stopPolling();
   }, [id]);
 
   useEffect(() => {
-    if (job && (job.status === 'queued' || job.status === 'running')) {
-      startPolling();
-    } else {
-      stopPolling();
-    }
-  }, [job?.status]);
+    latestJob.current = job;
+    schedulePolling();
+  }, [job?.status, job?.nextRetryAt]);
+
+  useEffect(() => {
+    const reschedule = () => schedulePolling();
+    document.addEventListener('visibilitychange', reschedule);
+    return () => document.removeEventListener('visibilitychange', reschedule);
+  }, [id, job?.status, job?.nextRetryAt]);
 
   const handleRetry = async () => {
     if (!job) return;
