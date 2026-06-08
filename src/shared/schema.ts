@@ -6,6 +6,7 @@ export const fileStatuses = ['pending', 'done', 'skipped', 'failed'] as const;
 export const reviewVerdicts = ['approve', 'comment'] as const;
 export const reviewSeverities = ['P0', 'P1', 'P2', 'P3', 'nit'] as const;
 export const reviewCategories = ['security', 'bugs', 'performance', 'correctness', 'quality'] as const; // Keeping for DB compatibility but will deprecate usage in prompts
+export const llmApiFormats = ['openai', 'anthropic', 'gemini', 'cloudflare-workers-ai'] as const;
 
 export const dateStringSchema = z.union([z.string(), z.date()]).transform((d) => (d instanceof Date ? d.toISOString() : d));
 export const coerceNumberSchema = z.coerce.number();
@@ -73,10 +74,12 @@ export const reviewConfigSchema = z.object({
   skip_files: z
     .array(z.string().min(1))
     .default(['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**']),
-  max_files: z.number().int().min(1).max(100).default(15),
+  max_files: z.number().int().min(1).max(100).default(100),
   large_file_threshold_lines: z.number().int().min(1).max(5_000).default(200),
   max_diff_lines_per_file: z.number().int().min(1).max(5_000).default(800),
   max_total_diff_chars: z.number().int().min(1).max(500_000).default(150_000),
+  max_comments: z.number().int().min(1).max(150).default(10),
+  min_severity: z.enum(reviewSeverities).default('nit'),
   focus: z.array(z.enum(reviewCategories)).default([...reviewCategories]),
   custom_rules: z.array(z.string().min(1)).default([]),
   labels: labelsSchema.default({
@@ -103,10 +106,12 @@ export const repoConfigSchema = z.object({
     ignore_drafts: true,
     mention_trigger: '@codra-app',
     skip_files: ['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**'],
-    max_files: 15,
+    max_files: 100,
     large_file_threshold_lines: 200,
     max_diff_lines_per_file: 800,
     max_total_diff_chars: 150_000,
+    max_comments: 10,
+    min_severity: 'nit',
     focus: [...reviewCategories],
     custom_rules: [],
     labels: {
@@ -122,7 +127,7 @@ export const repoConfigSchema = z.object({
   }),
   model: z
     .object({
-      main: z.string().nullable().default('gemma-4-31b-it'),
+      main: z.string().nullable().default(null),
       fallbacks: z.array(z.string()).nullable().default([]),
       size_overrides: z
         .array(
@@ -136,8 +141,8 @@ export const repoConfigSchema = z.object({
         .optional(),
     })
     .default({
-      main: 'gemma-4-31b-it',
-      fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+      main: null,
+      fallbacks: [],
       size_overrides: [],
     }),
 });
@@ -145,8 +150,9 @@ export const repoConfigSchema = z.object({
 export const reviewJobMessageSchema = z.object({
   jobId: z.string().uuid().optional(),
   deliveryId: z.string().min(1),
+  phase: z.enum(['prepare', 'review', 'finalize']).optional(),
   eventName: z.string().min(1).optional(),
-  payload: z.any().optional(),
+  payload: z.unknown().optional(),
   installationId: z.string().min(1).optional(),
   owner: z.string().min(1).optional(),
   repo: z.string().min(1).optional(),
@@ -183,6 +189,8 @@ export const jobSummarySchema = z.object({
   totalInputTokens: z.number().int(),
   totalOutputTokens: z.number().int(),
   createdAt: dateStringSchema,
+  updatedAt: dateStringSchema,
+  nextRetryAt: dateStringSchema.nullable().optional(),
   startedAt: dateStringSchema.nullable(),
   finishedAt: dateStringSchema.nullable(),
   errorMessage: z.string().nullable(),
@@ -311,8 +319,12 @@ export function normalizeModelId(model: string) {
 export function normalizeRepoModelConfig(model: RepoConfig['model']): RepoConfig['model'] {
   return {
     ...model,
-    main: model.main === null ? null : normalizeModelId(model.main),
-    fallbacks: model.fallbacks === null ? null : model.fallbacks.map(normalizeModelId),
+    main: model.main ? normalizeModelId(model.main) : null,
+    fallbacks: model.fallbacks === null
+      ? null
+      : Array.isArray(model.fallbacks)
+        ? model.fallbacks.map(normalizeModelId)
+        : [],
     size_overrides: model.size_overrides === null || model.size_overrides === undefined
       ? model.size_overrides
       : model.size_overrides.map((tier) => ({
@@ -335,15 +347,31 @@ export type JobSummary = z.infer<typeof jobSummarySchema>;
 export type FileReviewRecord = z.infer<typeof fileReviewRecordSchema>;
 export type JobDetail = z.infer<typeof jobDetailSchema>;
 export type RepoConfigRecord = z.infer<typeof repoConfigRecordSchema>;
-export const modelConfigSchema = z.object({
-  modelId: z.string(),
-  rpm: z.number().int(),
-  tpm: z.number().int(),
-  rpd: z.number().int(),
-  provider: z.string(),
+export const llmProviderSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  apiFormat: z.enum(llmApiFormats),
+  baseUrl: z.string().url().nullable(),
+  enabled: z.boolean(),
+  hasApiKey: z.boolean(),
+  createdAt: dateStringSchema,
   updatedAt: dateStringSchema,
 });
 
+export const modelConfigSchema = z.object({
+  modelId: z.string(),
+  providerId: z.string().uuid(),
+  providerName: z.string(),
+  apiFormat: z.enum(llmApiFormats),
+  modelName: z.string(),
+  rpm: z.number().int().nullable(),
+  tpm: z.number().int().nullable(),
+  rpd: z.number().int().nullable(),
+  updatedAt: dateStringSchema,
+});
+
+export type LlmApiFormat = z.infer<typeof llmProviderSchema>['apiFormat'];
+export type LlmProvider = z.infer<typeof llmProviderSchema>;
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type StatsPayload = z.infer<typeof statsSchema>;
 

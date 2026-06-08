@@ -5,6 +5,13 @@ import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPo
 import type { FileDiff } from './diff';
 import { jsonrepair } from 'jsonrepair';
 
+const MAX_LOGGED_JSON_CHARS = 2_000;
+
+function truncateJsonForLog(value: string) {
+  if (value.length <= MAX_LOGGED_JSON_CHARS) return value;
+  return `${value.slice(0, MAX_LOGGED_JSON_CHARS)}... [truncated ${value.length - MAX_LOGGED_JSON_CHARS} chars]`;
+}
+
 function hasReviewKeys(input: string) {
   return /"(findings|overall_explanation|overall_correctness|overall_confidence_score|summary)"\s*:/.test(input);
 }
@@ -127,8 +134,13 @@ function extractJson(raw: string) {
       }
     }
 
-    // Truncated - return everything from first brace
-    return raw.slice(firstBrace).trim();
+    // Truncated JSON: the closing brace(s) are missing. Append them so jsonrepair
+    // has a structurally complete (though incomplete-content) object to work with.
+    const partial = raw.slice(firstBrace).trim();
+    let closing = '';
+    if (inString) closing += '"';
+    closing += '}'.repeat(Math.max(1, stack));
+    return `${partial}${closing}`;
   }
 
   return raw.trim();
@@ -147,36 +159,37 @@ function coerceReviewNumber(value: unknown) {
   return undefined;
 }
 
-function normalizeFinding(finding: any) {
+function normalizeFinding(finding: unknown) {
   if (!finding || typeof finding !== 'object') return null;
-  if (isPlaceholderString(finding.title) || isPlaceholderString(finding.body)) return null;
+  const f = finding as Record<string, unknown>;
+  if (isPlaceholderString(f.title) || isPlaceholderString(f.body)) return null;
 
-  const location = finding.code_location && typeof finding.code_location === 'object' ? finding.code_location : {};
+  const location = f.code_location && typeof f.code_location === 'object' ? (f.code_location as Record<string, unknown>) : {};
   const line = coerceReviewNumber(location.line);
-  const start = coerceReviewNumber(location.line_range?.start);
-  const end = coerceReviewNumber(location.line_range?.end);
-  const priority = coerceReviewNumber(finding.priority);
+  const start = coerceReviewNumber(location.line_range && typeof location.line_range === 'object' ? (location.line_range as Record<string, unknown>).start : undefined);
+  const end = coerceReviewNumber(location.line_range && typeof location.line_range === 'object' ? (location.line_range as Record<string, unknown>).end : undefined);
+  const priority = coerceReviewNumber(f.priority);
 
   const codeLocation: Record<string, unknown> = {
-    absolute_file_path: location.absolute_file_path || finding.path || '',
+    absolute_file_path: location.absolute_file_path || f.path || '',
   };
   if (line !== undefined) {
-    codeLocation.line = Math.trunc(line);
+    codeLocation.line = Math.trunc(line as number);
   }
   if (start !== undefined || end !== undefined) {
     codeLocation.line_range = {
-      start: Math.trunc(start ?? end!),
-      end: Math.trunc(end ?? start!),
+      start: Math.trunc((start as number) ?? (end as number)!),
+      end: Math.trunc((end as number) ?? (start as number)!),
     };
   }
 
   return {
-    ...finding,
-    title: finding.title || 'Code finding',
-    priority: priority === undefined ? undefined : Math.max(0, Math.min(3, Math.trunc(priority))),
+    ...f,
+    title: f.title || 'Code finding',
+    priority: priority === undefined ? undefined : Math.max(0, Math.min(3, Math.trunc(priority as number))),
     code_location: codeLocation,
-    confidence_score: typeof finding.confidence_score === 'number'
-      ? Math.max(0, Math.min(1, finding.confidence_score > 1 ? finding.confidence_score / 10 : finding.confidence_score))
+    confidence_score: typeof f.confidence_score === 'number'
+      ? Math.max(0, Math.min(1, f.confidence_score > 1 ? f.confidence_score / 10 : f.confidence_score))
       : undefined,
   };
 }
@@ -253,7 +266,13 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
       throw new Error('Model response did not contain review JSON keys.');
     }
   } catch (e) {
-    logger.error('Failed to extract JSON from model response', { raw, error: e });
+    // Log a prefix of the raw response so we can diagnose what the model returned
+    // without bloating logs with 10k+ char dumps.
+    logger.error('Failed to extract JSON from model response', {
+      rawLength: raw.length,
+      rawPrefix: raw.slice(0, 500),
+      error: e instanceof Error ? e.message : String(e),
+    });
     throw new Error('Could not find JSON root in model response.');
   }
 
@@ -269,26 +288,26 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
   try {
     repaired = jsonrepair(preprocessed);
   } catch (e) {
-    logger.warn('jsonrepair failed to fix model output, using preprocessed text', { preprocessed, error: e });
+    logger.warn('jsonrepair failed to fix model output, using preprocessed text', { preprocessed: truncateJsonForLog(preprocessed), error: e });
   }
 
-  let parsedJson: any;
+  let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(repaired);
   } catch (e) {
-    logger.error('Critical JSON parse error after extraction and repair', { repaired, error: e });
+    logger.error('Critical JSON parse error after extraction and repair', { repaired: truncateJsonForLog(repaired), error: e });
     throw new Error(`Invalid JSON format: ${e instanceof Error ? e.message : 'Unknown error'}`);
   }
 
   let parsed: z.infer<typeof fileReviewModelOutputSchema>;
   try {
-    const findReviewObject = (arr: any[]): any | null => {
+    const findReviewObject = (arr: unknown[]): unknown | null => {
       // Priority 1: Has findings array and summary
-      const best = arr.find(i => i && typeof i === 'object' && Array.isArray(i.findings) && typeof i.summary === 'string');
+      const best = arr.find(i => i && typeof i === 'object' && Array.isArray((i as Record<string, unknown>).findings) && typeof (i as Record<string, unknown>).summary === 'string');
       if (best) return best;
 
       // Priority 2: Has findings array
-      const good = arr.find(i => i && typeof i === 'object' && Array.isArray(i.findings));
+      const good = arr.find(i => i && typeof i === 'object' && Array.isArray((i as Record<string, unknown>).findings));
       if (good) return good;
 
       // Priority 3: Has review-like keys
@@ -298,29 +317,31 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
       );
     };
 
-    const data = Array.isArray(parsedJson) ? (findReviewObject(parsedJson) || parsedJson[0] || {}) : parsedJson;
+    let data = Array.isArray(parsedJson) ? (findReviewObject(parsedJson) || parsedJson[0] || {}) : parsedJson;
 
     // Ensure essential keys exist to avoid schema validation errors
     if (data && typeof data === 'object') {
-      if (!data.findings) data.findings = [];
-      if (!data.overall_explanation) data.overall_explanation = 'No explanation provided.';
-      if (!data.overall_correctness) data.overall_correctness = 'Uncertain';
+      const obj = data as Record<string, unknown>;
+      if (!obj.findings) obj.findings = [];
+      if (!obj.overall_explanation) obj.overall_explanation = 'No explanation provided.';
+      if (!obj.overall_correctness) obj.overall_correctness = 'Uncertain';
 
       // Handle confidence score hallucinations (0-1 range expected)
-      if (typeof data.overall_confidence_score === 'number') {
-        if (data.overall_confidence_score > 1) {
+      if (typeof obj.overall_confidence_score === 'number') {
+        if (obj.overall_confidence_score > 1) {
           // If they gave 1-10 scale, normalize it
-          data.overall_confidence_score = Math.min(data.overall_confidence_score / 10, 1);
-        } else if (data.overall_confidence_score < 0) {
-          data.overall_confidence_score = 0;
+          obj.overall_confidence_score = Math.min(obj.overall_confidence_score / 10, 1);
+        } else if (obj.overall_confidence_score < 0) {
+          obj.overall_confidence_score = 0;
         }
       } else {
-        data.overall_confidence_score = 0.5;
+        obj.overall_confidence_score = 0.5;
       }
 
-      if (Array.isArray(data.findings)) {
-        data.findings = data.findings.map(normalizeFinding).filter(Boolean);
+      if (Array.isArray(obj.findings)) {
+        obj.findings = obj.findings.map(normalizeFinding).filter(Boolean);
       }
+      data = obj;
     }
 
     parsed = fileReviewModelOutputSchema.parse(data);
