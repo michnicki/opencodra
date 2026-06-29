@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.14.3",
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
     "@tailwindcss/vite": "^4.2.2",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -39,8 +39,8 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "@vitest/browser": "^4.1.4",
-    "@vitest/browser-playwright": "^4.1.4",
+    "@vitest/browser": "^4.1.9",
+    "@vitest/browser-playwright": "^4.1.9",
     "chalk": "^5.6.2",
     "concurrently": "^9.2.1",
     "jsdom": "^29.0.2",
@@ -50,7 +50,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "vitest": "^4.1.4",
+    "vitest": "^4.1.9",
     "wrangler": "^4.81.1"
   },
   "dependencies": {
