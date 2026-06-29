@@ -441,6 +441,68 @@ function ReviewFlowSkeleton() {
   );
 }
 
+function GraphCardSkeleton({ className = '' }: { className?: string }) {
+  return (
+    <article className={`overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
+      <div className="flex items-start justify-between gap-4 px-5 pt-5">
+        <div className="space-y-2">
+          <Skeleton height={10} width={60} />
+          <Skeleton height={14} width={130} />
+        </div>
+        <Skeleton height={32} width={32} borderRadius={6} />
+      </div>
+      <div className="h-64 px-5 pb-5 pt-4">
+        <Skeleton height="100%" width="100%" borderRadius={6} />
+      </div>
+    </article>
+  );
+}
+
+function GraphBarCardSkeleton({ className = '' }: { className?: string }) {
+  return (
+    <article className={`overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
+      <div className="flex items-start justify-between gap-4 px-5 pt-5">
+        <div className="space-y-2">
+          <Skeleton height={10} width={60} />
+          <Skeleton height={14} width={130} />
+        </div>
+        <Skeleton height={32} width={32} borderRadius={6} />
+      </div>
+      <div className="space-y-4 px-5 pb-5 pt-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
+            <div className="space-y-2">
+              <Skeleton height={10} width={`${70 + (i % 3) * 10}%`} />
+              <Skeleton height={8} width={`${40 + ((i * 17) % 50)}%`} />
+            </div>
+            <Skeleton height={12} width={28} />
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function GraphCardGallerySkeleton() {
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="pt-2" aria-hidden="true" />
+      <div className="grid gap-5 lg:grid-cols-12">
+        <GraphCardSkeleton className="lg:col-span-7" />
+        <GraphCardSkeleton className="lg:col-span-5" />
+      </div>
+      <div className="grid gap-5 lg:grid-cols-12">
+        <GraphCardSkeleton className="lg:col-span-6" />
+        <GraphCardSkeleton className="lg:col-span-6" />
+      </div>
+      <div className="grid gap-5 lg:grid-cols-12">
+        <GraphBarCardSkeleton className="lg:col-span-6" />
+        <GraphBarCardSkeleton className="lg:col-span-6" />
+      </div>
+    </div>
+  );
+}
+
 export function StatsPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -489,7 +551,10 @@ export function StatsPage() {
           <GraphCardGallery stats={stats} days={days} isDark={isDark} />
         </>
       ) : (
-        loading && <ReviewFlowSkeleton />
+        <>
+          <ReviewFlowSkeleton />
+          <GraphCardGallerySkeleton />
+        </>
       )}
     </section>
   );

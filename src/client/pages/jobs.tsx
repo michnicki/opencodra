@@ -3,12 +3,11 @@ import { api } from '@client/lib/api';
 import { JobsTable } from '@client/components/shared/jobs-table';
 import { EmptyState } from '@client/components/shared/empty-state';
 import { Button } from '@client/components/ui/button';
-import { Input } from '@client/components/ui/input';
 import { Select } from '@client/components/ui/select';
 import { Alert } from '@client/components/ui/alert';
 import { PageHeader } from '@client/components/layout/page-header';
 import { usePolling } from '@client/hooks/use-polling';
-import { Inbox, ChevronLeft, ChevronRight, RefreshCw, AlertTriangle, RotateCcw, Trash2, Info } from 'lucide-react';
+import { GitPullRequest, ChevronLeft, ChevronRight, RefreshCw, AlertTriangle, RotateCcw, Trash2, Info, Search } from 'lucide-react';
 import type { JobSummary } from '@shared/schema';
 import type { DlqMessage } from '@shared/api';
 
@@ -27,7 +26,7 @@ export function JobsPage() {
     status: '', verdict: '', search: '', page: 1,
   });
 
-  const limit = 20;
+  const [itemsPerPage, setItemsPerPage] = useState(10);
 
   const load = async (isManual = false) => {
     if (isManual) setRefreshing(true);
@@ -37,8 +36,8 @@ export function JobsPage() {
           status:  filters.status  || undefined,
           verdict: filters.verdict || undefined,
           search:  filters.search  || undefined,
-          limit,
-          offset:  (filters.page - 1) * limit,
+          limit:   itemsPerPage,
+          offset:  (filters.page - 1) * itemsPerPage,
         }),
         api.getDlqMessages(20).catch(() => ({ messages: [] }))
       ]);
@@ -82,18 +81,16 @@ export function JobsPage() {
     }
   };
 
-  usePolling(load, 15_000, [filters]);
+  usePolling(load, 15_000, [filters, itemsPerPage]);
 
-  const totalPages = Math.ceil(total / limit);
-
+  const totalPages = Math.ceil(total / itemsPerPage);
 
   return (
-    <section className="page-enter flex flex-col gap-6">
+    <section className="page-enter flex flex-col gap-5">
 
+      {/* ── Header ─────────────────────────────────── */}
       <PageHeader
-        category="Jobs"
-        title="Review history"
-        description={!loading && `${total.toLocaleString()} ${total === 1 ? 'review job' : 'review jobs'}`}
+        title="Jobs"
         actions={
           <div className="flex gap-2">
             {dlqMessages.length > 0 && (
@@ -115,6 +112,19 @@ export function JobsPage() {
           </div>
         }
       />
+
+      {/* ── Search bar (Beetle-style below header) ─── */}
+      <div className="relative">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+        <input
+          type="text"
+          id="pr-search"
+          placeholder="Search PRs, title, repo, number"
+          value={filters.search}
+          onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))}
+          className="h-9 w-full max-w-sm rounded-md border border-border bg-background pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
 
       {/* System Failures (DLQ) Section */}
       {dlqMessages.length > 0 && (
@@ -209,92 +219,75 @@ export function JobsPage() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="surface p-4 flex flex-wrap gap-3 items-end">
-        <div className="flex flex-col gap-1.5 flex-[2] min-w-[160px]">
-          <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-            Search
-          </label>
-          <Input
-            type="text"
-            placeholder="Title or #number…"
-            value={filters.search}
-            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))}
-            className="h-9 bg-background shadow-none"
-          />
-        </div>
-        <Select
-          label="Status"
-          value={filters.status}
-          onValueChange={(v) => setFilters((f) => ({ ...f, status: v, page: 1 }))}
-          options={[
-            { label: 'All statuses', value: '' },
-            { label: 'Queued', value: 'queued' },
-            { label: 'Running', value: 'running' },
-            { label: 'Done', value: 'done' },
-            { label: 'Failed', value: 'failed' },
-          ]}
-          className="min-w-[140px] flex-1"
-        />
-        <Select
-          label="Verdict"
-          value={filters.verdict}
-          onValueChange={(v) => setFilters((f) => ({ ...f, verdict: v, page: 1 }))}
-          options={[
-            { label: 'All verdicts', value: '' },
-            { label: 'Approved', value: 'approve' },
-            { label: 'Commented', value: 'comment' },
-          ]}
-          className="min-w-[150px] flex-1"
-        />
-      </div>
-
       {error && (
         <Alert variant="destructive">{error}</Alert>
       )}
 
-      {/* Table */}
+      {/* ── Table ─────────────────────────────────── */}
       <div className="surface min-w-0 overflow-hidden">
         <JobsTable jobs={jobs} loading={loading} />
 
         {!loading && jobs.length === 0 && (
           <EmptyState
-            icon={<Inbox />}
-            title="No jobs found"
-            description={
-              filters.search || filters.status || filters.verdict
-                ? 'No jobs match your filters. Try adjusting them.'
-                : 'No review jobs yet. Install Codra and open a pull request to get started.'
-            }
+            icon={<GitPullRequest />}
+            title="No jobs yet"
+            description="Your pull request analysis logs will appear here"
+            hints={[
+              'Once you open a PR in any of the connected repos, analysis triggers automatically',
+              'To trigger manually, comment @codra on any PR',
+            ]}
+            linkAction={{
+              label: 'See how to interact with Codra',
+              href: 'https://github.com/devarshishimpi/codra#readme',
+            }}
             className="rounded-none border-0"
           />
         )}
 
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
-            <span className="text-xs text-muted-foreground">
-              Page {filters.page} of {totalPages} · {total} jobs
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline" size="sm"
-                disabled={filters.page === 1}
-                onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))}
-                className="h-8 gap-1 px-3"
-              >
-                <ChevronLeft size={13} /> Prev
-              </Button>
-              <Button
-                variant="outline" size="sm"
-                disabled={filters.page === totalPages}
-                onClick={() => setFilters((f) => ({ ...f, page: f.page + 1 }))}
-                className="h-8 gap-1 px-3"
-              >
-                Next <ChevronRight size={13} />
-              </Button>
-            </div>
+        {/* ── Pagination footer (Beetle-style) ─── */}
+        <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+          {/* Items per page */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Items per page:</span>
+            <Select
+              value={String(itemsPerPage)}
+              onValueChange={(v) => {
+                setItemsPerPage(Number(v));
+                setFilters(f => ({ ...f, page: 1 }));
+              }}
+              options={[10, 20, 50, 100].map(n => ({ value: String(n), label: String(n) }))}
+              variant="card"
+              triggerClassName="h-8 w-20 px-2 py-1 text-xs"
+            />
           </div>
-        )}
+
+          {/* Page navigation */}
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={filters.page === 1}
+              onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))}
+              className="h-7 w-7 p-0"
+              aria-label="Previous page"
+            >
+              <ChevronLeft size={14} />
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Page {filters.page} of {Math.max(totalPages, 1)}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={filters.page >= totalPages}
+              onClick={() => setFilters((f) => ({ ...f, page: f.page + 1 }))}
+              className="h-7 w-7 p-0"
+              aria-label="Next page"
+            >
+              <ChevronRight size={14} />
+            </Button>
+          </div>
+        </div>
       </div>
     </section>
   );
