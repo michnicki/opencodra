@@ -14,6 +14,7 @@ import { FormatterService } from '../services/formatter';
 import { TokenTracker } from './token-tracker';
 import { loadRepoConfig } from './config';
 import { getWebhookDelivery } from '@server/db/webhook-deliveries';
+import { sendTelemetryEvent } from './telemetry';
 
 type PersistedReviewJob = ReturnType<typeof mapJob>;
 
@@ -694,6 +695,31 @@ async function runFinalizePhase(
 
   if (fileSummaries.length > 0 && fileSummaries.every((file) => file.verdict === 'failed')) {
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'failed', error: 'All files failed to review' });
+    
+    // Send anonymous telemetry for the failed job
+    const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
+    const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
+    const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
+    const fileExtensions = Array.from(new Set(files.map(f => {
+      const parts = f.path.split('.');
+      return parts.length > 1 ? parts.pop() || '' : '';
+    }).filter(Boolean)));
+    const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
+    
+    await sendTelemetryEvent(env, {
+      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+      findingsReported: 0,
+      inputTokens: fileInputTokens,
+      outputTokens: fileOutputTokens,
+      modelsUsed,
+      fileExtensions,
+      triggerType: job.trigger,
+      reviewDurationMs,
+      filesReviewed: files.length,
+      verdict: 'failed',
+      severityDistribution: {},
+    });
+
     throw new Error('All files failed to review');
   }
 
@@ -762,6 +788,20 @@ async function runFinalizePhase(
 
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
+  
+  const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
+  const fileExtensions = Array.from(new Set(files.map(f => {
+    const parts = f.path.split('.');
+    return parts.length > 1 ? parts.pop() || '' : '';
+  }).filter(Boolean)));
+  const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
+
+  const severityDistribution: Record<string, number> = {};
+  for (const comment of finalComments) {
+    const sev = comment.severity || 'unknown';
+    severityDistribution[sev] = (severityDistribution[sev] || 0) + 1;
+  }
+
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed after repeated model/provider outages.`
     : null;
@@ -777,6 +817,21 @@ async function runFinalizePhase(
     errorMessage: partialErrorMessage,
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
+
+  // Send anonymous telemetry
+  await sendTelemetryEvent(env, {
+    linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+    findingsReported: finalComments.length,
+    inputTokens: fileInputTokens,
+    outputTokens: fileOutputTokens,
+    modelsUsed,
+    fileExtensions,
+    triggerType: job.trigger,
+    reviewDurationMs,
+    filesReviewed: files.length,
+    verdict: verdictSummary.verdict,
+    severityDistribution,
+  });
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
