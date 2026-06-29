@@ -3,7 +3,7 @@ import { cn } from '@client/lib/utils';
 import { UpdatesEmailPrompt } from '@client/components/features/dashboard/updates-email-prompt';
 
 interface PageHeaderProps extends React.HTMLAttributes<HTMLElement> {
-  category: string;
+  category?: string;
   title: string;
   description?: React.ReactNode;
   actions?: React.ReactNode;
@@ -21,16 +21,13 @@ export function PageHeader({
   return (
     <>
       <header
-        className={cn('flex flex-col sm:flex-row sm:items-end justify-between gap-4 sm:gap-0', className)}
+        className={cn('flex flex-col sm:flex-row sm:items-center justify-between gap-3', className)}
         {...props}
       >
         <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary/70 mb-1">
-            {category}
-          </p>
           <h1
-            className="flex items-center gap-3 text-xl md:text-2xl font-bold text-foreground"
-            style={{ letterSpacing: '-0.025em' }}
+            className="flex items-center gap-3 text-xl font-bold text-foreground"
+            style={{ letterSpacing: '-0.02em' }}
           >
             {title}
             {props.versionBadge && (
@@ -40,13 +37,13 @@ export function PageHeader({
             )}
           </h1>
           {description && (
-            <div className="mt-1 text-sm text-muted-foreground">
+            <div className="mt-0.5 text-sm text-muted-foreground">
               {description}
             </div>
           )}
         </div>
         {actions && (
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full sm:w-auto sm:shrink-0">
             {actions}
           </div>
         )}
@@ -55,3 +52,4 @@ export function PageHeader({
     </>
   );
 }
+

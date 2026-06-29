@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { api } from '@client/lib/api';
 import type { StatsPayload } from '@shared/schema';
 import type { JobSummary } from '@shared/schema';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, GitPullRequest } from 'lucide-react';
 import { JobsTable } from '@client/components/shared/jobs-table';
+import { EmptyState } from '@client/components/shared/empty-state';
 import { PageHeaderActions } from '@client/components/shared/page-header-actions';
 import { Link } from 'react-router-dom';
 
@@ -47,7 +48,6 @@ export function DashboardPage() {
     <section className="page-enter flex flex-col gap-6">
 
       <PageHeader
-        category="Home"
         title="Dashboard"
         description="Totals and recent review jobs for the selected time range."
         actions={
@@ -84,6 +84,23 @@ export function DashboardPage() {
         <div className="surface min-w-0 overflow-hidden">
           <JobsTable jobs={recentJobs} loading={loading} />
 
+          {!loading && recentJobs.length === 0 && (
+            <EmptyState
+              icon={<GitPullRequest />}
+              title="No jobs yet"
+              description="Your pull request analysis logs will appear here"
+              hints={[
+                'Once you open a PR in any of the connected repos, analysis triggers automatically',
+                'To trigger manually, comment @codra on any PR',
+              ]}
+              linkAction={{
+                label: 'See how to interact with Codra',
+                href: 'https://github.com/devarshishimpi/codra#readme',
+              }}
+              className="rounded-none border-0"
+            />
+          )}
+
           {!loading && recentJobs.length > 0 && (
             <div className="px-5 py-2.5 bg-muted/20 border-t border-border/50">
               <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/40 text-center">
@@ -96,3 +113,4 @@ export function DashboardPage() {
     </section>
   );
 }
+
