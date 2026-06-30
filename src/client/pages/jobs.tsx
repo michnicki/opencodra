@@ -113,17 +113,57 @@ export function JobsPage() {
         }
       />
 
-      {/* ── Search bar (Beetle-style below header) ─── */}
-      <div className="relative">
-        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <input
-          type="text"
-          id="pr-search"
-          placeholder="Search PRs, title, repo, number"
-          value={filters.search}
-          onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))}
-          className="h-9 w-full max-w-sm rounded-md border border-border bg-background pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-        />
+      {/* ── Search bar ─── */}
+      <div className="surface p-4 flex flex-col sm:flex-row gap-4">
+        {/* Search Input */}
+        <div className="flex flex-col gap-1.5 flex-1">
+          <label htmlFor="pr-search" className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+            Search
+          </label>
+          <input
+            type="text"
+            id="pr-search"
+            placeholder="Title or #number..."
+            value={filters.search}
+            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))}
+            className="h-9 w-full rounded-md border border-border bg-transparent px-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+
+        {/* Status Dropdown */}
+        <div className="w-full sm:w-48">
+          <Select
+            label="Status"
+            value={filters.status}
+            onValueChange={(v) => setFilters((f) => ({ ...f, status: v, page: 1 }))}
+            placeholder="All statuses"
+            options={[
+              { value: '', label: 'All statuses' },
+              { value: 'queued', label: 'Queued' },
+              { value: 'running', label: 'Running' },
+              { value: 'done', label: 'Done' },
+              { value: 'failed', label: 'Failed' },
+              { value: 'superseded', label: 'Superseded' }
+            ]}
+            triggerClassName="bg-transparent"
+          />
+        </div>
+
+        {/* Verdict Dropdown */}
+        <div className="w-full sm:w-48">
+          <Select
+            label="Verdict"
+            value={filters.verdict}
+            onValueChange={(v) => setFilters((f) => ({ ...f, verdict: v, page: 1 }))}
+            placeholder="All verdicts"
+            options={[
+              { value: '', label: 'All verdicts' },
+              { value: 'approve', label: 'Approve' },
+              { value: 'comment', label: 'Comment' }
+            ]}
+            triggerClassName="bg-transparent"
+          />
+        </div>
       </div>
 
       {/* System Failures (DLQ) Section */}
