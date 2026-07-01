@@ -64,6 +64,7 @@
     "hono": "^4.12.12",
     "jsonrepair": "^3.13.3",
     "lucide-react": "^1.8.0",
+    "motion": "^12.42.2",
     "picomatch": "^4.0.4",
     "postgres": "^3.4.9",
     "react": "^19.2.5",
