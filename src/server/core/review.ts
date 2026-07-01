@@ -4,7 +4,24 @@ import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type Rep
 import type { AppBindings } from '@server/env';
 import { getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
 import { getResolvedModelConfig } from '@server/db/model-configs';
-import { claimJobLease, completeJob, completePreparationStep, failJob, findExistingJobForHead, getJobForProcessing, heartbeatJobLease, insertJob, mapJob, markJobCheckRunCompleted, markJobContinuationQueued, releaseJobLease, supersedeOlderJobs, updateJobCheckRun, updateJobStep } from '@server/db/jobs';
+import {
+  claimJobLease,
+  completeJob,
+  completePreparationStep,
+  failJob,
+  findExistingJobForHead,
+  getJobForProcessing,
+  getOtherRunningJobsCount,
+  heartbeatJobLease,
+  insertJob,
+  mapJob,
+  markJobCheckRunCompleted,
+  markJobContinuationQueued,
+  releaseJobLease,
+  supersedeOlderJobs,
+  updateJobCheckRun,
+  updateJobStep,
+} from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 
 import { GitHubService } from '../services/github';
@@ -18,10 +35,14 @@ import { sendTelemetryEvent } from './telemetry';
 
 type PersistedReviewJob = ReturnType<typeof mapJob>;
 
-export type ReviewJobRunResult = { action: 'ack' } | { action: 'retry'; delaySeconds: number };
+export type ReviewJobRunResult = 
+  | { action: 'ack' } 
+  | { action: 'retry'; delaySeconds: number }
+  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number };
 
 const REVIEW_CHUNK_FILE_LIMIT = 3;
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
+const MAX_CONCURRENT_JOBS = 4;
 const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
@@ -192,6 +213,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     return { action: 'ack' };
   }
 
+  const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
+  if (runningCount >= MAX_CONCURRENT_JOBS) {
+    logger.info(`Throttling job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
+    return { action: 'retry', delaySeconds: 30 };
+  }
+
   const leaseOwner = crypto.randomUUID();
   const claim = await claimJobLease(env, resolved.job.id, leaseOwner, JOB_LEASE_SECONDS);
   if (claim.status === 'missing') {
@@ -233,6 +260,11 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       return { action: 'ack' };
     }
 
+    if (error instanceof NextPhaseError) {
+      await releaseJobLease(env, job.id, leaseOwner);
+      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds };
+    }
+
     if (isRetryableModelError(error)) {
       const delaySeconds = getRetryableModelFailureDelaySeconds(error);
       logger.warn(`Review job hit transient model/provider failure; scheduling delayed continuation: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
@@ -240,9 +272,9 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      await enqueueJobPhase(env, job.id, phase, delaySeconds);
+      await markJobContinuationQueued(env, job.id, delaySeconds);
       await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'ack' };
+      return { action: 'next_phase', phase, delaySeconds }; // Retry same phase
     }
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
@@ -842,6 +874,12 @@ async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leas
   }
 }
 
+export class NextPhaseError extends Error {
+  constructor(public phase: 'prepare' | 'review' | 'finalize', public delaySeconds: number) {
+    super(`NextPhase: ${phase}`);
+  }
+}
+
 async function enqueueJobPhase(
   env: AppBindings,
   jobId: string,
@@ -849,14 +887,7 @@ async function enqueueJobPhase(
   delaySeconds = 0,
 ) {
   await markJobContinuationQueued(env, jobId, delaySeconds);
-  await env.REVIEW_QUEUE.send(
-    {
-      jobId,
-      deliveryId: crypto.randomUUID(),
-      phase,
-    },
-    delaySeconds > 0 ? { delaySeconds } : undefined,
-  );
+  throw new NextPhaseError(phase, delaySeconds);
 }
 
 function hasCompletedStep(job: PersistedReviewJob, stepName: string) {

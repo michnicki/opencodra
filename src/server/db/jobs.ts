@@ -5,6 +5,7 @@ import { getOrCreateRepository } from './repositories';
 
 export type JobRow = {
   id: string;
+  workflow_instance_id: string | null;
   installation_id: string;
   owner: string;
   repo: string;
@@ -137,7 +138,20 @@ export function mapJob(row: JobRow) {
     checkRunId: row.check_run_id,
     configSnapshot: row.config_snapshot ? repoConfigSchema.parse(parseJsonColumn(row.config_snapshot, defaultRepoConfig)) : null,
     retryOfJobId: row.retry_of_job_id,
+    workflowInstanceId: row.workflow_instance_id,
   });
+}
+
+export async function setJobWorkflowInstance(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, workflowInstanceId: string) {
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET workflow_instance_id = $2::uuid
+      WHERE id = $1
+    `,
+    [jobId, workflowInstanceId],
+  );
 }
 
 export async function insertJob(
@@ -931,4 +945,13 @@ export async function supersedeOlderJobs(
   );
 
   return rows.length;
+}
+
+export async function getOtherRunningJobsCount(env: Pick<import('@server/env').AppBindings, 'HYPERDRIVE'>, excludeJobId: string): Promise<number> {
+  const [result] = await queryRows<{ count: string }>(
+    env,
+    `SELECT count(*) as count FROM jobs WHERE status = 'running' AND id != $1`,
+    [excludeJobId]
+  );
+  return parseInt(result?.count ?? '0', 10);
 }

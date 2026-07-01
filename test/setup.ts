@@ -22,6 +22,12 @@ vi.stubGlobal('QUEUE', {
   },
 });
 
+vi.mock('cloudflare:workers', () => {
+  return {
+    WorkflowEntrypoint: class {},
+  };
+});
+
 function parseEnvValue(value: string) {
   let trimmed = value.trim();
   if (

@@ -85,12 +85,16 @@ dbDescribe('Review Flow Lifecycle', () => {
 
   async function runAndDrain(message: Parameters<typeof runReviewJob>[1]) {
     await runWithDb(env, async () => {
-      (env.REVIEW_QUEUE as any).sent.length = 0;
-      await runReviewJob(env, message);
-      const queue = env.REVIEW_QUEUE as any;
-      while (queue.sent.length > 0) {
-        const next = queue.sent.shift();
-        await runReviewJob(env, next);
+      let currentMessage: typeof message | null = message;
+      while (currentMessage) {
+        const result = await runReviewJob(env, currentMessage);
+        if (result.action === 'next_phase') {
+          currentMessage = { ...currentMessage, phase: result.phase };
+        } else if (result.action === 'retry') {
+          // just retry
+        } else {
+          currentMessage = null;
+        }
       }
     });
   }
@@ -386,14 +390,9 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'ack' });
+      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 60 });
       expect(reviewSpy).toHaveBeenCalled();
-      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(1);
-      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({
-        jobId: job.id,
-        phase: 'review',
-        options: { delaySeconds: 60 },
-      });
+      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
 
     const finalJob = await getJobForProcessing(env, job.id);
@@ -465,9 +464,9 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'ack' });
+      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: 0 });
       expect(maxActive).toBe(3);
-      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({ jobId: job.id, phase: 'finalize' });
+      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
 
     const reviews = await getFileReviewsForJobs(env, [job.id]);

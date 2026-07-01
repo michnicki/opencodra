@@ -10,7 +10,6 @@ import { createAuthApiRouter } from '@server/routes/api/auth';
 import { createJobsRouter } from '@server/routes/api/jobs';
 import { createReposRouter } from '@server/routes/api/repos';
 import { createStatsRouter } from '@server/routes/api/stats';
-import { createDlqRouter } from '@server/routes/api/dlq';
 import { createModelsRouter } from '@server/routes/api/models';
 
 async function serveIndex(c: Context<AppEnv>) {
@@ -34,7 +33,6 @@ export function createApp() {
   app.route('/api/jobs', createJobsRouter());
   app.route('/api/repos', createReposRouter());
   app.route('/api/stats', createStatsRouter());
-  app.route('/api/dlq', createDlqRouter());
   app.route('/api/models', createModelsRouter());
 
   app.get('/login', serveIndex);
