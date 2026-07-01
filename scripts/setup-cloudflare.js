@@ -305,19 +305,6 @@ async function main() {
 
   // 3. Queues
   console.log(chalk.cyan.bold('📨 Queues'));
-  const dlqSpinner = ora('Creating DLQ queue (codra-review-dlq)...').start();
-  try {
-    await execAsync('npx wrangler queues create codra-review-dlq');
-    dlqSpinner.succeed();
-  } catch (e) {
-    if (e.stderr && (e.stderr.includes('already taken') || e.stderr.includes('already exists'))) {
-      dlqSpinner.succeed('DLQ queue (codra-review-dlq) already exists.');
-    } else {
-      dlqSpinner.fail();
-      console.error(chalk.yellow('  ⚠️ ' + (e.stderr || e.message)));
-    }
-  }
-
   const jobsSpinner = ora('Creating jobs queue (codra-review-jobs)...').start();
   try {
     await execAsync('npx wrangler queues create codra-review-jobs');
@@ -331,21 +318,6 @@ async function main() {
     }
   }
 
-  let dlqQueueId = null;
-  const queuesOutputSpinner = ora('Fetching queue information...').start();
-  try {
-    const { stdout } = await execAsync('npx wrangler queues list');
-    queuesOutputSpinner.succeed();
-    const lines = stdout.split('\n');
-    for (const line of lines) {
-      if (line.includes('codra-review-dlq')) {
-        dlqQueueId = extractId(line);
-      }
-    }
-  } catch (e) {
-    queuesOutputSpinner.fail('Failed to fetch queues list.');
-    console.error(chalk.yellow('  ⚠️ Could not automatically fetch DLQ queue ID. You may need to manually update CF_DLQ_ID.'));
-  }
   console.log('');
 
   // 4. Hyperdrive
@@ -477,14 +449,6 @@ async function main() {
     wranglerConfig = wranglerConfig.replace(
       /"binding":\s*"HYPERDRIVE",\s*"id":\s*"[^"]+"/,
       `"binding": "HYPERDRIVE",${os.EOL}      "id": "${hyperdriveId}"`
-    );
-    configChanged = true;
-  }
-
-  if (dlqQueueId) {
-    wranglerConfig = wranglerConfig.replace(
-      /"CF_DLQ_ID":\s*"[^"]+"/,
-      `"CF_DLQ_ID": "${dlqQueueId}"`
     );
     configChanged = true;
   }

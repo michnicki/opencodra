@@ -1,6 +1,5 @@
 import type {
   AuthSessionResponse,
-  DlqResponse,
   JobDetailResponse,
   JobsResponse,
   ModelConfigsResponse,
@@ -187,21 +186,6 @@ export const api = {
   syncRepos() {
     return request<SyncReposResponse>('/api/repos/sync', {
       method: 'POST',
-    });
-  },
-  getDlqMessages(limit = 20) {
-    return request<DlqResponse>(`/api/dlq?limit=${limit}`);
-  },
-  replayDlqMessages(leaseIds: string[]) {
-    return request<{ replayedCount: number }>('/api/dlq/replay', {
-      method: 'POST',
-      body: JSON.stringify({ lease_ids: leaseIds }),
-    });
-  },
-  purgeDlqMessages(leaseIds: string[]) {
-    return request<{ purged: number }>('/api/dlq/purge', {
-      method: 'POST',
-      body: JSON.stringify({ lease_ids: leaseIds }),
     });
   },
   updateRepoConfig(owner: string, repo: string, config: RepoConfigPatch) {
