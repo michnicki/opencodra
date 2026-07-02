@@ -45,6 +45,15 @@ export default {
           });
           message.ack();
         } catch (error) {
+          if (error instanceof Error && error.message.includes('instance.already_exists')) {
+            logger.info('Workflow instance already exists; dropping duplicate queue message.', {
+              jobId: parseResult.data.jobId,
+              deliveryId: parseResult.data.deliveryId,
+            });
+            message.ack();
+            continue;
+          }
+
           logger.error('Failed to create workflow', error instanceof Error ? error : new Error(String(error)));
           if (message.attempts >= 3) {
             const id = parseResult.data.jobId ?? parseResult.data.deliveryId;

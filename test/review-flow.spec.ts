@@ -8,6 +8,14 @@ import { runWithDb } from '@server/db/client';
 
 const sha = (char: string) => char.repeat(40);
 
+vi.mock('@server/db/jobs', async (importOriginal) => {
+  const mod = await importOriginal<any>();
+  return {
+    ...mod,
+    getOtherRunningJobsCount: vi.fn().mockResolvedValue(0),
+  };
+});
+
 // Properly mock the services as real classes with prototype methods
 vi.mock('@server/services/github', () => {
     class MockGitHubService {
@@ -91,7 +99,9 @@ dbDescribe('Review Flow Lifecycle', () => {
         if (result.action === 'next_phase') {
           currentMessage = { ...currentMessage, phase: result.phase };
         } else if (result.action === 'retry') {
-          // just retry
+          // In test environments, if we get throttled or told to retry, just break to prevent infinite loops.
+          // Tests that expect a retry will assert on the direct return value instead of using runAndDrain.
+          break;
         } else {
           currentMessage = null;
         }

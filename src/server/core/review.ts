@@ -548,6 +548,14 @@ async function runReviewPhase(
     rejected.forEach((result, index) => {
       logger.error(`Review chunk task ${index + 1}/${rejected.length} failed`, result.reason);
     });
+    
+    // If any of the rejected tasks were transient model errors, we must throw a RetryableModelError
+    // so that the job orchestrator retries the chunk, instead of failing the job with an AggregateError.
+    const retryableError = rejected.map(r => r.reason).find(isRetryableModelError);
+    if (retryableError) {
+      throw retryableError;
+    }
+
     throw rejected.length === 1
       ? rejected[0].reason
       : new AggregateError(rejected.map((result) => result.reason), `${rejected.length} review chunk tasks failed`);
@@ -673,7 +681,9 @@ async function reviewAndPersistFile(
       errorMessage.toLowerCase().includes('allocation');
 
     if (isHardLimit) {
-      throw error;
+      logger.warn(`File review hit hard limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
+      // We don't throw here; we just fall through and let it be marked as failed
+      // so the PR review can continue and complete as a partial review.
     }
 
     await upsertFileReview(env, job.id, {
