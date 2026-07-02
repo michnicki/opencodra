@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { FileText } from 'lucide-react';
-import { cn } from '@client/lib/utils';
 import type { JobDetail } from '@shared/schema';
 import { reviewSeverities } from '@shared/schema';
+import { Tabs, TabsList, TabsTrigger } from '@client/components/motion/tabs';
 import { FileFinding } from './file-finding';
 import { CommentCard } from './comment-card';
 import { severityConfig } from './constants';
@@ -24,22 +24,16 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">View by</span>
-          <div className="flex rounded-md bg-secondary p-0.5 gap-0.5">
-            {(['files', 'severity'] as const).map((view) => (
-              <button
-                key={view}
-                onClick={() => setViewBy(view)}
-                className={cn(
-                  'rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition-all',
-                  viewBy === view
-                    ? 'bg-card text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                {view}
-              </button>
-            ))}
-          </div>
+          <Tabs value={viewBy} onValueChange={(v) => setViewBy(v as 'files' | 'severity')} variant="segment">
+            <TabsList className="bg-secondary">
+              <TabsTrigger value="files" className="text-xs">
+                Files
+              </TabsTrigger>
+              <TabsTrigger value="severity" className="text-xs">
+                Severity
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </div>
       </div>
 

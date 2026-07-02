@@ -97,8 +97,8 @@
     ]
   },
   "vars": {
-    "APP_URL": "https://app.codra.devarshi.dev",
-    "AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/github/callback",
+    "APP_URL": "http://localhost:8787",
+    "AUTH_CALLBACK_URL": "http://localhost:8787/auth/github/callback",
     "BOT_USERNAME": "codra-app",
     "GITHUB_APP_SLUG": "codra-app-personal",
     "DASHBOARD_ALLOWED_USERS": "devarshishimpi",
