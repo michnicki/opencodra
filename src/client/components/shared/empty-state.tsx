@@ -1,5 +1,6 @@
 import React from 'react';
 import { cn } from '@client/lib/utils';
+import { Button } from '@client/components/ui/button';
 
 interface EmptyStateProps {
   icon?: React.ReactNode;
@@ -55,34 +56,38 @@ export function EmptyState({ icon, title, description, hints, linkAction, action
       {linkAction && (
         <div className="mt-3">
           {linkAction.href ? (
-            <a
-              href={linkAction.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center rounded-md border border-border bg-card px-4 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-secondary hover:border-border/80"
-            >
-              {linkAction.label}
-            </a>
+            <Button asChild variant="outline" size="sm">
+              <a
+                href={linkAction.href}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {linkAction.label}
+              </a>
+            </Button>
           ) : (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={linkAction.onClick}
-              className="inline-flex items-center rounded-md border border-border bg-card px-4 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-secondary hover:border-border/80"
             >
               {linkAction.label}
-            </button>
+            </Button>
           )}
         </div>
       )}
 
       {action && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           onClick={action.onClick}
-          className="mt-2 inline-flex items-center rounded border border-border/60 bg-transparent px-4 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+          className="mt-2 text-muted-foreground hover:text-foreground"
         >
           {action.label}
-        </button>
+        </Button>
       )}
     </div>
   );
