@@ -702,43 +702,42 @@
 }
 
 .dashboard-sidebar :where(button[aria-label='Expand sidebar'], button[aria-label='Collapse sidebar'], button[aria-label='Toggle theme'], button[aria-label='Close menu']) {
-  background-color: oklch(0% 0 0);
-  color: oklch(100% 0 0);
+  background-color: oklch(0% 0 0) !important;
+  color: oklch(100% 0 0) !important;
 }
 
 .dark .dashboard-sidebar :where(button[aria-label='Expand sidebar'], button[aria-label='Collapse sidebar'], button[aria-label='Toggle theme'], button[aria-label='Close menu']) {
-  background-color: oklch(0% 0 0);
-  color: oklch(100% 0 0);
+  background-color: oklch(0% 0 0) !important;
+  color: oklch(100% 0 0) !important;
 }
 
 .dashboard-sidebar .dashboard-sidebar-username {
-  color: oklch(92% 0.004 286.32);
+  color: oklch(92% 0.004 286.32) !important;
 }
 
 .dark .dashboard-sidebar .dashboard-sidebar-username {
-  color: oklch(92% 0.004 286.32);
+  color: oklch(92% 0.004 286.32) !important;
 }
 
 .dashboard-sidebar-action {
   will-change: transform;
 }
 
-/* Sidebar actions */
-.dashboard-sidebar .dashboard-sidebar-action:hover,
-.dashboard-sidebar .dashboard-sidebar-action:focus-visible {
-  background-color: transparent;
-  transform: none;
+/* Collapsed sidebar only: SharedLayoutBg pill handles background */
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:hover,
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
 }
 
+/* Collapsed active button hovered: deep green */
 .dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:hover,
-.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:focus-visible,
-.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:hover,
-.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:focus-visible {
-  background-color: var(--primary);
+.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
-.dashboard-sidebar .dashboard-sidebar-action:active {
-  transform: none;
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:active {
+  transform: none !important;
 }
 
 .dashboard-sidebar-action-icon,
@@ -759,28 +758,46 @@
   transition-timing-function: var(--ease-out-quart);
 }
 
+/* Expanded sidebar: SharedLayoutBg pill is the sole hover affordance.
+   No transform, no background — the pill handles everything. */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
+}
+
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:active {
+  transform: none !important;
+}
+
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-label,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-label {
-  transform: none;
+  transform: none !important;
+}
+
+/* Active button hovered: show a slightly stronger lime tint instead of the zinc pill */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
 .dashboard-sidebar-tooltip:not(.dashboard-sidebar-action-label) {
-  display: none;
+  display: none !important;
 }
 
 @media (min-width: 1024px) {
 
   .dashboard-sidebar-collapsed .dashboard-sidebar-tooltip {
-    position: absolute;
-    left: calc(100% + 1rem);
-    top: 50%;
-    z-index: 60;
-    display: block;
-    width: max-content;
-    max-width: 11rem;
-    padding: 0.375rem 0.75rem;
+    position: absolute !important;
+    left: calc(100% + 1rem) !important;
+    top: 50% !important;
+    z-index: 60 !important;
+    display: block !important;
+    width: max-content !important;
+    max-width: 11rem !important;
+    padding: 0.375rem 0.75rem !important;
     border: 1px solid color-mix(in oklch, oklch(100% 0 0) 14%, transparent) !important;
     border-radius: 0.5rem !important;
     background: oklch(0% 0 0) !important;
