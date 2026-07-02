@@ -4,7 +4,24 @@ import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type Rep
 import type { AppBindings } from '@server/env';
 import { getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
 import { getResolvedModelConfig } from '@server/db/model-configs';
-import { claimJobLease, completeJob, completePreparationStep, failJob, findExistingJobForHead, getJobForProcessing, heartbeatJobLease, insertJob, mapJob, markJobCheckRunCompleted, markJobContinuationQueued, releaseJobLease, supersedeOlderJobs, updateJobCheckRun, updateJobStep } from '@server/db/jobs';
+import {
+  claimJobLease,
+  completeJob,
+  completePreparationStep,
+  failJob,
+  findExistingJobForHead,
+  getJobForProcessing,
+  getOtherRunningJobsCount,
+  heartbeatJobLease,
+  insertJob,
+  mapJob,
+  markJobCheckRunCompleted,
+  markJobContinuationQueued,
+  releaseJobLease,
+  supersedeOlderJobs,
+  updateJobCheckRun,
+  updateJobStep,
+} from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 
 import { GitHubService } from '../services/github';
@@ -14,13 +31,18 @@ import { FormatterService } from '../services/formatter';
 import { TokenTracker } from './token-tracker';
 import { loadRepoConfig } from './config';
 import { getWebhookDelivery } from '@server/db/webhook-deliveries';
+import { sendTelemetryEvent } from './telemetry';
 
 type PersistedReviewJob = ReturnType<typeof mapJob>;
 
-export type ReviewJobRunResult = { action: 'ack' } | { action: 'retry'; delaySeconds: number };
+export type ReviewJobRunResult = 
+  | { action: 'ack' } 
+  | { action: 'retry'; delaySeconds: number }
+  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number };
 
 const REVIEW_CHUNK_FILE_LIMIT = 3;
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
+const MAX_CONCURRENT_JOBS = 4;
 const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
@@ -191,6 +213,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     return { action: 'ack' };
   }
 
+  const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
+  if (runningCount >= MAX_CONCURRENT_JOBS) {
+    logger.info(`Throttling job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
+    return { action: 'retry', delaySeconds: 30 };
+  }
+
   const leaseOwner = crypto.randomUUID();
   const claim = await claimJobLease(env, resolved.job.id, leaseOwner, JOB_LEASE_SECONDS);
   if (claim.status === 'missing') {
@@ -232,6 +260,11 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       return { action: 'ack' };
     }
 
+    if (error instanceof NextPhaseError) {
+      await releaseJobLease(env, job.id, leaseOwner);
+      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds };
+    }
+
     if (isRetryableModelError(error)) {
       const delaySeconds = getRetryableModelFailureDelaySeconds(error);
       logger.warn(`Review job hit transient model/provider failure; scheduling delayed continuation: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
@@ -239,9 +272,9 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      await enqueueJobPhase(env, job.id, phase, delaySeconds);
+      await markJobContinuationQueued(env, job.id, delaySeconds);
       await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'ack' };
+      return { action: 'next_phase', phase, delaySeconds }; // Retry same phase
     }
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
@@ -515,6 +548,14 @@ async function runReviewPhase(
     rejected.forEach((result, index) => {
       logger.error(`Review chunk task ${index + 1}/${rejected.length} failed`, result.reason);
     });
+    
+    // If any of the rejected tasks were transient model errors, we must throw a RetryableModelError
+    // so that the job orchestrator retries the chunk, instead of failing the job with an AggregateError.
+    const retryableError = rejected.map(r => r.reason).find(isRetryableModelError);
+    if (retryableError) {
+      throw retryableError;
+    }
+
     throw rejected.length === 1
       ? rejected[0].reason
       : new AggregateError(rejected.map((result) => result.reason), `${rejected.length} review chunk tasks failed`);
@@ -640,7 +681,9 @@ async function reviewAndPersistFile(
       errorMessage.toLowerCase().includes('allocation');
 
     if (isHardLimit) {
-      throw error;
+      logger.warn(`File review hit hard limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
+      // We don't throw here; we just fall through and let it be marked as failed
+      // so the PR review can continue and complete as a partial review.
     }
 
     await upsertFileReview(env, job.id, {
@@ -694,6 +737,35 @@ async function runFinalizePhase(
 
   if (fileSummaries.length > 0 && fileSummaries.every((file) => file.verdict === 'failed')) {
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'failed', error: 'All files failed to review' });
+    
+    // Send anonymous telemetry for the failed job
+    const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
+    const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
+    const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
+    const fileExtensions = Array.from(new Set(files.map(f => {
+      const parts = f.path.split('.');
+      return parts.length > 1 ? parts.pop() || '' : '';
+    }).filter(Boolean)));
+    const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
+    
+    try {
+      await sendTelemetryEvent(env, {
+        linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+        findingsReported: 0,
+        inputTokens: fileInputTokens,
+        outputTokens: fileOutputTokens,
+        modelsUsed,
+        fileExtensions,
+        triggerType: job.trigger,
+        reviewDurationMs,
+        filesReviewed: files.length,
+        verdict: 'failed',
+        severityDistribution: {},
+      });
+    } catch (e) {
+      logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
+    }
+
     throw new Error('All files failed to review');
   }
 
@@ -762,6 +834,20 @@ async function runFinalizePhase(
 
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
+  
+  const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
+  const fileExtensions = Array.from(new Set(files.map(f => {
+    const parts = f.path.split('.');
+    return parts.length > 1 ? parts.pop() || '' : '';
+  }).filter(Boolean)));
+  const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
+
+  const severityDistribution: Record<string, number> = {};
+  for (const comment of finalComments) {
+    const sev = comment.severity || 'unknown';
+    severityDistribution[sev] = (severityDistribution[sev] || 0) + 1;
+  }
+
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed after repeated model/provider outages.`
     : null;
@@ -777,6 +863,25 @@ async function runFinalizePhase(
     errorMessage: partialErrorMessage,
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
+
+  // Send anonymous telemetry
+  try {
+    await sendTelemetryEvent(env, {
+      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+      findingsReported: finalComments.length,
+      inputTokens: fileInputTokens,
+      outputTokens: fileOutputTokens,
+      modelsUsed,
+      fileExtensions,
+      triggerType: job.trigger,
+      reviewDurationMs,
+      filesReviewed: files.length,
+      verdict: verdictSummary.verdict,
+      severityDistribution,
+    });
+  } catch (e) {
+    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
+  }
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
@@ -787,6 +892,12 @@ async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leas
   }
 }
 
+export class NextPhaseError extends Error {
+  constructor(public phase: 'prepare' | 'review' | 'finalize', public delaySeconds: number) {
+    super(`NextPhase: ${phase}`);
+  }
+}
+
 async function enqueueJobPhase(
   env: AppBindings,
   jobId: string,
@@ -794,14 +905,7 @@ async function enqueueJobPhase(
   delaySeconds = 0,
 ) {
   await markJobContinuationQueued(env, jobId, delaySeconds);
-  await env.REVIEW_QUEUE.send(
-    {
-      jobId,
-      deliveryId: crypto.randomUUID(),
-      phase,
-    },
-    delaySeconds > 0 ? { delaySeconds } : undefined,
-  );
+  throw new NextPhaseError(phase, delaySeconds);
 }
 
 function hasCompletedStep(job: PersistedReviewJob, stepName: string) {

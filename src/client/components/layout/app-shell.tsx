@@ -1,5 +1,6 @@
-import { NavLink, Outlet, Link } from 'react-router-dom';
-import { useEffect, useState, type CSSProperties } from 'react';
+import { NavLink, Outlet, Link, useMatch, useResolvedPath } from 'react-router-dom';
+import { useEffect, useState, type CSSProperties, type ComponentType } from 'react';
+import { SharedLayoutBg } from '@client/components/motion/shared-layout-bg';
 import { api } from '@client/lib/api';
 import {
   LayoutDashboard,
@@ -36,6 +37,81 @@ const links = [
   { to: '/settings', label: 'Settings', icon: Settings, end: false },
 ];
 
+/**
+ * A sidebar nav item that resolves active state via hooks instead of
+ * NavLink's render-prop pattern, so SharedLayoutBg's cloneElement receives
+ * plain JSX children rather than a function.
+ */
+function SidebarNavItem({
+  to,
+  end,
+  label,
+  icon: Icon,
+  onClick,
+}: {
+  to: string;
+  end: boolean;
+  label: string;
+  icon: ComponentType<{ size?: number; strokeWidth?: number }>;
+  onClick: () => void;
+}) {
+  const resolved = useResolvedPath(to);
+  const match = useMatch({ path: resolved.pathname, end });
+  const isActive = match !== null;
+
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      onClick={onClick}
+      className={cn(
+        'dashboard-sidebar-action',
+        'group flex h-[2.375rem] w-full items-center gap-3 rounded-lg px-3 text-sm font-medium',
+        'outline-none transition-[color,box-shadow] duration-200 ease-[var(--ease-out-quart)]',
+        'focus-visible:ring-2 focus-visible:ring-ring',
+        isActive ? 'bg-[oklch(79%_0.23_115/0.23)]' : '',
+      )}
+    >
+      {/* Active left bar */}
+      <span
+        className={cn(
+          'absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-[oklch(79%_0.23_115)]',
+          'z-20 transition-[height,opacity] duration-200',
+          isActive ? 'h-5 opacity-100' : 'h-0 opacity-0',
+        )}
+      />
+
+      {/* Active shine — white beam reads on both white & black sidebar */}
+      {isActive && (
+        <span
+          className="pointer-events-none absolute inset-0 z-0 overflow-hidden rounded-lg"
+          aria-hidden="true"
+        >
+          <span className="dashboard-sidebar-shine absolute inset-0 flex h-full w-full justify-center">
+            <span className="relative h-full w-8 bg-[oklch(79%_0.23_115/0.45)]" />
+          </span>
+        </span>
+      )}
+
+      {/* Icon */}
+      <span
+        className={cn(
+          'dashboard-sidebar-action-icon',
+          'relative z-10 flex h-[1.75rem] w-[1.75rem] shrink-0 items-center justify-center rounded-md',
+          'transition-colors duration-200',
+        )}
+      >
+        <Icon size={15} strokeWidth={isActive ? 2.6 : 2.15} />
+      </span>
+
+      {/* Label */}
+      <span className="dashboard-sidebar-action-label relative z-10 min-w-0 flex-1 truncate">
+        {label}
+      </span>
+    </NavLink>
+  );
+}
+
 const collapsedTooltipClass = [
   'lg:pointer-events-none lg:absolute lg:left-[calc(100%+1rem)]',
   'lg:z-50 lg:w-max lg:max-w-44 lg:rounded-lg',
@@ -46,6 +122,80 @@ const collapsedTooltipClass = [
   'lg:group-hover:opacity-100 lg:group-hover:translate-x-0',
   'lg:group-focus-visible:opacity-100 lg:group-focus-visible:translate-x-0',
 ];
+
+/**
+ * Collapsed (icon-only) sidebar nav item.
+ * Same fixed oklch color tokens as SidebarNavItem — no dark: variants.
+ */
+function CollapsedNavItem({
+  to,
+  end,
+  label,
+  icon: Icon,
+  onClick,
+}: {
+  to: string;
+  end: boolean;
+  label: string;
+  icon: ComponentType<{ size?: number; strokeWidth?: number }>;
+  onClick: () => void;
+}) {
+  const resolved = useResolvedPath(to);
+  const match = useMatch({ path: resolved.pathname, end });
+  const isActive = match !== null;
+
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      onClick={onClick}
+      className={cn(
+        'dashboard-sidebar-action',
+        'group relative flex h-[2.375rem] w-[2.375rem] items-center justify-center rounded-lg',
+        'outline-none transition-[color,box-shadow] duration-200 ease-[var(--ease-out-quart)]',
+        'focus-visible:ring-2 focus-visible:ring-ring',
+        isActive ? 'bg-[oklch(79%_0.23_115/0.23)]' : '',
+      )}
+    >
+      {/* Active left bar */}
+      <span
+        className={cn(
+          'absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-[oklch(79%_0.23_115)]',
+          'z-20 transition-[height,opacity] duration-200',
+          isActive ? 'h-5 opacity-100' : 'h-0 opacity-0',
+        )}
+      />
+
+      {/* Active shine — lime beam */}
+      {isActive && (
+        <span
+          className="pointer-events-none absolute inset-0 z-0 overflow-hidden rounded-lg"
+          aria-hidden="true"
+        >
+          <span className="dashboard-sidebar-shine absolute inset-0 flex h-full w-full justify-center">
+            <span className="relative h-full w-8 bg-[oklch(79%_0.23_115/0.45)]" />
+          </span>
+        </span>
+      )}
+
+      {/* Icon */}
+      <span
+        className={cn(
+          'dashboard-sidebar-action-icon',
+          'relative z-10 flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-md',
+          'transition-[color,transform] duration-200 ease-[var(--ease-out-quart)]',
+        )}
+      >
+        <Icon size={15} strokeWidth={isActive ? 2.6 : 2.15} />
+      </span>
+
+      {/* Hover tooltip */}
+      <span className={cn('dashboard-sidebar-action-label dashboard-sidebar-tooltip', collapsedTooltipClass)}>
+        {label}
+      </span>
+    </NavLink>
+  );
+}
 
 function getStoredSidebarCollapsed(): boolean {
   if (typeof window === 'undefined') return false;
@@ -218,79 +368,49 @@ export function AppShell() {
             </p>
           )}
 
-          <div className={cn('flex flex-col gap-1.5', sidebarCollapsed && 'lg:items-center')}>
-            {links.map(({ to, label, end, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={end}
-                onClick={() => setMobileMenuOpen(false)}
-                className={({ isActive }) => cn(
-                  'dashboard-sidebar-action',
-                  'group relative flex h-[2.375rem] items-center gap-3 rounded-lg text-sm font-medium',
-                  'outline-none transition-[background-color,color,box-shadow,transform] duration-200 ease-[var(--ease-out-quart)]',
-                  'hover:-translate-y-px active:translate-y-0',
-                  'focus-visible:ring-2 focus-visible:ring-ring',
-                  sidebarCollapsed ? 'lg:w-[2.375rem] lg:justify-center lg:px-0' : 'px-3',
-                  isActive
-                    ? [
-                      'text-black dark:text-white',
-                      'bg-[color-mix(in_oklch,var(--primary)_12%,transparent)]',
-                      'dark:bg-[color-mix(in_oklch,var(--primary)_18%,transparent)]',
-                    ]
-                    : 'text-black hover:bg-secondary/70 hover:text-black hover:shadow-[0_8px_18px_-14px_color-mix(in_oklch,var(--foreground)_35%,transparent)] dark:text-white dark:hover:text-white',
-                )}
-              >
-                {({ isActive }) => (
-                  <>
-                    {/* Active left bar */}
-                    <span className={cn(
-                      'absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-primary',
-                      'z-20 transition-[height,opacity] duration-200',
-                      isActive ? 'h-5 opacity-100' : 'h-0 opacity-0',
-                    )} />
-
-                    {isActive && (
-                      <span
-                        className="pointer-events-none absolute inset-0 z-0 overflow-hidden rounded-lg"
-                        aria-hidden="true"
-                      >
-                        <span className="dashboard-sidebar-shine absolute inset-0 flex h-full w-full justify-center">
-                          <span className="relative h-full w-8 bg-primary/35 dark:bg-primary/40" />
-                        </span>
-                      </span>
-                    )}
-
-                    {/* Icon wrapper */}
-                    <span className={cn(
-                      'dashboard-sidebar-action-icon',
-                      'relative z-10 flex h-[1.75rem] w-[1.75rem] shrink-0 items-center justify-center rounded-md',
-                      'transition-[color,transform] duration-200 ease-[var(--ease-out-quart)]',
-                      isActive
-                        ? 'text-black dark:text-white'
-                        : 'text-black group-hover:text-black dark:text-white dark:group-hover:text-white',
-                      sidebarCollapsed
-                        ? 'lg:h-[1.875rem] lg:w-[1.875rem] lg:group-hover:scale-110'
-                        : 'group-hover:translate-x-1',
-                    )}>
-                      <Icon size={15} strokeWidth={isActive ? 2.6 : 2.15} />
-                    </span>
-
-                    {/* Label / collapsed tooltip */}
-                    <span className={cn(
-                      'dashboard-sidebar-action-label dashboard-sidebar-tooltip',
-                      'relative z-10 min-w-0 flex-1 truncate transition-[color,transform] duration-200 ease-[var(--ease-out-quart)]',
-                      !sidebarCollapsed && 'group-hover:translate-x-1',
-                      sidebarCollapsed && collapsedTooltipClass,
-                      isActive && 'text-black dark:text-white lg:dark:text-white',
-                    )}>
-                      {label}
-                    </span>
-                  </>
-                )}
-              </NavLink>
-            ))}
-          </div>
+          {/* Collapsed: plain icon buttons stacked */}
+          {sidebarCollapsed ? (
+            <SharedLayoutBg
+              className="gap-2 lg:items-center"
+              pillClassName="bg-[oklch(60%_0.006_286/0.45)]"
+            >
+              {links.map(({ to, label, end, icon }) => (
+                <div key={to}>
+                  <CollapsedNavItem
+                    to={to}
+                    end={end}
+                    label={label}
+                    icon={icon}
+                    onClick={() => setMobileMenuOpen(false)}
+                  />
+                </div>
+              ))}
+            </SharedLayoutBg>
+          ) : (
+            /* Expanded: SharedLayoutBg provides the animated hover pill.
+               Uses SidebarNavItem (hook-based active state) instead of NavLink
+               render props — cloneElement can't wrap a render function as children. */
+            <SharedLayoutBg
+              className="gap-2"
+              pillClassName="bg-[oklch(60%_0.006_286/0.30)]"
+            >
+              {links.map(({ to, label, end, icon }) => (
+                /* Plain div is the direct child SharedLayoutBg clones — it injects
+                   the pill + z-10 wrapper into a real DOM element. SidebarNavItem
+                   (a custom component) ignores injected children so can't be the
+                   direct child. */
+                <div key={to}>
+                  <SidebarNavItem
+                    to={to}
+                    end={end}
+                    label={label}
+                    icon={icon}
+                    onClick={() => setMobileMenuOpen(false)}
+                  />
+                </div>
+              ))}
+            </SharedLayoutBg>
+          )}
         </nav>
 
         {/* Divider */}

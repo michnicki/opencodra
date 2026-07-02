@@ -29,8 +29,8 @@ interface JobsTableProps {
 }
 
 const DEFAULT_COLUMNS: Column[] = [
-  'repo',
   'pr',
+  'repo',
   'status',
   'verdict',
   'created',
@@ -38,7 +38,7 @@ const DEFAULT_COLUMNS: Column[] = [
 ];
 
 const thCls =
-  'px-4 py-3 text-left text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground select-none';
+  'px-4 py-3 text-left text-xs font-semibold text-muted-foreground/70 select-none';
 
 const COLUMN_CLASSES: Record<Column, string> = {
   repo: 'w-[190px] max-w-[190px]',
@@ -53,12 +53,12 @@ const COLUMN_CLASSES: Record<Column, string> = {
 
 const COLUMN_HEADERS: Record<Column, string> = {
   repo: 'Repository',
-  pr: 'Pull request',
+  pr: 'Title',
   status: 'Status',
   verdict: 'Verdict',
   files: 'Files',
   tokens: 'Tokens',
-  created: 'Created',
+  created: 'Last Updated',
   action: '',
 };
 
@@ -228,7 +228,7 @@ export function JobsTable({ jobs, loading, columns }: JobsTableProps) {
       <div className="hidden max-w-full overflow-x-auto sm:block">
         <table className={cn('w-full border-separate border-spacing-0 text-sm', tableMinWidth)}>
           <thead>
-            <tr className="bg-secondary/60">
+            <tr className="border-b border-border/60 bg-muted/30">
               {cols.map((col) => (
                 <th
                   key={col}

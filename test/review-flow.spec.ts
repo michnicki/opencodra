@@ -8,6 +8,14 @@ import { runWithDb } from '@server/db/client';
 
 const sha = (char: string) => char.repeat(40);
 
+vi.mock('@server/db/jobs', async (importOriginal) => {
+  const mod = await importOriginal<any>();
+  return {
+    ...mod,
+    getOtherRunningJobsCount: vi.fn().mockResolvedValue(0),
+  };
+});
+
 // Properly mock the services as real classes with prototype methods
 vi.mock('@server/services/github', () => {
     class MockGitHubService {
@@ -85,12 +93,23 @@ dbDescribe('Review Flow Lifecycle', () => {
 
   async function runAndDrain(message: Parameters<typeof runReviewJob>[1]) {
     await runWithDb(env, async () => {
-      (env.REVIEW_QUEUE as any).sent.length = 0;
-      await runReviewJob(env, message);
-      const queue = env.REVIEW_QUEUE as any;
-      while (queue.sent.length > 0) {
-        const next = queue.sent.shift();
-        await runReviewJob(env, next);
+      let currentMessage: typeof message | null = message;
+      let retries = 0;
+      const MAX_RETRIES = 5;
+      
+      while (currentMessage) {
+        const result = await runReviewJob(env, currentMessage);
+        if (result.action === 'next_phase') {
+          currentMessage = { ...currentMessage, phase: result.phase };
+          retries = 0;
+        } else if (result.action === 'retry') {
+          if (++retries > MAX_RETRIES) throw new Error('Max retries exceeded');
+          // In test environments, if we get throttled or told to retry, just break to prevent infinite loops.
+          // Tests that expect a retry will assert on the direct return value instead of using runAndDrain.
+          break;
+        } else {
+          currentMessage = null;
+        }
       }
     });
   }
@@ -386,14 +405,9 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'ack' });
+      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 60 });
       expect(reviewSpy).toHaveBeenCalled();
-      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(1);
-      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({
-        jobId: job.id,
-        phase: 'review',
-        options: { delaySeconds: 60 },
-      });
+      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
 
     const finalJob = await getJobForProcessing(env, job.id);
@@ -465,9 +479,9 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'ack' });
+      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: 0 });
       expect(maxActive).toBe(3);
-      expect((env.REVIEW_QUEUE as any).sent[0]).toMatchObject({ jobId: job.id, phase: 'finalize' });
+      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
 
     const reviews = await getFileReviewsForJobs(env, [job.id]);

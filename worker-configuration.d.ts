@@ -6,6 +6,7 @@ declare interface Env {
   AI: Ai;
   APP_KV: KVNamespace;
   REVIEW_QUEUE: Queue<any>;
+  REVIEW_WORKFLOW: Workflow;
   ASSETS: Fetcher;
   HYPERDRIVE: Hyperdrive;
   APP_PRIVATE_KEY: string;
