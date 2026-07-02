@@ -28,7 +28,9 @@ export async function recoverJobs(env: AppBindings) {
 }
 
 export async function completeTerminalCheckRuns(env: AppBindings) {
-  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env);
+  // Limit to 5 to avoid Cloudflare's 50 subrequest limit per invocation.
+  // Each job requires 1 GitHub API request and 1 DB update.
+  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env, 5);
   for (const job of jobs) {
     if (!job.check_run_id) continue;
 
