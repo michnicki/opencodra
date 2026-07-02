@@ -174,6 +174,7 @@ export const reviewJobMessageSchema = z.object({
 
 export const jobSummarySchema = z.object({
   id: z.string().uuid(),
+  workflowInstanceId: z.string().nullable().optional(),
   owner: z.string(),
   repo: z.string(),
   installationId: z.string(),

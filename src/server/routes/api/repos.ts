@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from '@server/env';
-import { getRepoConfigRecord, listRepoConfigs, upsertRepoConfig, syncRepoConfig, updateRepoConfigEnabled } from '@server/db/repo-configs';
+import { getRepoConfigRecord, listRepoConfigs, upsertRepoConfig, syncRepoConfig, updateRepoConfigEnabled, deleteStaleRepoConfigs } from '@server/db/repo-configs';
 import { jsonError } from '@server/core/http';
 import { GitHubClient, type GitHubRepository } from '@server/core/github';
 import { invalidateRepoConfigCache } from '@server/core/config';
@@ -83,9 +83,15 @@ export function createReposRouter() {
           },
         );
 
+        const installationSynced: string[] = [];
         for (const res of results) {
-          if (res) synced.push(res);
+          if (res) {
+            synced.push(res);
+            installationSynced.push(res);
+          }
         }
+        
+        await deleteStaleRepoConfigs(c.env, String(inst.id), installationSynced);
       }
 
       return c.json({ ok: true, synced });

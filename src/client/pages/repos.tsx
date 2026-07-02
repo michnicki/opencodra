@@ -481,8 +481,8 @@ export function ReposPage() {
 
   if (loading && repos.length === 0) {
     return (
-      <section className="page-enter flex flex-col gap-6">
-        <PageHeader category="Repositories" title="Repository settings" />
+      <section className="page-enter flex flex-col gap-5">
+        <PageHeader title="Repositories" />
         <div className="surface overflow-hidden">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="px-5 py-4 border-b border-border/50 last:border-0">
@@ -495,11 +495,9 @@ export function ReposPage() {
   }
 
   return (
-    <section className="page-enter flex flex-col gap-6">
+    <section className="page-enter flex flex-col gap-5">
       <PageHeader
-        category="Repositories"
-        title="Repository settings"
-        description={!loading && `${repos.length} ${repos.length === 1 ? 'repository' : 'repositories'} with Codra access`}
+        title="Repositories"
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -510,7 +508,7 @@ export function ReposPage() {
               className="gap-2"
             >
               <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
-              Sync
+              Sync Repositories
             </Button>
             <Button asChild size="sm" className="gap-2">
               <a
@@ -519,7 +517,7 @@ export function ReposPage() {
                 rel="noopener noreferrer"
               >
                 <ArrowUpRight size={13} />
-                Manage Access
+                Add Repositories
               </a>
             </Button>
           </div>
@@ -531,8 +529,16 @@ export function ReposPage() {
       {repos.length === 0 ? (
         <EmptyState
           icon={<GitBranch />}
-          title="No repositories connected"
-          description="Sync your GitHub App installation to import repositories."
+          title="No Repositories Added"
+          description="Add your repositories to get started with Codra"
+          hints={[
+            'Add repositories here to automatically enable PR analysis',
+            'You can enable/disable PR analysis for each repo from its settings',
+          ]}
+          linkAction={{
+            label: 'See how to interact with Codra',
+            href: 'https://github.com/devarshishimpi/codra#readme',
+          }}
         />
       ) : (
         <div className="flex min-w-0 flex-col gap-2.5">

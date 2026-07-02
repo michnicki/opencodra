@@ -50,7 +50,6 @@
     "consumers": [
       {
         "queue": "codra-review-jobs",
-        "dead_letter_queue": "codra-review-dlq",
         "max_batch_size": 1,
         "max_batch_timeout": 5,
         "max_concurrency": 1,
@@ -60,6 +59,13 @@
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "codra-review-workflow",
+      "binding": "REVIEW_WORKFLOW",
+      "class_name": "ReviewWorkflow"
+    }
+  ],
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
@@ -96,7 +102,6 @@
     "BOT_USERNAME": "codra-app",
     "GITHUB_APP_SLUG": "codra-app-personal",
     "DASHBOARD_ALLOWED_USERS": "devarshishimpi",
-    "ENVIRONMENT": "production",
-    "CF_DLQ_ID": "ed6f5472cbd146f49ce94d3004eddb0f"
+    "ENVIRONMENT": "production"
   }
 }

@@ -1,12 +1,16 @@
 import { createApp } from './app';
 import { runReviewJob } from './core/review';
+import { ReviewWorkflow } from './workflows/review';
 import type { AppBindings } from './env';
 import { reviewJobMessageSchema } from '@shared/schema';
 import { logger } from '@server/core/logger';
 import { runWithDb } from '@server/db/client';
+import { failJob } from '@server/db/jobs';
 import { runBestEffortJobMaintenance } from '@server/core/job-recovery';
 
 const app = createApp();
+
+export { ReviewWorkflow };
 
 export default {
   fetch(request: Request, env: AppBindings, ctx: ExecutionContext) {
@@ -25,24 +29,50 @@ export default {
         const parseResult = reviewJobMessageSchema.safeParse(message.body);
 
         if (!parseResult.success) {
-          logger.error('Invalid queue message schema; retrying so it can reach the DLQ', {
+          logger.error('Invalid queue message schema; dropping message', {
             body: message.body,
             error: parseResult.error.flatten(),
           });
-          message.retry();
+          message.ack(); // Drop invalid schema messages
           continue;
         }
 
         try {
-          const result = await runReviewJob(env, parseResult.data);
-          if (result.action === 'retry') {
-            message.retry({ delaySeconds: result.delaySeconds });
-          } else {
+          const id = parseResult.data.jobId ?? parseResult.data.deliveryId;
+          if (!id) {
+            logger.error('Message missing identifiers; dropping', { body: message.body });
             message.ack();
+            continue;
           }
+          await env.REVIEW_WORKFLOW.create({
+             id,
+             params: parseResult.data,
+          });
+          message.ack();
         } catch (error) {
-          logger.error('Queue message processing failed; retrying', error instanceof Error ? error : new Error(String(error)));
-          message.retry();
+          if (error instanceof Error && error.message.includes('instance.already_exists')) {
+            logger.info('Workflow instance already exists; dropping duplicate queue message.', {
+              jobId: parseResult.data.jobId,
+              deliveryId: parseResult.data.deliveryId,
+            });
+            message.ack();
+            continue;
+          }
+
+          logger.error('Failed to create workflow', error instanceof Error ? error : new Error(String(error)));
+          if (message.attempts >= 3) {
+            const id = parseResult.data.jobId ?? parseResult.data.deliveryId;
+            if (id) {
+              try {
+                await failJob(env, id, 'Failed to start Cloudflare Workflow after multiple attempts. The Cloudflare infrastructure might be experiencing an outage.');
+              } catch (failError) {
+                logger.error('Critical: Failed to mark job as failed in DB', failError instanceof Error ? failError : new Error(String(failError)));
+              }
+            }
+            message.ack();
+          } else {
+            message.retry();
+          }
         }
       }
 

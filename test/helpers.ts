@@ -56,6 +56,14 @@ export class MockQueue {
   }
 }
 
+export class MockWorkflow {
+  public readonly created: any[] = [];
+
+  async create(opts: any) {
+    this.created.push(opts);
+  }
+}
+
 function usableEnvValue(value: string | undefined) {
   return value && value !== 'undefined' && value !== 'null' ? value : null;
 }
@@ -89,6 +97,7 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     },
     APP_KV: new MemoryKV() as unknown as KVNamespace,
     REVIEW_QUEUE: new MockQueue() as any,
+    REVIEW_WORKFLOW: new MockWorkflow() as any,
     ASSETS: new MockAssets() as any,
     HYPERDRIVE: {
       connectionString: getTestDatabaseUrl(),

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
 
 @import "tailwindcss";
 
@@ -134,7 +134,7 @@
    Tailwind v4 theme tokens  (@theme inline = dynamic)
 ───────────────────────────────────────────────────── */
 @theme inline {
-  --font-sans: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
   --color-background:            var(--background);
@@ -723,19 +723,21 @@
   will-change: transform;
 }
 
-.dashboard-sidebar-action:hover,
-.dashboard-sidebar-action:focus-visible {
-  background-color: color-mix(in oklch, oklch(100% 0 0) 10%, transparent) !important;
-  transform: translate3d(0, -2px, 0) !important;
+/* Collapsed sidebar only: SharedLayoutBg pill handles background */
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:hover,
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
 }
 
-.dark .dashboard-sidebar-action:hover,
-.dark .dashboard-sidebar-action:focus-visible {
-  background-color: color-mix(in oklch, oklch(100% 0 0) 10%, transparent) !important;
+/* Collapsed active button hovered: deep green */
+.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:hover,
+.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
-.dashboard-sidebar-action:active {
-  transform: translate3d(0, 0, 0) !important;
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:active {
+  transform: none !important;
 }
 
 .dashboard-sidebar-action-icon,
@@ -756,11 +758,29 @@
   transition-timing-function: var(--ease-out-quart);
 }
 
+/* Expanded sidebar: SharedLayoutBg pill is the sole hover affordance.
+   No transform, no background — the pill handles everything. */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
+}
+
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:active {
+  transform: none !important;
+}
+
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-label,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-label {
-  transform: translate3d(4px, 0, 0) !important;
+  transform: none !important;
+}
+
+/* Active button hovered: show a slightly stronger lime tint instead of the zinc pill */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
 .dashboard-sidebar-tooltip:not(.dashboard-sidebar-action-label) {
@@ -768,10 +788,6 @@
 }
 
 @media (min-width: 1024px) {
-  .dashboard-sidebar-collapsed .dashboard-sidebar-action:hover .dashboard-sidebar-action-icon,
-  .dashboard-sidebar-collapsed .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-icon {
-    transform: scale(1.12) !important;
-  }
 
   .dashboard-sidebar-collapsed .dashboard-sidebar-tooltip {
     position: absolute !important;
