@@ -74,35 +74,40 @@ export function SharedLayoutBg({
             el,
             {
               key: childKey,
-              className: cn("relative", el.props.className),
-              onMouseEnter: () => setActiveId(childKey),
+              className: cn("relative z-10", el.props.className),
+              onMouseEnter: (e: any) => {
+                el.props.onMouseEnter?.(e);
+                setActiveId(childKey);
+              },
             },
             <>
-              <AnimatePresence custom={activeId !== null}>
-                {activeId !== null ? (
-                  <motion.div
-                    variants={reduce ? reducedVariants : variants}
-                    initial="initial"
-                    animate="animate"
-                    exit="exit"
-                    custom={activeId !== null}
-                    className="pointer-events-none absolute inset-0"
-                    style={{ left: -inset, right: -inset, top: 0, bottom: 0 }}
-                  >
-                    {activeId === childKey ? (
-                      <motion.div
-                        layoutId={`shared-bg-${uid}`}
-                        transition={reduce ? { duration: 0 } : SPRING_LAYOUT}
-                        className={cn(
-                          "pointer-events-none h-full w-full rounded-lg",
-                          pillClassName,
-                        )}
-                      />
-                    ) : null}
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-              <div className="relative z-10">{el.props.children}</div>
+              <div className="pointer-events-none absolute inset-0 z-0">
+                <AnimatePresence custom={activeId !== null}>
+                  {activeId !== null ? (
+                    <motion.div
+                      variants={reduce ? reducedVariants : variants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      custom={activeId !== null}
+                      className="absolute inset-0"
+                      style={{ left: -inset, right: -inset, top: 0, bottom: 0 }}
+                    >
+                      {activeId === childKey ? (
+                        <motion.div
+                          layoutId={`shared-bg-${uid}`}
+                          transition={reduce ? { duration: 0 } : SPRING_LAYOUT}
+                          className={cn(
+                            "pointer-events-none h-full w-full rounded-lg",
+                            pillClassName,
+                          )}
+                        />
+                      ) : null}
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+              {el}
             </>
           );
         })}

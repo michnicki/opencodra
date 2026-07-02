@@ -82,7 +82,9 @@ export function DashboardPage() {
         </div>
 
         <div className="surface min-w-0 overflow-hidden">
-          <JobsTable jobs={recentJobs} loading={loading} />
+          {(loading || recentJobs.length > 0) && (
+            <JobsTable jobs={recentJobs} loading={loading} />
+          )}
 
           {!loading && recentJobs.length === 0 && (
             <EmptyState

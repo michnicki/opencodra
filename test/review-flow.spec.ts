@@ -94,11 +94,16 @@ dbDescribe('Review Flow Lifecycle', () => {
   async function runAndDrain(message: Parameters<typeof runReviewJob>[1]) {
     await runWithDb(env, async () => {
       let currentMessage: typeof message | null = message;
+      let retries = 0;
+      const MAX_RETRIES = 5;
+      
       while (currentMessage) {
         const result = await runReviewJob(env, currentMessage);
         if (result.action === 'next_phase') {
           currentMessage = { ...currentMessage, phase: result.phase };
+          retries = 0;
         } else if (result.action === 'retry') {
+          if (++retries > MAX_RETRIES) throw new Error('Max retries exceeded');
           // In test environments, if we get throttled or told to retry, just break to prevent infinite loops.
           // Tests that expect a retry will assert on the direct return value instead of using runAndDrain.
           break;

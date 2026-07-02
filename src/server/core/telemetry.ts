@@ -8,12 +8,23 @@ const INSTANCE_ID_KEY = 'codra:instance_id';
  * Returns a stable, anonymous instance ID.
  * Generates and stores one in KV if it doesn't exist yet.
  */
+import { queryRows } from '@server/db/client';
+
 export async function getInstanceId(env: AppBindings): Promise<string> {
   try {
-    let instanceId = await env.APP_KV.get(INSTANCE_ID_KEY);
+    const rows = await queryRows<{ value: string }>(env, 'SELECT value FROM global_settings WHERE key = $1', [INSTANCE_ID_KEY]);
+    let instanceId = rows[0]?.value;
+
     if (!instanceId) {
       instanceId = crypto.randomUUID();
-      await env.APP_KV.put(INSTANCE_ID_KEY, instanceId);
+      await queryRows(
+        env, 
+        'INSERT INTO global_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', 
+        [INSTANCE_ID_KEY, instanceId]
+      );
+      // Fetch again in case another instance inserted it concurrently
+      const rowsAfter = await queryRows<{ value: string }>(env, 'SELECT value FROM global_settings WHERE key = $1', [INSTANCE_ID_KEY]);
+      instanceId = rowsAfter[0]?.value ?? instanceId;
     }
     return instanceId;
   } catch (error) {
@@ -21,7 +32,7 @@ export async function getInstanceId(env: AppBindings): Promise<string> {
       error: error instanceof Error ? error.message : String(error),
     });
     // Fallback to a random UUID so telemetry can still send, though it will
-    // count as a new "install" if KV is failing.
+    // count as a new "install" if the DB is failing.
     return crypto.randomUUID();
   }
 }

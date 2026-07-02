@@ -748,19 +748,23 @@ async function runFinalizePhase(
     }).filter(Boolean)));
     const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
     
-    await sendTelemetryEvent(env, {
-      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-      findingsReported: 0,
-      inputTokens: fileInputTokens,
-      outputTokens: fileOutputTokens,
-      modelsUsed,
-      fileExtensions,
-      triggerType: job.trigger,
-      reviewDurationMs,
-      filesReviewed: files.length,
-      verdict: 'failed',
-      severityDistribution: {},
-    });
+    try {
+      await sendTelemetryEvent(env, {
+        linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+        findingsReported: 0,
+        inputTokens: fileInputTokens,
+        outputTokens: fileOutputTokens,
+        modelsUsed,
+        fileExtensions,
+        triggerType: job.trigger,
+        reviewDurationMs,
+        filesReviewed: files.length,
+        verdict: 'failed',
+        severityDistribution: {},
+      });
+    } catch (e) {
+      logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
+    }
 
     throw new Error('All files failed to review');
   }
@@ -861,19 +865,23 @@ async function runFinalizePhase(
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
 
   // Send anonymous telemetry
-  await sendTelemetryEvent(env, {
-    linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-    findingsReported: finalComments.length,
-    inputTokens: fileInputTokens,
-    outputTokens: fileOutputTokens,
-    modelsUsed,
-    fileExtensions,
-    triggerType: job.trigger,
-    reviewDurationMs,
-    filesReviewed: files.length,
-    verdict: verdictSummary.verdict,
-    severityDistribution,
-  });
+  try {
+    await sendTelemetryEvent(env, {
+      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+      findingsReported: finalComments.length,
+      inputTokens: fileInputTokens,
+      outputTokens: fileOutputTokens,
+      modelsUsed,
+      fileExtensions,
+      triggerType: job.trigger,
+      reviewDurationMs,
+      filesReviewed: files.length,
+      verdict: verdictSummary.verdict,
+      severityDistribution,
+    });
+  } catch (e) {
+    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
+  }
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { api } from '@client/lib/api';
 import { JobsTable } from '@client/components/shared/jobs-table';
 import { EmptyState } from '@client/components/shared/empty-state';
@@ -24,7 +24,7 @@ export function JobsPage() {
 
   const [itemsPerPage, setItemsPerPage] = useState(10);
 
-  const load = async (isManual = false) => {
+  const load = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true);
     try {
       const jobsRes = await api.getJobs({
@@ -44,7 +44,7 @@ export function JobsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [filters, itemsPerPage]);
 
   usePolling(load, 15_000, [filters, itemsPerPage]);
 

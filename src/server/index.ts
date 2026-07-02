@@ -39,6 +39,11 @@ export default {
 
         try {
           const id = parseResult.data.jobId ?? parseResult.data.deliveryId;
+          if (!id) {
+            logger.error('Message missing identifiers; dropping', { body: message.body });
+            message.ack();
+            continue;
+          }
           await env.REVIEW_WORKFLOW.create({
              id,
              params: parseResult.data,
@@ -58,7 +63,11 @@ export default {
           if (message.attempts >= 3) {
             const id = parseResult.data.jobId ?? parseResult.data.deliveryId;
             if (id) {
-              await failJob(env, id, 'Failed to start Cloudflare Workflow after multiple attempts. The Cloudflare infrastructure might be experiencing an outage.');
+              try {
+                await failJob(env, id, 'Failed to start Cloudflare Workflow after multiple attempts. The Cloudflare infrastructure might be experiencing an outage.');
+              } catch (failError) {
+                logger.error('Critical: Failed to mark job as failed in DB', failError instanceof Error ? failError : new Error(String(failError)));
+              }
             }
             message.ack();
           } else {
