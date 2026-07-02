@@ -9,6 +9,8 @@ import { Skeleton } from '@client/components/shared/skeleton';
 import { Input } from '@client/components/ui/input';
 import { Select } from '@client/components/ui/select';
 import { Switch } from '@client/components/ui/switch';
+import { SteppedSlider } from '@client/components/motion/stepped-slider';
+import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
 import {
   Cpu,
   Save,
@@ -25,8 +27,10 @@ import {
   Tag,
   ExternalLink,
   GitCommit,
+  Gauge,
 } from 'lucide-react';
-import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig } from '@shared/schema';
+import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig, ReviewSettings } from '@shared/schema';
+import { REVIEW_CONCURRENCY_LIMITS, reviewMaxCommentsOptions, type ReviewConcurrencyLevel } from '@shared/schema';
 import type { ModelConfigsResponse } from '@shared/api';
 import {
   ModelRouteEditor,
@@ -56,6 +60,24 @@ const PROVIDER_PRESETS = [
 ];
 
 const FIXED_PROVIDER_NAMES = new Set(['OpenAI', 'OpenRouter', 'Anthropic', 'Google', 'Cloudflare']);
+
+const CONCURRENCY_LEVEL_ORDER: ReviewConcurrencyLevel[] = ['low', 'medium', 'high', 'max'];
+const CONCURRENCY_LEVEL_LABEL: Record<ReviewConcurrencyLevel, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  max: 'Max',
+};
+const CONCURRENCY_STEPS = CONCURRENCY_LEVEL_ORDER.map(level => ({
+  value: REVIEW_CONCURRENCY_LIMITS[level],
+  label: CONCURRENCY_LEVEL_LABEL[level],
+}));
+const CONCURRENCY_VALUE_TO_LEVEL: Record<number, ReviewConcurrencyLevel> = Object.fromEntries(
+  CONCURRENCY_LEVEL_ORDER.map(level => [REVIEW_CONCURRENCY_LIMITS[level], level]),
+) as Record<number, ReviewConcurrencyLevel>;
+const CONCURRENCY_MAX_VALUE = REVIEW_CONCURRENCY_LIMITS.max;
+const MAX_COMMENTS_STEPS = reviewMaxCommentsOptions.map(n => ({ value: n, label: String(n) }));
+const MAX_COMMENTS_CEILING = reviewMaxCommentsOptions[reviewMaxCommentsOptions.length - 1];
 
 type ProviderDraft = LlmProvider & { apiKey: string };
 type NewProviderDraft = {
@@ -221,9 +243,9 @@ function SectionCard({
 }
 
 /* ─── Field label ─────────────────────────────────────────────────────────── */
-function FieldLabel({ htmlFor, children }: { htmlFor: string; children: React.ReactNode }) {
+function FieldLabel({ htmlFor, id, children }: { htmlFor: string; id?: string; children: React.ReactNode }) {
   return (
-    <label htmlFor={htmlFor} className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+    <label htmlFor={htmlFor} id={id} className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
       {children}
     </label>
   );
@@ -247,6 +269,9 @@ export function SettingsPage() {
   const [savedConfigs, setSavedConfigs] = useState<ModelConfig[]>([]);
   const [globalConfig, setGlobalConfig] = useState<ModelRouteConfig | null>(null);
   const [savedGlobalConfig, setSavedGlobalConfig] = useState<ModelRouteConfig | null>(null);
+  const [reviewSettings, setReviewSettings] = useState<ReviewSettings | null>(null);
+  const [savedReviewSettings, setSavedReviewSettings] = useState<ReviewSettings | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{ field: 'concurrency' | 'comments'; value: number } | null>(null);
   const [newProvider, setNewProvider] = useState<NewProviderDraft>({
     preset: 'custom-openai',
     name: 'Custom OpenAI',
@@ -377,14 +402,17 @@ export function SettingsPage() {
 
   const loadConfigs = async () => {
     try {
-      const [modelsRes, globalRes] = await Promise.all([
+      const [modelsRes, globalRes, reviewSettingsRes] = await Promise.all([
         api.getModelConfigs(),
         api.getGlobalConfig(),
+        api.getReviewSettings(),
       ]);
       const nextGlobalConfig = normalizeGlobalConfig(globalRes.config);
       applyModelConfigResponse(modelsRes);
       setGlobalConfig(nextGlobalConfig);
       setSavedGlobalConfig(nextGlobalConfig);
+      setReviewSettings(reviewSettingsRes.settings);
+      setSavedReviewSettings(reviewSettingsRes.settings);
       return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to load settings';
@@ -422,6 +450,66 @@ export function SettingsPage() {
       toast.error('Could not save strategy', { id: tid, description: 'Your changes were not applied.' });
     } finally {
       setSaving(null);
+    }
+  };
+
+  const persistReviewSettings = async (next: ReviewSettings, summary: string) => {
+    setReviewSettings(next);
+    setSaving('review-settings');
+    setError(null);
+    const tid = toast.loading('Saving…');
+    try {
+      await api.updateReviewSettings(next);
+      setSavedReviewSettings(next);
+      toast.success(summary, { id: tid });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Update failed';
+      setReviewSettings(savedReviewSettings);
+      setError(msg);
+      toast.error('Could not save settings', { id: tid, description: msg });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleConcurrencyChange = (value: number) => {
+    if (!reviewSettings) return;
+    if (value === CONCURRENCY_MAX_VALUE && reviewSettings.concurrencyLevel !== 'max') {
+      setPendingConfirm({ field: 'concurrency', value });
+      return;
+    }
+    const level = CONCURRENCY_VALUE_TO_LEVEL[value];
+    void persistReviewSettings(
+      { ...reviewSettings, concurrencyLevel: level },
+      `Concurrency set to ${CONCURRENCY_LEVEL_LABEL[level]}`,
+    );
+  };
+
+  const handleCommentsChange = (value: number) => {
+    if (!reviewSettings) return;
+    if (value === MAX_COMMENTS_CEILING && reviewSettings.maxComments !== MAX_COMMENTS_CEILING) {
+      setPendingConfirm({ field: 'comments', value });
+      return;
+    }
+    void persistReviewSettings(
+      { ...reviewSettings, maxComments: value as ReviewSettings['maxComments'] },
+      `Comment limit set to ${value}`,
+    );
+  };
+
+  const applyPendingConfirm = () => {
+    if (!pendingConfirm || !reviewSettings) return;
+    if (pendingConfirm.field === 'concurrency') {
+      const level = CONCURRENCY_VALUE_TO_LEVEL[pendingConfirm.value];
+      void persistReviewSettings(
+        { ...reviewSettings, concurrencyLevel: level },
+        `Concurrency set to ${CONCURRENCY_LEVEL_LABEL[level]}`,
+      );
+    } else {
+      void persistReviewSettings(
+        { ...reviewSettings, maxComments: pendingConfirm.value as ReviewSettings['maxComments'] },
+        `Comment limit set to ${pendingConfirm.value}`,
+      );
     }
   };
 
@@ -689,6 +777,74 @@ export function SettingsPage() {
           </div>
         </Alert>
       )}
+
+      {/* ── Review performance ──────────────────────────────────────────────── */}
+      <SectionCard
+        icon={<Gauge size={16} />}
+        title="Review performance"
+        description="Concurrency and comment limits for automated reviews — changes save automatically"
+      >
+        <div className="grid grid-cols-1 gap-6 p-5 sm:grid-cols-2">
+          {!loading && reviewSettings ? (
+            <>
+              <div>
+                <FieldLabel htmlFor="concurrency-slider" id="concurrency-slider-label">Concurrent jobs & files</FieldLabel>
+                <SteppedSlider
+                  id="concurrency-slider"
+                  value={REVIEW_CONCURRENCY_LIMITS[reviewSettings.concurrencyLevel]}
+                  onValueChange={handleConcurrencyChange}
+                  min={1}
+                  max={CONCURRENCY_MAX_VALUE}
+                  step={1}
+                  steps={CONCURRENCY_STEPS}
+                  aria-labelledby="concurrency-slider-label"
+                  formatValue={(v) => `${CONCURRENCY_LEVEL_LABEL[CONCURRENCY_VALUE_TO_LEVEL[v]]} · ${v} job${v === 1 ? '' : 's'} · ${v} file${v === 1 ? '' : 's'} at a time`}
+                />
+                <p className="mt-2 text-xs text-muted-foreground">
+                  How many pull requests are reviewed at once, and how many files within each PR are reviewed at once.
+                </p>
+              </div>
+
+              <div>
+                <FieldLabel htmlFor="max-comments-slider" id="max-comments-slider-label">Comments per review</FieldLabel>
+                <SteppedSlider
+                  id="max-comments-slider"
+                  value={reviewSettings.maxComments}
+                  onValueChange={handleCommentsChange}
+                  min={5}
+                  max={MAX_COMMENTS_CEILING}
+                  step={5}
+                  steps={MAX_COMMENTS_STEPS}
+                  aria-labelledby="max-comments-slider-label"
+                  formatValue={(v) => `${v} comments`}
+                />
+                <p className="mt-2 text-xs text-muted-foreground">
+                  A hard ceiling on the number of comments posted per review, applied on top of any repo-specific limit.
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <Skeleton height={44} />
+              <Skeleton height={44} />
+            </>
+          )}
+        </div>
+      </SectionCard>
+
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        onOpenChange={(open) => { if (!open) setPendingConfirm(null); }}
+        title="This could exceed your rate limit"
+        description={
+          pendingConfirm?.field === 'concurrency'
+            ? 'Running the maximum number of concurrent jobs and files can exceed your model provider\'s rate limits. Continue anyway?'
+            : 'Posting the maximum number of comments per review can increase the chance of hitting your model provider\'s rate limits. Continue anyway?'
+        }
+        confirmLabel="Continue"
+        cancelLabel="Cancel"
+        onConfirm={applyPendingConfirm}
+      />
 
       {/* ── LLM Providers ──────────────────────────────────────────────────── */}
       <section className="surface min-w-0 overflow-hidden">

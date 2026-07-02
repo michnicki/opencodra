@@ -377,3 +377,20 @@ export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type StatsPayload = z.infer<typeof statsSchema>;
 
 export const defaultRepoConfig = repoConfigSchema.parse({});
+
+export const reviewConcurrencyLevels = ['low', 'medium', 'high', 'max'] as const;
+export type ReviewConcurrencyLevel = typeof reviewConcurrencyLevels[number];
+export const REVIEW_CONCURRENCY_LIMITS: Record<ReviewConcurrencyLevel, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+  max: 4,
+};
+
+export const reviewMaxCommentsOptions = [5, 10, 15, 20] as const;
+
+export const reviewSettingsSchema = z.object({
+  concurrencyLevel: z.enum(reviewConcurrencyLevels).default('medium'),
+  maxComments: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(20)]).default(10),
+});
+export type ReviewSettings = z.infer<typeof reviewSettingsSchema>;
