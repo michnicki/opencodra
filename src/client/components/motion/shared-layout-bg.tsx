@@ -66,7 +66,7 @@ export function SharedLayoutBg({
         .map((child, index) => {
           const el = child as ReactElement<{
             className?: string;
-            onMouseEnter?: () => void;
+            onMouseEnter?: (e?: any) => void;
             children?: ReactNode;
           }>;
           const childKey = el.key ? String(el.key) : `item-${index}`;
