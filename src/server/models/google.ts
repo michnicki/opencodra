@@ -74,6 +74,7 @@ export async function reviewWithGoogle(
           },
           body: JSON.stringify({
             systemInstruction: {
+              role: 'system',
               parts: [{ text: input.systemPrompt }],
             },
             contents: [
