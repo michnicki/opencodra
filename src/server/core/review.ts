@@ -32,17 +32,17 @@ import { TokenTracker } from './token-tracker';
 import { loadRepoConfig } from './config';
 import { getWebhookDelivery } from '@server/db/webhook-deliveries';
 import { sendTelemetryEvent } from './telemetry';
+import { getReviewSettings } from '@server/db/app-settings';
+import { REVIEW_CONCURRENCY_LIMITS } from '@shared/schema';
 
 type PersistedReviewJob = ReturnType<typeof mapJob>;
 
-export type ReviewJobRunResult = 
-  | { action: 'ack' } 
+export type ReviewJobRunResult =
+  | { action: 'ack' }
   | { action: 'retry'; delaySeconds: number }
   | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number };
 
-const REVIEW_CHUNK_FILE_LIMIT = 3;
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
-const MAX_CONCURRENT_JOBS = 4;
 const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
@@ -213,8 +213,10 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     return { action: 'ack' };
   }
 
+  const { concurrencyLevel } = await getReviewSettings(env);
+  const maxConcurrentJobs = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
   const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
-  if (runningCount >= MAX_CONCURRENT_JOBS) {
+  if (runningCount >= maxConcurrentJobs) {
     logger.info(`Throttling job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
     return { action: 'retry', delaySeconds: 30 };
   }
@@ -482,6 +484,8 @@ async function runReviewPhase(
   const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
   const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
+  const { concurrencyLevel } = await getReviewSettings(env);
+  const reviewChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
@@ -535,7 +539,7 @@ async function runReviewPhase(
     reviewTasks.push(reviewTask());
     processedThisChunk += 1;
 
-    if (processedThisChunk >= REVIEW_CHUNK_FILE_LIMIT || Date.now() - startedAt >= REVIEW_CHUNK_WALL_CLOCK_MS) {
+    if (processedThisChunk >= reviewChunkFileLimit || Date.now() - startedAt >= REVIEW_CHUNK_WALL_CLOCK_MS) {
       break;
     }
   }
@@ -773,13 +777,15 @@ async function runFinalizePhase(
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
   const severityRanks: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
   const minRank = severityRanks[config.review.min_severity] ?? 4;
-  
+  const { maxComments: globalMaxComments } = await getReviewSettings(env);
+  const effectiveMaxComments = Math.min(config.review.max_comments, globalMaxComments);
+
   let finalComments = reviewedComments.filter(c => (severityRanks[c.severity] ?? 4) <= minRank);
   finalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
-  
-  const omittedCount = reviewedComments.length - Math.min(finalComments.length, config.review.max_comments);
-  if (finalComments.length > config.review.max_comments) {
-    finalComments = finalComments.slice(0, config.review.max_comments);
+
+  const omittedCount = reviewedComments.length - Math.min(finalComments.length, effectiveMaxComments);
+  if (finalComments.length > effectiveMaxComments) {
+    finalComments = finalComments.slice(0, effectiveMaxComments);
   }
 
   const verdictSummary = formatter.summarizeVerdict(finalComments, hasFailures);
@@ -787,9 +793,9 @@ async function runFinalizePhase(
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
   let formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
-  
+
   if (omittedCount > 0) {
-    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${config.review.max_comments}). Showing the most critical issues.`;
+    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${effectiveMaxComments}). Showing the most critical issues.`;
   }
 
   await updateJobStep(env, job.id, 'Completing', { status: 'running' });

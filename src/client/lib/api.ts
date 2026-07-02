@@ -10,7 +10,7 @@ import type {
   SyncReposResponse,
   UpdatesEmailResponse,
 } from '@shared/api';
-import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig } from '@shared/schema';
+import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig, ReviewSettings } from '@shared/schema';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -242,6 +242,15 @@ export const api = {
     return request<{ ok: boolean }>('/api/models/global', {
       method: 'PATCH',
       body: JSON.stringify(config),
+    });
+  },
+  getReviewSettings() {
+    return request<{ settings: ReviewSettings }>('/api/settings');
+  },
+  updateReviewSettings(settings: ReviewSettings) {
+    return request<{ ok: boolean }>('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(settings),
     });
   },
 };

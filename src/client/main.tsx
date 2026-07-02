@@ -26,7 +26,6 @@ function ToasterWrapper() {
     <Toaster
       theme={isDark ? 'dark' : 'light'}
       position="bottom-right"
-      richColors
       closeButton
       gap={8}
       toastOptions={{
