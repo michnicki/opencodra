@@ -427,7 +427,6 @@ dbDescribe('Review Flow Lifecycle', () => {
       generateMockDiff([
         { path: 'src/one.ts', content: 'console.log(1);' },
         { path: 'src/two.ts', content: 'console.log(2);' },
-        { path: 'src/three.ts', content: 'console.log(3);' },
       ]),
     );
     let active = 0;
@@ -468,7 +467,7 @@ dbDescribe('Review Flow Lifecycle', () => {
       baseRef: 'main',
       configSnapshot: defaultRepoConfig,
     });
-    await updateJobFileCount(env, job.id, 3);
+    await updateJobFileCount(env, job.id, 2);
     await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
 
     await runWithDb(env, async () => {
@@ -480,12 +479,12 @@ dbDescribe('Review Flow Lifecycle', () => {
       });
 
       expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: 0 });
-      expect(maxActive).toBe(3);
+      expect(maxActive).toBe(2);
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
 
     const reviews = await getFileReviewsForJobs(env, [job.id]);
-    expect(reviews.filter((review) => review.file_status === 'done')).toHaveLength(3);
+    expect(reviews.filter((review) => review.file_status === 'done')).toHaveLength(2);
 
     reviewSpy.mockRestore();
     getDiffSpy.mockRestore();

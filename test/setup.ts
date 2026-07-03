@@ -103,6 +103,14 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
   });
 }
 
+if (typeof window !== 'undefined' && !window.ResizeObserver) {
+  window.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 const originalConsoleWarn = console.warn;
 console.warn = (...args: any[]) => {
   if (typeof args[0] === 'string' && args[0].includes('The width(-1) and height(-1) of chart should be greater than 0')) {

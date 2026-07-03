@@ -440,7 +440,7 @@ async function runPreparePhase(
   }
 
   const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
+  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -482,7 +482,7 @@ async function runReviewPhase(
     return failureModelProviderPromise;
   };
   const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
+  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
   const reviewChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
@@ -721,7 +721,7 @@ async function runFinalizePhase(
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
   const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
+  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
   const reviews = await getFileReviewsForJobs(env, [job.id]);
 
   if (reviews.length < files.length) {
