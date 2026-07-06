@@ -375,9 +375,7 @@ describe('Dashboard API Suite', () => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        rpm: -1,
-        tpm: Number.NaN,
-        rpd: 100,
+        providerId: 'not-a-uuid',
         provider: 'unknown',
       }),
     }, env);
@@ -491,7 +489,7 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as ModelConfigsResponse;
     const discoveredGoogleModel = data.configs.find(config => config.modelName === discoveredModelName);
-    expect(discoveredGoogleModel).toMatchObject({ rpm: null, rpd: null, tpm: null });
+    expect(discoveredGoogleModel).toMatchObject({ modelName: discoveredModelName, apiFormat: 'gemini' });
     expect(data.configs.some(config => config.providerName === 'Cloudflare' && config.modelName === '@cf/openai/gpt-oss-120b')).toBe(true);
     expect(data.syncErrors).toEqual([]);
   });

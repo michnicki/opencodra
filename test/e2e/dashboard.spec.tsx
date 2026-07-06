@@ -51,7 +51,12 @@ describe('Frontend UI Flows (JSDOM)', () => {
         trend: [],
         verdicts: [],
         models: [],
-        topRepos: []
+        topRepos: [],
+        statuses: [],
+        triggers: [],
+        severities: [],
+        categories: [],
+        performance: { avgDurationMs: null, p95DurationMs: null, avgConfidence: null },
       }
     });
 
