@@ -980,52 +980,9 @@
   background: oklch(28% 0.022 115) !important;
 }
 
-/* ── SUCCESS ─────────────────────────────────────── */
-.codra-toast-success {
-  color: oklch(28% 0.10 115) !important;
-}
-
-.dark .codra-toast-success {
-  color: oklch(90%  0.18 115) !important;
-}
-
-.codra-toast-success .codra-toast-description {
-  color: oklch(38% 0.10 115) !important;
-  opacity: 0.85 !important;
-}
-
-.dark .codra-toast-success .codra-toast-description {
-  color: oklch(72% 0.12 115) !important;
-  opacity: 0.9 !important;
-}
-
-/* ── ERROR ───────────────────────────────────────── */
-.codra-toast-error {
-  color: oklch(32%   0.14 25) !important;
-}
-
-.dark .codra-toast-error {
-  color: oklch(85%  0.08 25) !important;
-}
-
-.codra-toast-error .codra-toast-description {
-  color:   oklch(42% 0.12 25) !important;
-  opacity: 0.85 !important;
-}
-
-.dark .codra-toast-error .codra-toast-description {
-  color:   oklch(68% 0.10 25) !important;
-  opacity: 0.9 !important;
-}
-
-/* ── LOADING ─────────────────────────────────────── */
-.codra-toast-loading {
-  color: oklch(20% 0.020 115) !important;
-}
-
-.dark .codra-toast-loading {
-  color: oklch(88%  0.008 115) !important;
-}
+/* ── SUCCESS / ERROR / LOADING ─────────────────────
+   Use the default toast text color instead of a
+   status tint (icon color already conveys status). */
 
 /* spinner inherits accent color */
 .codra-toast-loader svg {

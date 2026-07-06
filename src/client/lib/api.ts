@@ -10,7 +10,7 @@ import type {
   SyncReposResponse,
   UpdatesEmailResponse,
 } from '@shared/api';
-import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig, ReviewSettings } from '@shared/schema';
+import type { LlmApiFormat, LlmProvider, RepoConfig, ReviewSettings } from '@shared/schema';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -23,7 +23,6 @@ function pathSegment(value: string) {
 }
 
 type QueryValue = string | number | boolean | null | undefined;
-export type ModelConfigPayload = Pick<ModelConfig, 'providerId' | 'modelName' | 'rpm' | 'tpm' | 'rpd'>;
 export type ProviderPayload = {
   name: string;
   apiFormat: LlmApiFormat;
@@ -202,17 +201,6 @@ export const api = {
       method: 'POST',
     });
   },
-  updateModelConfig(id: string, config: ModelConfigPayload) {
-    return request<{ ok: boolean; config: ModelConfig }>(`/api/models/${pathSegment(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(config),
-    });
-  },
-  deleteModelConfig(id: string) {
-    return request<{ ok: boolean }>(`/api/models/${pathSegment(id)}`, {
-      method: 'DELETE',
-    });
-  },
   createProvider(config: ProviderPayload) {
     return request<{ provider: LlmProvider }>('/api/models/providers', {
       method: 'POST',
@@ -228,11 +216,6 @@ export const api = {
   deleteProvider(id: string) {
     return request<{ ok: boolean }>(`/api/models/providers/${pathSegment(id)}`, {
       method: 'DELETE',
-    });
-  },
-  testModelConfig(id: string) {
-    return request<{ ok: boolean; modelUsed: string; provider: string; inputTokens: number; outputTokens: number }>(`/api/models/${pathSegment(id)}/test`, {
-      method: 'POST',
     });
   },
   getGlobalConfig() {

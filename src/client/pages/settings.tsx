@@ -12,23 +12,18 @@ import { Switch } from '@client/components/ui/switch';
 import { SteppedSlider } from '@client/components/motion/stepped-slider';
 import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
 import {
-  Cpu,
   Save,
   ShieldAlert,
   Layers,
   RefreshCw,
-  PlugZap,
   Plus,
   Trash2,
-  Search,
   ChevronDown,
   ChevronRight,
   X,
-  Tag,
   ExternalLink,
-  GitCommit,
-  Gauge,
 } from 'lucide-react';
+import { Badge } from '@client/components/ui/badge';
 import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig, ReviewSettings } from '@shared/schema';
 import { REVIEW_CONCURRENCY_LIMITS, reviewMaxCommentsOptions, type ReviewConcurrencyLevel } from '@shared/schema';
 import type { ModelConfigsResponse } from '@shared/api';
@@ -88,15 +83,6 @@ type NewProviderDraft = {
   apiKey: string;
   enabled: boolean;
 };
-type NewModelDraft = {
-  modelId: string;
-  providerId: string;
-  modelName: string;
-  rpm: number | null;
-  tpm: number | null;
-  rpd: number | null;
-};
-
 type SyncError = { providerId: string; providerName: string; error: string };
 
 type GlobalConfigInput = RepoConfig['model'] | Partial<ModelRouteConfig> | null | undefined;
@@ -133,38 +119,6 @@ function routeEqual(a: ModelRouteConfig | null, b: ModelRouteConfig | null) {
     stringArraysEqual(a.fallbacks ?? [], b.fallbacks ?? []) &&
     tiersEqual(a.size_overrides ?? [], b.size_overrides ?? [])
   );
-}
-
-function configEqual(a?: ModelConfig, b?: ModelConfig) {
-  return Boolean(
-    a && b &&
-    a.rpm === b.rpm &&
-    a.rpd === b.rpd &&
-    a.tpm === b.tpm &&
-    a.providerId === b.providerId &&
-    a.modelName === b.modelName,
-  );
-}
-
-function modelPayload(config: ModelConfig) {
-  return {
-    providerId: config.providerId,
-    modelName: config.modelName,
-    rpm: config.rpm,
-    rpd: config.rpd,
-    tpm: config.tpm,
-  };
-}
-
-function parseOptionalLimit(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
-}
-
-function formatOptionalLimit(value: number | null) {
-  return value === null ? 'Unset' : value.toLocaleString();
 }
 
 function providerToDraft(provider: LlmProvider): ProviderDraft {
@@ -226,7 +180,7 @@ function SectionCard({
       <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
         <div className="flex min-w-0 items-center gap-3">
           {icon && (
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
               {icon}
             </span>
           )}
@@ -260,8 +214,6 @@ function StatPill({ label }: { label: string }) {
   );
 }
 
-
-
 export function SettingsPage() {
   const [providers, setProviders] = useState<ProviderDraft[]>([]);
   const [savedProviders, setSavedProviders] = useState<LlmProvider[]>([]);
@@ -280,14 +232,6 @@ export function SettingsPage() {
     apiKey: '',
     enabled: true,
   });
-  const [newModel, setNewModel] = useState<NewModelDraft>({
-    modelId: '',
-    providerId: '',
-    modelName: '',
-    rpm: null,
-    tpm: null,
-    rpd: null,
-  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -296,10 +240,6 @@ export function SettingsPage() {
   const [catalogRefreshedOnce, setCatalogRefreshedOnce] = useState(false);
   const [addingProvider, setAddingProvider] = useState(false);
   const [expandedProviderId, setExpandedProviderId] = useState<string | null>(null);
-  const [modelSearch, setModelSearch] = useState('');
-  const [modelProviderFilter, setModelProviderFilter] = useState('all');
-  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
-  const [addingModel, setAddingModel] = useState(false);
 
   const providerOptions: ProviderOption[] = useMemo(
     () => providers.map(provider => ({ value: provider.id, label: provider.name })),
@@ -336,60 +276,50 @@ export function SettingsPage() {
     [globalConfig, savedGlobalConfig],
   );
 
-  const dirtyConfigs = useMemo(
-    () => configs.filter(cfg => !configEqual(cfg, savedConfigs.find(saved => saved.modelId === cfg.modelId))),
-    [configs, savedConfigs],
-  );
-
-  const modelProviderFilterOptions = useMemo(
-    () => [
-      { value: 'all', label: 'All providers' },
-      ...providerOptions,
-    ],
-    [providerOptions],
-  );
-
-  const filteredConfigs = useMemo(() => {
-    const query = modelSearch.trim().toLowerCase();
-    return configs.filter((config) => {
-      const matchesProvider = modelProviderFilter === 'all' || config.providerId === modelProviderFilter;
-      const matchesQuery = !query ||
-        config.modelId.toLowerCase().includes(query) ||
-        config.modelName.toLowerCase().includes(query) ||
-        config.providerName.toLowerCase().includes(query);
-      return matchesProvider && matchesQuery;
-    });
-  }, [configs, modelProviderFilter, modelSearch]);
-
   const applyModelConfigResponse = (modelsRes: ModelConfigsResponse) => {
     setProviders(modelsRes.providers.map(providerToDraft));
     setSavedProviders(modelsRes.providers);
     setConfigs(modelsRes.configs);
     setSavedConfigs(modelsRes.configs);
     setSyncErrors(modelsRes.syncErrors ?? []);
-    setNewModel(current => ({
-      ...current,
-      providerId: current.providerId || modelsRes.providers[0]?.id || '',
-    }));
   };
 
   const refreshModelCatalog = async ({ quiet = false }: { quiet?: boolean } = {}) => {
     if (catalogRefreshing) return;
     setCatalogRefreshing(true);
     setSyncErrors([]);
-    const tid = quiet ? null : toast.loading('Refreshing model catalog...');
+    const tid = quiet ? null : toast.loading('Syncing providers and models...');
     try {
+      let savedProviderCount = 0;
+      let failedProviderCount = 0;
+      if (!quiet) {
+        const dirtyProviders = providers.filter(
+          provider => providerDraftDirty(provider, savedProviders.find(saved => saved.id === provider.id)),
+        );
+        if (dirtyProviders.length > 0) {
+          const results = await Promise.all(dirtyProviders.map(provider => persistProvider(provider, { quiet: true })));
+          savedProviderCount = results.filter(Boolean).length;
+          failedProviderCount = results.length - savedProviderCount;
+        }
+      }
+
       const modelsRes = await api.refreshModelCatalog();
       applyModelConfigResponse(modelsRes);
       setCatalogRefreshedOnce(true);
+
       if (!quiet) {
-        const failed = modelsRes.syncErrors?.length ?? 0;
-        toast.success('Model catalog refreshed', {
-          id: tid ?? undefined,
-          description: failed > 0
-            ? `${failed} provider${failed === 1 ? '' : 's'} reported an error.`
-            : 'Provider model lists are now up to date.',
-        });
+        const failedCatalogs = modelsRes.syncErrors?.length ?? 0;
+        const parts: string[] = [];
+        if (savedProviderCount > 0) parts.push(`${savedProviderCount} provider${savedProviderCount === 1 ? '' : 's'} saved`);
+        if (failedProviderCount > 0) parts.push(`${failedProviderCount} provider${failedProviderCount === 1 ? '' : 's'} failed to save`);
+        if (failedCatalogs > 0) parts.push(`${failedCatalogs} provider${failedCatalogs === 1 ? '' : 's'} reported a catalog error`);
+
+        const description = parts.length > 0 ? parts.join(' · ') : 'Providers and model lists are up to date.';
+        if (failedProviderCount > 0 || failedCatalogs > 0) {
+          toast.error('Sync finished with issues', { id: tid ?? undefined, description });
+        } else {
+          toast.success('Sync complete', { id: tid ?? undefined, description });
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Catalog refresh failed';
@@ -432,14 +362,13 @@ export function SettingsPage() {
     return () => { mounted = false; };
   }, []);
 
-  const handleGlobalUpdate = async () => {
-    if (!globalConfig || !globalDirty) return;
+  const persistGlobalConfig = async (next: ModelRouteConfig) => {
     setSaving('global');
     setError(null);
     const tid = toast.loading('Saving model strategy...');
     try {
-      await api.updateGlobalConfig(globalConfig);
-      setSavedGlobalConfig(globalConfig);
+      await api.updateGlobalConfig(next);
+      setSavedGlobalConfig(next);
       toast.success('Global strategy saved', {
         id: tid,
         description: 'Repositories without a custom strategy will use these settings.',
@@ -452,6 +381,12 @@ export function SettingsPage() {
       setSaving(null);
     }
   };
+
+  useEffect(() => {
+    if (!globalConfig || !globalDirty) return;
+    const handle = setTimeout(() => void persistGlobalConfig(globalConfig), 600);
+    return () => clearTimeout(handle);
+  }, [globalConfig, globalDirty]);
 
   const persistReviewSettings = async (next: ReviewSettings, summary: string) => {
     setReviewSettings(next);
@@ -517,16 +452,18 @@ export function SettingsPage() {
     setProviders(current => current.map(provider => provider.id === id ? { ...provider, ...updates } : provider));
   };
 
-  const saveProvider = async (provider: ProviderDraft) => {
+  const persistProvider = async (provider: ProviderDraft, { quiet = false }: { quiet?: boolean } = {}) => {
     if (provider.enabled && !providerHasCredential(provider)) {
-      setExpandedProviderId(provider.id);
-      toast.error('Add an API key before enabling this provider.');
-      return;
+      if (!quiet) {
+        setExpandedProviderId(provider.id);
+        toast.error('Add an API key before enabling this provider.');
+      }
+      return null;
     }
 
     setSaving(`provider:${provider.id}`);
     setError(null);
-    const tid = toast.loading('Saving provider...');
+    const tid = quiet ? null : toast.loading('Saving provider...');
     try {
       const payload: ProviderPayload = {
         name: provider.name,
@@ -534,26 +471,28 @@ export function SettingsPage() {
         baseUrl: provider.baseUrl || null,
         enabled: provider.enabled,
       };
-      if (provider.apiKey !== undefined && providerDraftDirty(provider)) {
-        if (provider.apiKey.trim()) {
-          payload.apiKey = provider.apiKey.trim();
-        } else {
-          payload.clearApiKey = true;
-        }
+      if (provider.apiKey.trim()) {
+        payload.apiKey = provider.apiKey.trim();
       }
       const { provider: saved } = await api.updateProvider(provider.id, payload);
       setProviders(current => current.map(item => item.id === saved.id ? providerToDraft(saved) : item));
       setSavedProviders(current => current.map(item => item.id === saved.id ? saved : item));
-      toast.success('Provider saved', { id: tid });
-      if (saved.enabled && (saved.hasApiKey || saved.apiFormat === 'cloudflare-workers-ai')) {
-        void refreshModelCatalog({ quiet: true });
-      }
+      if (!quiet) toast.success('Provider saved', { id: tid ?? undefined });
+      return saved;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Provider update failed';
       setError(msg);
-      toast.error('Could not save provider', { id: tid, description: msg });
+      toast.error('Could not save provider', { id: tid ?? undefined, description: msg });
+      return null;
     } finally {
       setSaving(null);
+    }
+  };
+
+  const saveProvider = async (provider: ProviderDraft) => {
+    const saved = await persistProvider(provider);
+    if (saved && saved.enabled && (saved.hasApiKey || saved.apiFormat === 'cloudflare-workers-ai')) {
+      void refreshModelCatalog({ quiet: true });
     }
   };
 
@@ -580,7 +519,6 @@ export function SettingsPage() {
         apiKey: '',
         enabled: true,
       });
-      setNewModel(current => ({ ...current, providerId: current.providerId || provider.id }));
       setAddingProvider(false);
       toast.success('Provider created', { id: tid });
       if (provider.enabled && (provider.hasApiKey || provider.apiFormat === 'cloudflare-workers-ai')) {
@@ -611,138 +549,6 @@ export function SettingsPage() {
     } finally {
       setSaving(null);
     }
-  };
-
-  const markConfigSaved = (id: string, saved: ModelConfig) => {
-    setConfigs(current => current.map(cfg => (cfg.modelId === id ? saved : cfg)));
-    setSavedConfigs(current => current.map(cfg => (cfg.modelId === id ? saved : cfg)));
-  };
-
-  const handleUpdate = async (id: string) => {
-    const current = configs.find(c => c.modelId === id);
-    if (!current) return;
-    setSaving(id);
-    setError(null);
-    const tid = toast.loading('Updating model...');
-    try {
-      const { config } = await api.updateModelConfig(id, modelPayload(current));
-      markConfigSaved(id, config);
-      toast.success('Model updated', { id: tid, description: 'Provider mapping and limits have been saved.' });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Update failed';
-      setError(msg);
-      toast.error('Model update failed', { id: tid, description: msg });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const handleSaveAllModels = async () => {
-    if (dirtyConfigs.length === 0) return;
-    setSaving('models');
-    setError(null);
-    const tid = toast.loading(`Saving ${dirtyConfigs.length} model change${dirtyConfigs.length === 1 ? '' : 's'}...`);
-    try {
-      const results = await Promise.allSettled(dirtyConfigs.map(cfg => api.updateModelConfig(cfg.modelId, modelPayload(cfg))));
-      const saved = results
-        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof api.updateModelConfig>>> => result.status === 'fulfilled')
-        .map(result => result.value);
-      const failed = results.length - saved.length;
-
-      const savedById = new Map(saved.map(result => [result.config.modelId, result.config]));
-      setConfigs(current => current.map(cfg => savedById.get(cfg.modelId) ?? cfg));
-      setSavedConfigs(current => current.map(cfg => savedById.get(cfg.modelId) ?? cfg));
-
-      if (failed > 0) {
-        const msg = `${failed} model update${failed === 1 ? '' : 's'} failed. Saved ${saved.length}.`;
-        setError(msg);
-        toast.error('Some models were not saved', { id: tid, description: msg });
-      } else {
-        toast.success('Models saved', { id: tid });
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Update failed';
-      setError(msg);
-      toast.error('Could not save models', { id: tid, description: msg });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const createModel = async () => {
-    if (!newModel.modelId.trim() || !newModel.providerId || !newModel.modelName.trim()) return;
-    setSaving('model:new');
-    setError(null);
-    const tid = toast.loading('Creating model...');
-    try {
-      const { config } = await api.updateModelConfig(newModel.modelId.trim(), {
-        providerId: newModel.providerId,
-        modelName: newModel.modelName.trim(),
-        rpm: newModel.rpm,
-        tpm: newModel.tpm,
-        rpd: newModel.rpd,
-      });
-      setConfigs(current => [...current.filter(item => item.modelId !== config.modelId), config].sort((a, b) => a.modelId.localeCompare(b.modelId)));
-      setSavedConfigs(current => [...current.filter(item => item.modelId !== config.modelId), config].sort((a, b) => a.modelId.localeCompare(b.modelId)));
-      setNewModel(current => ({ ...current, modelId: '', modelName: '' }));
-      setAddingModel(false);
-      toast.success('Model created', { id: tid });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Model creation failed';
-      setError(msg);
-      toast.error('Could not create model', { id: tid, description: msg });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const deleteModel = async (id: string) => {
-    setSaving(id);
-    setError(null);
-    const tid = toast.loading('Deleting model...');
-    try {
-      await api.deleteModelConfig(id);
-      setConfigs(current => current.filter(config => config.modelId !== id));
-      setSavedConfigs(current => current.filter(config => config.modelId !== id));
-      toast.success('Model deleted', { id: tid });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Delete failed';
-      setError(msg);
-      toast.error('Could not delete model', { id: tid, description: msg });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const testModel = async (id: string) => {
-    setSaving(`test:${id}`);
-    setError(null);
-    const tid = toast.loading('Testing model connection...');
-    try {
-      const result = await api.testModelConfig(id);
-      toast.success('Connection works', {
-        id: tid,
-        description: `${result.provider} returned ${result.outputTokens} output tokens.`,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Connection failed';
-      setError(msg);
-      toast.error('Connection failed', { id: tid, description: msg });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const updateModel = (id: string, updates: Partial<ModelConfig>) => {
-    setConfigs(current =>
-      current.map(cfg =>
-        cfg.modelId === id ? { ...cfg, ...updates } : cfg,
-      ),
-    );
-  };
-
-  const updateQuota = (id: string, field: 'rpm' | 'rpd' | 'tpm', value: number | null) => {
-    updateModel(id, { [field]: value } as Partial<ModelConfig>);
   };
 
   const newProviderReady = newProvider.name.trim().length > 0 &&
@@ -780,9 +586,8 @@ export function SettingsPage() {
 
       {/* ── Review performance ──────────────────────────────────────────────── */}
       <SectionCard
-        icon={<Gauge size={16} />}
         title="Review performance"
-        description="Concurrency and comment limits for automated reviews — changes save automatically"
+        description="Concurrency and comment limits for automated reviews, changes save automatically"
       >
         <div className="grid grid-cols-1 gap-6 p-5 sm:grid-cols-2">
           {!loading && reviewSettings ? (
@@ -986,9 +791,8 @@ export function SettingsPage() {
               const savedProvider = savedProviders.find(saved => saved.id === provider.id);
               const dirty = providerDraftDirty(provider, savedProvider);
               const modelCount = providerModelCounts.get(provider.id) ?? 0;
-              const expanded = expandedProviderId === provider.id;
+              const configOpen = expandedProviderId === provider.id;
               const canEnableProvider = providerHasCredential(provider);
-              const ready = providerIsReady(provider);
               const providerNameId = domId('provider-name', provider.id);
               const providerBaseUrlId = domId('provider-base-url', provider.id);
               const providerApiKeyId = domId('provider-api-key', provider.id);
@@ -1054,16 +858,16 @@ export function SettingsPage() {
 
                       <button
                         type="button"
-                        onClick={() => setExpandedProviderId(expanded ? null : provider.id)}
-                        aria-label={expanded ? 'Collapse' : 'Configure'}
+                        onClick={() => setExpandedProviderId(configOpen ? null : provider.id)}
+                        aria-label={configOpen ? 'Collapse' : 'Configure'}
                         className={cn(
                           'ml-0.5 inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                          expanded
+                          configOpen
                             ? 'text-foreground'
                             : 'text-muted-foreground/60 hover:text-muted-foreground',
                         )}
                       >
-                        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                        {configOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                       </button>
 
                       {customProvider && (
@@ -1081,7 +885,7 @@ export function SettingsPage() {
                   </div>
 
                   {/* Expanded edit panel */}
-                  {expanded && (
+                  {configOpen && (
                     <div className="animate-slide-down border-t border-border/40 bg-muted/[0.04] px-4 py-5 sm:px-5">
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                         {customProvider && (
@@ -1137,6 +941,30 @@ export function SettingsPage() {
           </div>
         )}
 
+        {/* Global model strategy */}
+        <div className="border-t border-border/60">
+          <div className="px-4 py-4 sm:px-5">
+            <h3 className="text-sm font-semibold text-foreground">Default models</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">Used by repos that don't set their own model</p>
+          </div>
+          <div className="p-5 pt-0">
+            {!loading && globalConfig ? (
+              <ModelRouteEditor
+                value={globalConfig}
+                onChange={setGlobalConfig}
+                models={modelOptions}
+                providers={providerOptions}
+                density="comfortable"
+              />
+            ) : (
+              <div className="space-y-3">
+                <Skeleton height={20} />
+                <Skeleton height={20} width="70%" />
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Footer */}
         {!loading && (
           <div className="border-t border-border/30 px-4 py-2.5 sm:px-5">
@@ -1151,343 +979,57 @@ export function SettingsPage() {
         )}
       </section>
 
-      {/* ── Global model strategy ───────────────────────────────────────────── */}
+      {/* ── About ──────────────────────────────────────────────────────────── */}
       <SectionCard
-        title="Global model strategy"
-        description="Account-wide baseline route and file-size tiers"
-        action={
-          <Button
-            size="sm"
-            onClick={handleGlobalUpdate}
-            disabled={!globalDirty || saving !== null || !globalConfig}
-            className="h-8 gap-1.5 text-xs"
-          >
-            {saving === 'global' ? <RefreshCw size={12} className="animate-spin" /> : <Save size={12} />}
-            Save strategy
-          </Button>
-        }
-      >
-        <div className="p-5">
-          {!loading && globalConfig ? (
-            <ModelRouteEditor
-              value={globalConfig}
-              onChange={setGlobalConfig}
-              models={modelOptions}
-              providers={providerOptions}
-              density="comfortable"
-            />
-          ) : (
-            <div className="space-y-3">
-              <Skeleton height={20} />
-              <Skeleton height={20} width="70%" />
-            </div>
-          )}
-        </div>
-      </SectionCard>
-
-      {/* ── Models & Usage Limits ────────────────────────────────────────────── */}
-      <SectionCard
-        title="Models & usage limits"
-        description={`${configs.length} models · provider mappings and rate limits`}
-        action={
-          <div className="flex items-center gap-2">
-            {dirtyConfigs.length > 0 && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleSaveAllModels}
-                disabled={saving !== null}
-                className="h-8 gap-1.5 text-xs"
-              >
-                {saving === 'models' ? <RefreshCw size={12} className="animate-spin" /> : <Save size={12} />}
-                Save all ({dirtyConfigs.length})
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant={addingModel ? 'outline' : 'default'}
-              onClick={() => setAddingModel(v => !v)}
-              className="h-8 gap-1.5 text-xs"
-            >
-              {addingModel ? <X size={12} /> : <Plus size={12} />}
-              {addingModel ? 'Cancel' : 'Add model'}
-            </Button>
-          </div>
-        }
-      >
-        {/* Add model form */}
-        {addingModel && (
-          <div className="border-b border-border bg-muted/[0.03] p-5">
-            <p className="mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">New model</p>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              <div>
-                <FieldLabel htmlFor="new-model-id">Codra model ID</FieldLabel>
-                <Input
-                  id="new-model-id"
-                  placeholder="e.g. gemma-4-31b-it"
-                  value={newModel.modelId}
-                  onChange={e => setNewModel(current => ({ ...current, modelId: e.target.value }))}
-                />
-              </div>
-              <div>
-                <FieldLabel htmlFor="new-model-name">Provider model name</FieldLabel>
-                <Input
-                  id="new-model-name"
-                  placeholder="e.g. gemma-4-31b-it"
-                  value={newModel.modelName}
-                  onChange={e => setNewModel(current => ({ ...current, modelName: e.target.value }))}
-                />
-              </div>
-              <Select
-                label="Provider"
-                value={newModel.providerId}
-                onValueChange={providerId => setNewModel(current => ({ ...current, providerId }))}
-                options={providerOptions}
-                placeholder="Select provider"
-              />
-            </div>
-            <div className="mt-3 grid grid-cols-3 gap-3 sm:max-w-xs">
-              {(['rpm', 'rpd', 'tpm'] as const).map(field => (
-                <div key={field}>
-                  <FieldLabel htmlFor={`new-model-${field}`}>{field.toUpperCase()}</FieldLabel>
-                  <Input
-                    id={`new-model-${field}`}
-                    type="number"
-                    min={1}
-                    value={newModel[field] ?? ''}
-                    placeholder="None"
-                    onChange={e => setNewModel(current => ({ ...current, [field]: parseOptionalLimit(e.target.value) }))}
-                  />
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 flex justify-end">
-              <Button
-                size="sm"
-                onClick={createModel}
-                disabled={saving !== null || !newModel.modelId.trim() || !newModel.modelName.trim() || !newModel.providerId}
-                className="h-8 gap-1.5 text-xs"
-              >
-                {saving === 'model:new' ? <RefreshCw size={12} className="animate-spin" /> : <Plus size={12} />}
-                Create model
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Filters */}
-        <div className="flex flex-col gap-2 border-b border-border px-5 py-3 sm:flex-row sm:items-center">
-          <label className="relative min-w-0 flex-1">
-            <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
-            <Input
-              className="pl-8 text-sm"
-              placeholder="Search models…"
-              value={modelSearch}
-              onChange={e => setModelSearch(e.target.value)}
-            />
-          </label>
-          <div className="shrink-0 sm:w-44">
-            <Select
-              value={modelProviderFilter}
-              onValueChange={setModelProviderFilter}
-              options={modelProviderFilterOptions}
-            />
-          </div>
-          <p className="shrink-0 text-xs text-muted-foreground">
-            {filteredConfigs.length}/{configs.length}
-          </p>
-        </div>
-
-        {/* Model list */}
-        {loading ? (
-          <div className="space-y-0 divide-y divide-border/50">
-            {[1, 2, 3].map(i => (
-              <div key={i} className="px-5 py-4">
-                <Skeleton height={18} />
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="max-h-[520px] overflow-y-auto divide-y divide-border/50 scroll-smooth [scrollbar-width:thin]">
-            {filteredConfigs.map((cfg) => {
-              const saved = savedConfigs.find(item => item.modelId === cfg.modelId);
-              const dirty = !configEqual(cfg, saved);
-              const expanded = expandedModelId === cfg.modelId;
-              const providerModelNameId = domId('model-provider-name', cfg.modelId);
-
-              return (
-                <article
-                  key={cfg.modelId}
-                  className={cn(
-                    'min-w-0 transition-colors',
-                    dirty && 'bg-primary/[0.02]',
-                  )}
-                >
-                  {/* Row */}
-                  <div className="flex min-w-0 items-center gap-3 px-5 py-3">
-                    {/* Icon */}
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/50 text-muted-foreground">
-                      <Cpu size={12} />
-                    </span>
-
-                    {/* Model info */}
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-foreground">{cfg.modelId}</p>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <span className="rounded border border-border/60 bg-muted/30 px-1.5 py-0.5 font-medium">
-                          {cfg.providerName}
-                        </span>
-                        <span className="hidden sm:inline truncate opacity-70">{cfg.modelName}</span>
-                      </div>
-                    </div>
-
-                    {/* Rate limits — compact pills */}
-                    <div className="hidden items-center gap-1 xl:flex">
-                      {(['rpm', 'rpd', 'tpm'] as const).map(field => (
-                        <span key={field} className="rounded border border-border/50 bg-muted/20 px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
-                          {field.toUpperCase()} {formatOptionalLimit(cfg[field])}
-                        </span>
-                      ))}
-                    </div>
-
-                    {/* Actions */}
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={saving !== null}
-                        onClick={() => testModel(cfg.modelId)}
-                        className="h-7 gap-1 px-2 text-xs text-muted-foreground"
-                        aria-label="Test connection"
-                      >
-                        {saving === `test:${cfg.modelId}` ? <RefreshCw size={11} className="animate-spin" /> : <PlugZap size={11} />}
-                        <span className="hidden sm:inline">Test</span>
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setExpandedModelId(expanded ? null : cfg.modelId)}
-                        className="h-7 w-7 rounded p-0 text-muted-foreground"
-                        aria-label={expanded ? 'Collapse' : 'Edit'}
-                      >
-                        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={dirty ? 'default' : 'ghost'}
-                        disabled={!dirty || saving !== null}
-                        onClick={() => handleUpdate(cfg.modelId)}
-                        className="h-7 gap-1 px-2.5 text-xs"
-                      >
-                        {saving === cfg.modelId ? <RefreshCw size={11} className="animate-spin" /> : <Save size={11} />}
-                        <span className="hidden sm:inline">Apply</span>
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        aria-label="Delete model"
-                        disabled={saving !== null}
-                        onClick={() => deleteModel(cfg.modelId)}
-                        className="h-7 w-7 text-muted-foreground/40 hover:bg-danger/5 hover:text-danger"
-                      >
-                        <Trash2 size={12} />
-                      </Button>
-                    </div>
-                  </div>
-
-                  {/* Expanded edit panel */}
-                  {expanded && (
-                    <div className="border-t border-border/50 bg-muted/[0.03] px-5 py-4">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        <Select
-                          label="Provider"
-                          value={cfg.providerId}
-                          onValueChange={providerId => updateModel(cfg.modelId, { providerId })}
-                          options={providerOptions}
-                        />
-                        <div>
-                          <FieldLabel htmlFor={providerModelNameId}>Provider model name</FieldLabel>
-                          <Input
-                            id={providerModelNameId}
-                            value={cfg.modelName}
-                            onChange={e => updateModel(cfg.modelId, { modelName: e.target.value })}
-                          />
-                        </div>
-                        <div className="grid grid-cols-3 gap-2">
-                          {(['rpm', 'rpd', 'tpm'] as const).map(field => {
-                            const limitId = domId(`model-${field}`, cfg.modelId);
-                            return (
-                            <div key={field}>
-                              <FieldLabel htmlFor={limitId}>{field.toUpperCase()}</FieldLabel>
-                              <Input
-                                id={limitId}
-                                type="number"
-                                min={1}
-                                value={cfg[field] ?? ''}
-                                placeholder="None"
-                                onChange={e => updateQuota(cfg.modelId, field, parseOptionalLimit(e.target.value))}
-                              />
-                            </div>
-                          );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-
-            {filteredConfigs.length === 0 && (
-              <div className="px-5 py-10 text-center text-sm text-muted-foreground">
-                No models match the current filters.
-              </div>
-            )}
-          </div>
-        )}
-      </SectionCard>
-
-      {/* ── System Information ────────────────────────────────────────────── */}
-      <SectionCard
-        title="System"
-        description="Codra instance details and build information"
+        title="About"
+        description="Version, license, and links for this Codra instance"
       >
         <div className="divide-y divide-border/50">
 
           {/* Version row */}
-          <div className="flex items-center gap-4 px-5 py-4">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <Tag size={15} />
-            </span>
-            <div className="min-w-0 flex-1">
+          <div className="relative flex items-center gap-4 overflow-hidden px-5 py-4">
+            <div className="chart-card-inner opacity-60" />
+            <div className="relative z-10 min-w-0 flex-1">
               <p className="text-sm font-semibold text-foreground">Version</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">Installed Codra release</p>
             </div>
-            <code className="inline-flex items-center gap-1.5 rounded-lg border border-primary/25 bg-primary/8 px-3.5 py-1.5 text-sm font-bold tracking-tight text-primary">
+            <Badge variant="default" className="relative z-10 px-3 py-1 text-sm tracking-tight">
               v{pkg.version}
-            </code>
+            </Badge>
           </div>
 
-          {/* Changelog / links row */}
+          {/* License row */}
           <div className="flex items-center gap-4 px-5 py-4">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground">
-              <GitCommit size={15} />
-            </span>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-foreground">Releases</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">Browse all versions and release notes on GitHub</p>
+              <p className="text-sm font-semibold text-foreground">License</p>
             </div>
+            <Badge variant="outline">{pkg.license}</Badge>
+          </div>
+
+        </div>
+
+        {/* Links */}
+        <div className="grid grid-cols-1 divide-y divide-border/50 border-t border-border/50 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+          {[
+            { href: `${pkg.repository.url.replace(/\.git$/, '')}/releases/`, label: 'Releases', sub: 'Version history & notes' },
+            { href: pkg.homepage, label: 'Homepage', sub: 'codra.run' },
+            { href: pkg.bugs.url, label: 'Report an issue', sub: 'GitHub issue tracker' },
+          ].map(({ href, label, sub }) => (
             <a
-              href="https://github.com/devarshishimpi/codra/releases/"
+              key={label}
+              href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-transparent px-3.5 py-1.5 text-xs font-semibold text-muted-foreground transition-all duration-150 hover:border-primary/40 hover:bg-primary/5 hover:text-primary hover:shadow-[0_0_0_3px_color-mix(in_oklch,var(--primary)_10%,transparent)]"
+              className="group flex flex-col gap-2.5 px-5 py-4 transition-colors hover:bg-primary/[0.04] sm:px-6"
             >
-              View releases
-              <ExternalLink size={11} />
+              <span>
+                <span className="flex items-center gap-1.5 text-sm font-semibold text-foreground group-hover:text-primary">
+                  {label}
+                  <ExternalLink size={11} className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-hover:text-primary" />
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">{sub}</span>
+              </span>
             </a>
-          </div>
-
+          ))}
         </div>
       </SectionCard>
     </section>

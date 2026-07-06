@@ -7,7 +7,7 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
   const parsedDays = Number(days);
   const safeDays = Number.isFinite(parsedDays) ? Math.trunc(parsedDays) : 30;
   const clampedDays = Math.min(Math.max(safeDays, 1), 365);
-  const [[totals], dailyRows, verdictRows, topRepos, modelRows] = await Promise.all([
+  const [[totals], dailyRows, verdictRows, topRepos, modelRows, statusRows, triggerRows, severityRows, categoryRows, [performanceRow]] = await Promise.all([
     queryRows<{
       jobs: number;
       input_tokens: number;
@@ -61,6 +61,53 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
       `,
     ),
     getModelUsageStats(env),
+    queryRows<{ status: string; count: number }>(
+      env,
+      `
+        SELECT status, COUNT(*)::int AS count
+        FROM jobs
+        GROUP BY status
+        ORDER BY count DESC
+      `,
+    ),
+    queryRows<{ trigger: string; count: number }>(
+      env,
+      `
+        SELECT trigger, COUNT(*)::int AS count
+        FROM jobs
+        GROUP BY trigger
+        ORDER BY count DESC
+      `,
+    ),
+    queryRows<{ severity: string; count: number }>(
+      env,
+      `
+        SELECT severity, COUNT(*)::int AS count
+        FROM review_comments
+        GROUP BY severity
+        ORDER BY count DESC
+      `,
+    ),
+    queryRows<{ category: string; count: number }>(
+      env,
+      `
+        SELECT category, COUNT(*)::int AS count
+        FROM review_comments
+        GROUP BY category
+        ORDER BY count DESC
+      `,
+    ),
+    queryRows<{ avg_duration_ms: number | null; p95_duration_ms: number | null; avg_confidence: number | null }>(
+      env,
+      `
+        SELECT
+          AVG(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000) AS avg_duration_ms,
+          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000) AS p95_duration_ms,
+          AVG(overall_confidence_score) AS avg_confidence
+        FROM jobs
+        WHERE finished_at IS NOT NULL AND started_at IS NOT NULL
+      `,
+    ),
   ]);
 
   return statsSchema.parse({
@@ -86,5 +133,14 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
       outputTokens: row.output_tokens ?? 0,
     })),
     topRepos: topRepos.map((row) => ({ owner: row.owner, repo: row.repo, jobs: row.jobs })),
+    statuses: statusRows.map((row) => ({ status: row.status as any, count: row.count })),
+    triggers: triggerRows.map((row) => ({ trigger: row.trigger as any, count: row.count })),
+    severities: severityRows.map((row) => ({ severity: row.severity as any, count: row.count })),
+    categories: categoryRows.map((row) => ({ category: row.category as any, count: row.count })),
+    performance: {
+      avgDurationMs: performanceRow?.avg_duration_ms != null ? Math.round(performanceRow.avg_duration_ms) : null,
+      p95DurationMs: performanceRow?.p95_duration_ms != null ? Math.round(performanceRow.p95_duration_ms) : null,
+      avgConfidence: performanceRow?.avg_confidence ?? null,
+    },
   });
 }

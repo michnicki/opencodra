@@ -302,6 +302,35 @@ export const statsSchema = z.object({
       jobs: z.number().int(),
     }),
   ),
+  statuses: z.array(
+    z.object({
+      status: z.enum(jobStatuses),
+      count: z.number().int(),
+    }),
+  ),
+  triggers: z.array(
+    z.object({
+      trigger: z.enum(reviewTriggers),
+      count: z.number().int(),
+    }),
+  ),
+  severities: z.array(
+    z.object({
+      severity: z.enum(reviewSeverities),
+      count: z.number().int(),
+    }),
+  ),
+  categories: z.array(
+    z.object({
+      category: z.enum(reviewCategories),
+      count: z.number().int(),
+    }),
+  ),
+  performance: z.object({
+    avgDurationMs: z.number().nullable(),
+    p95DurationMs: z.number().nullable(),
+    avgConfidence: z.number().nullable(),
+  }),
 });
 
 export type ParsedReviewComment = z.infer<typeof parsedReviewCommentSchema>;
@@ -365,9 +394,6 @@ export const modelConfigSchema = z.object({
   providerName: z.string(),
   apiFormat: z.enum(llmApiFormats),
   modelName: z.string(),
-  rpm: z.number().int().nullable(),
-  tpm: z.number().int().nullable(),
-  rpd: z.number().int().nullable(),
   updatedAt: dateStringSchema,
 });
 
