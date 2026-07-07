@@ -9,7 +9,7 @@ const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524;
 }
 
 function defaultRetryDelayMs(attempt: number) {
