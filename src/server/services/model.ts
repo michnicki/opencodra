@@ -250,7 +250,23 @@ export class ModelService {
     let lastError: unknown;
     let lastTransientError: unknown;
     let sawTransientFailure = false;
-    for (const currentModel of modelsToTry) {
+    for (const [modelIndex, currentModel] of modelsToTry.entries()) {
+      // Always allow the first (primary) model a shot even if the shared job budget is
+      // already tight, so a file isn't punished for other files' earlier failures. But once
+      // we're into the fallback chain, each additional attempt costs more subrequests
+      // (config lookup + provider call, sometimes a provider-availability check too) that
+      // could tip this whole invocation over Cloudflare's per-invocation subrequest cap
+      // (Workers Free plan: 50). Defer the file for a later retry instead of gambling the
+      // rest of the invocation's budget on a low-probability extra fallback.
+      if (modelIndex > 0 && this.tracker?.isNearLimit()) {
+        logger.warn(`Skipping remaining fallback models for ${params.file.path}; subrequest budget for this invocation is nearly exhausted`, {
+          skippedModels: modelsToTry.slice(modelIndex),
+        });
+        sawTransientFailure = true;
+        lastTransientError = lastTransientError ?? lastError ?? new Error('Subrequest budget for this invocation was nearly exhausted before trying all configured fallback models');
+        break;
+      }
+
       let resolved: ResolvedModelConfig;
       try {
         resolved = await this.resolveModel(currentModel);

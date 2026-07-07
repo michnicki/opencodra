@@ -4,6 +4,7 @@ import { reviewWithCloudflare } from '@server/models/cloudflare';
 import { reviewWithGoogle } from '@server/models/google';
 import { createTestEnv, saveTestProviderApiKey } from './helpers';
 import { defaultRepoConfig } from '@shared/schema';
+import { TokenTracker } from '@server/core/token-tracker';
 
 describe('ModelService', () => {
   afterEach(() => {
@@ -291,6 +292,100 @@ describe('ModelService', () => {
     expect(String(fetchMock.mock.calls[2][0])).toContain('/models/gemma-4-26b-a4b-it:generateContent');
     expect(cloudflareCalls).toBe(0);
     expect(response.modelUsed).toBe('gemma-4-26b-a4b-it');
+  });
+
+  it('still tries the primary model even when the shared job budget is already near the subrequest limit', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    tracker.incrementSubrequests(30); // already past MAX_SUBREQUESTS (50) - SAFE_MARGIN (22)
+    const service = new ModelService(env, tracker);
+
+    const response = await service.reviewFile({
+      file: {
+        path: 'src/app.ts',
+        lineCount: 1,
+        hunks: [],
+        isDeleted: false,
+        isBinary: false,
+        isNew: false,
+        previousPath: null,
+      },
+      prTitle: 'Test',
+      prDescription: null,
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it'],
+          size_overrides: [],
+        },
+      },
+      totalLineCount: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+  });
+
+  it('skips remaining fallback models (instead of spending more of the shared budget) once near the subrequest limit', async () => {
+    // Google's client retries a 5xx once internally before giving up on a model, so the
+    // primary model alone can issue more than one raw fetch call; mockResolvedValue (not
+    // Once) keeps every call -- including that internal retry -- failing the same way.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 500, message: 'Internal error encountered.', status: 'INTERNAL' } }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    tracker.incrementSubrequests(30); // already past MAX_SUBREQUESTS (50) - SAFE_MARGIN (22)
+    const service = new ModelService(env, tracker);
+
+    await expect(
+      service.reviewFile({
+        file: {
+          path: 'src/app.ts',
+          lineCount: 1,
+          hunks: [],
+          isDeleted: false,
+          isBinary: false,
+          isNew: false,
+          previousPath: null,
+        },
+        prTitle: 'Test',
+        prDescription: null,
+        config: {
+          ...defaultRepoConfig,
+          model: {
+            main: 'gemma-4-31b-it',
+            fallbacks: ['gemma-4-26b-a4b-it'],
+            size_overrides: [],
+          },
+        },
+        totalLineCount: 1,
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+
+    // Only the primary model was attempted (possibly with its own internal retry); the
+    // fallback model was skipped rather than risking tipping the shared invocation over
+    // Cloudflare's subrequest cap. The file is deferred for a later retry (via the
+    // RetryableModelError) instead of being burned through here.
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/models/gemma-4-31b-it:generateContent');
+    }
   });
 
   it('marks exhausted transient provider failures as retryable for the queue', async () => {

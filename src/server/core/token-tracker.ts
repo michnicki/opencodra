@@ -33,6 +33,18 @@ export class TokenTracker {
   }
 
   /**
+   * How many more subrequests can safely be spent right now before crossing into the
+   * reserved safety margin below Cloudflare's hard per-invocation cap (Workers Free plan:
+   * 50 subrequests/invocation). Callers that can start a variable amount of concurrent work
+   * (e.g. how many files to review at once) should size that work against this number
+   * instead of a fixed constant, so throughput stays high while the budget is healthy and
+   * automatically shrinks as it's spent.
+   */
+  remainingSafeBudget() {
+    return Math.max(0, this.MAX_SUBREQUESTS - this.SAFE_MARGIN - this.subrequests);
+  }
+
+  /**
    * Records token usage for a specific model call.
    */
   record(model: string, input: number, output: number) {
