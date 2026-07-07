@@ -17,6 +17,12 @@ export default {
     return runWithDb(env, () => app.fetch(request, env, ctx));
   },
 
+  async scheduled(_controller: ScheduledController, env: AppBindings, _ctx: ExecutionContext) {
+    return runWithDb(env, async () => {
+      await runBestEffortJobMaintenance(env);
+    });
+  },
+
   async queue(batch: MessageBatch<unknown>, env: AppBindings, _ctx: ExecutionContext) {
     return runWithDb(env, async () => {
       try {

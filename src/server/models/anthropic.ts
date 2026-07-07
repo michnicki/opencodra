@@ -2,7 +2,7 @@ import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
-const ANTHROPIC_TIMEOUT_MS = 180_000;
+const ANTHROPIC_TIMEOUT_MS = 80_000;
 const ANTHROPIC_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 
