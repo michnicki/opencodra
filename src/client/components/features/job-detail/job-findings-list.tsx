@@ -53,6 +53,30 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
         </div>
       ) : (
         <div className="flex flex-col gap-4">
+          {job.files.some((f) => f.fileStatus === 'failed') && (
+            <div className="surface surface-static-shadow overflow-hidden">
+              {/* Group header */}
+              <div className="flex items-center gap-2.5 px-5 py-4 border-b border-border">
+                <FileText size={14} strokeWidth={1.75} className="text-danger" />
+                <span className="text-sm font-semibold text-foreground uppercase tracking-wide font-mono">
+                  Failed Files
+                </span>
+                <span
+                  className="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                  style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
+                >
+                  {job.files.filter((f) => f.fileStatus === 'failed').length}
+                </span>
+              </div>
+              {/* Failed files list */}
+              <div className="flex flex-col gap-3 p-5">
+                {job.files.filter((f) => f.fileStatus === 'failed').map((file) => (
+                  <FileFinding key={file.id} file={file} />
+                ))}
+              </div>
+            </div>
+          )}
+
           {reviewSeverities.map((groupName) => {
             const comments = job.files.flatMap((f) =>
               f.parsedComments

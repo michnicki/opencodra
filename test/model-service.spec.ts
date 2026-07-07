@@ -289,9 +289,9 @@ describe('ModelService', () => {
       // Prevent an unhandled-rejection warning while the timer is still pending.
       promise.catch(() => {});
 
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(45_000);
 
-      await expect(promise).rejects.toThrow('timed out after 60000ms');
+      await expect(promise).rejects.toThrow('timed out after 45000ms');
       // The underlying Workers-AI request was actually cancelled, not just abandoned.
       expect(capturedSignal?.aborted).toBe(true);
     } finally {

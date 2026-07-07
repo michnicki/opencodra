@@ -14,6 +14,7 @@ import { logger } from '../core/logger';
 import { normalizeModelId } from '@shared/schema';
 import { getResolvedModelConfig, type ResolvedModelConfig } from '@server/db/model-configs';
 import { decryptLlmApiKey } from '@server/core/llm-crypto';
+import { ModelCallGate, adaptiveModelTimeoutMs } from '../models/limits';
 
 const PROVIDER_UNAVAILABLE_TTL_SECONDS = 24 * 60 * 60;
 const COMPACT_REVIEW_PROMPT_LINE_CAP = 400;
@@ -95,6 +96,19 @@ export class ModelService {
   // their own.
   private readonly resolvedModelCache = new Map<string, Promise<ResolvedModelConfig | null>>();
 
+  // The Workers runtime allows only 6 simultaneous connections per invocation; anything beyond
+  // that is queued without starting. When several files review in parallel, un-gated model
+  // calls queue behind each other and burn their entire client timeout before the request is
+  // even dispatched (observed as a provider "timing out" at exactly the configured timeout on
+  // every attempt). Gate all outbound model calls for this invocation so a call's timeout only
+  // starts once it actually has a connection slot.
+  private readonly callGate = new ModelCallGate();
+
+  // Provider-unavailable markers live in KV and every read is a counted subrequest. The marker
+  // can't flip from set back to unset within one invocation, so cache lookups per instance
+  // (one instance == one invocation) instead of re-reading KV for every file in the chunk.
+  private readonly providerUnavailableCache = new Map<string, Promise<boolean>>();
+
   constructor(
     private env: AppBindings,
     private tracker?: TokenTracker,
@@ -105,25 +119,37 @@ export class ModelService {
     return this.options.jobId ? `jobs:${this.options.jobId}:provider-unavailable:${providerId}` : null;
   }
 
-  private async isProviderUnavailable(providerId: string) {
+  private isProviderUnavailable(providerId: string): Promise<boolean> {
     const key = this.providerUnavailableKey(providerId);
-    if (!key) return false;
+    if (!key) return Promise.resolve(false);
 
-    try {
-      return (await this.env.APP_KV.get(key)) !== null;
-    } catch (error) {
-      logger.warn(`Failed to read unavailable provider marker for ${providerId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return false;
+    let pending = this.providerUnavailableCache.get(providerId);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          this.tracker?.incrementSubrequests(1);
+          return (await this.env.APP_KV.get(key)) !== null;
+        } catch (error) {
+          logger.warn(`Failed to read unavailable provider marker for ${providerId}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return false;
+        }
+      })();
+      this.providerUnavailableCache.set(providerId, pending);
     }
+    return pending;
   }
 
   private async markProviderUnavailable(providerId: string, reason: string) {
     const key = this.providerUnavailableKey(providerId);
     if (!key) return;
 
+    // Keep the in-invocation cache consistent with what we just wrote.
+    this.providerUnavailableCache.set(providerId, Promise.resolve(true));
+
     try {
+      this.tracker?.incrementSubrequests(1);
       await this.env.APP_KV.put(
         key,
         JSON.stringify({
@@ -204,43 +230,59 @@ export class ModelService {
   private async callResolvedModel(
     config: ResolvedModelConfig,
     input: { systemPrompt: string; userPrompt: string },
+    timeoutMs?: number,
   ): Promise<ModelResponse> {
+    // Resolve credentials *before* taking a gate slot so slow KV/crypto work never occupies a
+    // model-call slot, then run the actual provider request under the gate. The provider's
+    // timeout only starts inside the gated call, so time spent waiting for a slot is free.
     if (config.apiFormat === 'cloudflare-workers-ai') {
-      return reviewWithCloudflare(this.env, config.modelName, input, this.tracker, config.providerName);
+      return this.callGate.run(() =>
+        reviewWithCloudflare(this.env, config.modelName, input, this.tracker, config.providerName, { timeoutMs }),
+      );
     }
 
     if (config.apiFormat === 'gemini') {
-      return reviewWithGoogle(
-        { apiKey: await this.decryptApiKey(config), baseUrl: config.baseUrl, providerName: config.providerName },
-        config.modelName,
-        input,
-        this.tracker,
+      const apiKey = await this.decryptApiKey(config);
+      return this.callGate.run(() =>
+        reviewWithGoogle(
+          { apiKey, baseUrl: config.baseUrl, providerName: config.providerName, timeoutMs },
+          config.modelName,
+          input,
+          this.tracker,
+        ),
       );
     }
 
     if (config.apiFormat === 'openai') {
-      return reviewWithOpenAI(
-        {
-          apiKey: await this.decryptApiKey(config),
-          baseUrl: config.baseUrl || 'https://api.openai.com/v1',
-          providerName: config.providerName,
-        },
-        config.modelName,
-        input,
-        this.tracker,
+      const apiKey = await this.decryptApiKey(config);
+      return this.callGate.run(() =>
+        reviewWithOpenAI(
+          {
+            apiKey,
+            baseUrl: config.baseUrl || 'https://api.openai.com/v1',
+            providerName: config.providerName,
+            timeoutMs,
+          },
+          config.modelName,
+          input,
+          this.tracker,
+        ),
       );
     }
 
-    return reviewWithAnthropic(
-      { apiKey: await this.decryptApiKey(config), baseUrl: config.baseUrl, providerName: config.providerName },
-      config.modelName,
-      input,
-      this.tracker,
+    const apiKey = await this.decryptApiKey(config);
+    return this.callGate.run(() =>
+      reviewWithAnthropic(
+        { apiKey, baseUrl: config.baseUrl, providerName: config.providerName, timeoutMs },
+        config.modelName,
+        input,
+        this.tracker,
+      ),
     );
   }
 
-  private async callModel(model: string, input: { systemPrompt: string; userPrompt: string }): Promise<ModelResponse> {
-    return this.callResolvedModel(await this.resolveModel(model), input);
+  private async callModel(model: string, input: { systemPrompt: string; userPrompt: string }, timeoutMs?: number): Promise<ModelResponse> {
+    return this.callResolvedModel(await this.resolveModel(model), input, timeoutMs);
   }
 
   async reviewFile(params: {
@@ -267,6 +309,10 @@ export class ModelService {
       config: params.config,
     });
     const modelsToTry = [primary, ...fallbacks];
+
+    // Size the per-call timeout to the diff the model actually sees (post-truncation): small
+    // files fail over to the next model fast; large diffs get a proportionally longer budget.
+    const timeoutMs = adaptiveModelTimeoutMs(reviewFile.lineCount);
 
     let lastError: unknown;
     let lastTransientError: unknown;
@@ -309,7 +355,7 @@ export class ModelService {
 
       while (attempts < maxAttempts) {
         try {
-          const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt });
+          const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt }, timeoutMs);
 
           if (this.tracker) {
             this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
@@ -398,7 +444,7 @@ export class ModelService {
         const response = await this.callResolvedModel(resolved, {
           systemPrompt: SUMMARY_SYSTEM_PROMPT,
           userPrompt: buildSummaryPrompt(params),
-        });
+        }, adaptiveModelTimeoutMs(0));
 
         if (this.tracker) {
           this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);

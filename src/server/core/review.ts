@@ -46,7 +46,16 @@ export type ReviewJobRunResult =
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
 const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
-const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
+// Backoff between deferred retries of a file that hit a transient model/provider failure.
+// Kept short at first: most observed failures are momentary provider load (Gemini 500/503
+// "high demand") or self-inflicted connection queuing, both of which clear within seconds,
+// so a long first delay just makes reviews grind. Later attempts back off harder in case the
+// provider really is having an outage.
+const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [30, 2 * 60, 5 * 60];
+// Subrequest-budget exhaustion is not a provider outage: the budget resets the moment a fresh
+// invocation starts, so the continuation only needs a token pause (the workflow already forces
+// a >=1s yield between phases), not a provider-style backoff.
+const SUBREQUEST_BUDGET_RETRY_DELAY_SECONDS = 5;
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
 // Belt-and-suspenders ceiling on how many times a job may reschedule the *same* phase without
 // completing a single file (see markJobContinuationQueued / resetJobContinuationCount). The
@@ -337,7 +346,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     // whole review. Finalize is intentionally excluded -- it posts the GitHub review and isn't
     // safe to re-run, and with no AI calls it does not realistically approach the cap anyway.
     if (phase !== 'finalize' && isSubrequestBudgetError(error)) {
-      const delaySeconds = getRetryableModelFailureDelaySeconds(error);
+      // Honor an explicit retryAfterSeconds if one was attached; otherwise resume almost
+      // immediately -- the fresh invocation is what fixes budget exhaustion, not waiting.
+      const record = error && typeof error === 'object' ? error as { retryAfterSeconds?: unknown } : null;
+      const delaySeconds = typeof record?.retryAfterSeconds === 'number'
+        ? record.retryAfterSeconds
+        : SUBREQUEST_BUDGET_RETRY_DELAY_SECONDS;
       logger.warn(`Review job hit the per-invocation subrequest limit; rescheduling ${phase} on a fresh budget: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
         error: messageText,
         phase,
@@ -766,7 +780,7 @@ async function reviewAndPersistFile(
         error: errorMessage,
       });
       Object.defineProperty(error, 'retryAfterSeconds', {
-        value: RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS[0],
+        value: SUBREQUEST_BUDGET_RETRY_DELAY_SECONDS,
         configurable: true,
       });
       throw error;

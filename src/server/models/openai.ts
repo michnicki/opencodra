@@ -63,12 +63,13 @@ function isValidPublicUrl(urlString: string) {
 }
 
 export async function reviewWithOpenAI(
-  config: { apiKey: string | null; baseUrl: string; providerName: string },
+  config: { apiKey: string | null; baseUrl: string; providerName: string; timeoutMs?: number },
   model: string,
   input: { systemPrompt: string; userPrompt: string },
   tracker?: { incrementSubrequests(count?: number): void },
 ): Promise<ModelResponse> {
   logger.info(`Calling OpenAI-format model: ${model}`);
+  const timeoutMs = config.timeoutMs ?? OPENAI_TIMEOUT_MS;
   
   if (!isValidPublicUrl(config.baseUrl)) {
     throw new ProviderRequestError(config.providerName, 400, 'Invalid provider base URL.');
@@ -77,7 +78,7 @@ export async function reviewWithOpenAI(
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
   if (tracker) tracker.incrementSubrequests(1);
-  const response = await withTimeout('OpenAI API', OPENAI_TIMEOUT_MS, (signal) =>
+  const response = await withTimeout('OpenAI API', timeoutMs, (signal) =>
     fetch(url, {
       method: 'POST',
       signal,
