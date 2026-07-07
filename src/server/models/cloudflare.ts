@@ -4,13 +4,14 @@ import { TimeoutError } from '@server/core/timeout';
 import { ProviderRequestError, type ModelResponse } from './types';
 
 /**
- * Max wall-clock time allowed for a single Workers-AI call. Kept well under the review
- * workflow's 15-minute step timeout: a model that hasn't answered a code-review prompt in
- * this long (reasoning models under strict-JSON decoding are the usual offenders -- they burn
- * the whole token budget "thinking" and never emit the JSON) is not going to, so we fail fast
- * and let the file defer to a fresh invocation instead of stalling the whole review.
+ * Default max wall-clock time allowed for a single Workers-AI call when the caller doesn't
+ * supply a diff-size-aware budget. Kept well under the review workflow's 15-minute step
+ * timeout: a model that hasn't answered a code-review prompt in this long (reasoning models
+ * under strict-JSON decoding are the usual offenders -- they burn the whole token budget
+ * "thinking" and never emit the JSON) is not going to, so we fail fast and let the file defer
+ * to a fresh invocation instead of stalling the whole review.
  */
-const CLOUDFLARE_TIMEOUT_MS = 60_000;
+const CLOUDFLARE_TIMEOUT_MS = 45_000;
 const CLOUDFLARE_MAX_RETRIES = 0;
 const CLOUDFLARE_MAX_OUTPUT_TOKENS = 8192;
 const REVIEW_RESPONSE_SCHEMA = {
@@ -167,8 +168,10 @@ export async function reviewWithCloudflare(
   input: { systemPrompt: string; userPrompt: string },
   tracker?: { incrementSubrequests(count?: number): void },
   providerName = 'Cloudflare',
+  options?: { timeoutMs?: number },
 ): Promise<ModelResponse> {
   const maxRetries = CLOUDFLARE_MAX_RETRIES;
+  const timeoutMs = options?.timeoutMs ?? CLOUDFLARE_TIMEOUT_MS;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -182,8 +185,8 @@ export async function reviewWithCloudflare(
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        reject(new TimeoutError(`Cloudflare (${model})`, CLOUDFLARE_TIMEOUT_MS));
-      }, CLOUDFLARE_TIMEOUT_MS);
+        reject(new TimeoutError(`Cloudflare (${model})`, timeoutMs));
+      }, timeoutMs);
     });
 
     try {

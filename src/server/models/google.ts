@@ -2,8 +2,9 @@ import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
-/** Max wall-clock time allowed for a single Google AI Studio call. */
-const GEMINI_TIMEOUT_MS = 80_000;
+/** Default max wall-clock time for a single Google AI Studio call when the caller doesn't
+ * supply a diff-size-aware budget. */
+const GEMINI_TIMEOUT_MS = 45_000;
 const GEMINI_MAX_RETRIES = 1;
 const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
@@ -65,11 +66,12 @@ function isValidPublicUrl(urlString: string) {
 }
 
 export async function reviewWithGoogle(
-  config: { apiKey: string; baseUrl?: string | null; providerName?: string },
+  config: { apiKey: string; baseUrl?: string | null; providerName?: string; timeoutMs?: number },
   model: string,
   input: { systemPrompt: string; userPrompt: string },
   tracker?: { incrementSubrequests(count?: number): void },
 ): Promise<ModelResponse> {
+  const timeoutMs = config.timeoutMs ?? GEMINI_TIMEOUT_MS;
   logger.info(`Calling Google model: ${model}`);
   
   if (config.baseUrl && !isValidPublicUrl(config.baseUrl)) {
@@ -93,7 +95,7 @@ export async function reviewWithGoogle(
     let response: Response;
     try {
       if (tracker) tracker.incrementSubrequests(1);
-      response = await withTimeout('Gemini API', GEMINI_TIMEOUT_MS, (signal) =>
+      response = await withTimeout('Gemini API', timeoutMs, (signal) =>
         fetch(url, {
           method: 'POST',
           signal,

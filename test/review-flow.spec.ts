@@ -405,7 +405,7 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 60 });
+      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 30 });
       expect(reviewSpy).toHaveBeenCalled();
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
