@@ -1,7 +1,12 @@
 import type { AppBindings } from '@server/env';
 import { queryRows } from './client';
-import { statsSchema } from '@shared/schema';
+import { statsSchema, jobStatuses, reviewTriggers, reviewSeverities, reviewCategories } from '@shared/schema';
 import { getModelUsageStats } from './file-reviews';
+
+const jobStatusSet = new Set<string>(jobStatuses);
+const reviewTriggerSet = new Set<string>(reviewTriggers);
+const reviewSeveritySet = new Set<string>(reviewSeverities);
+const reviewCategorySet = new Set<string>(reviewCategories);
 
 export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) {
   const parsedDays = Number(days);
@@ -133,10 +138,13 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
       outputTokens: row.output_tokens ?? 0,
     })),
     topRepos: topRepos.map((row) => ({ owner: row.owner, repo: row.repo, jobs: row.jobs })),
-    statuses: statusRows.map((row) => ({ status: row.status as any, count: row.count })),
-    triggers: triggerRows.map((row) => ({ trigger: row.trigger as any, count: row.count })),
-    severities: severityRows.map((row) => ({ severity: row.severity as any, count: row.count })),
-    categories: categoryRows.map((row) => ({ category: row.category as any, count: row.count })),
+    // Drop any rows whose enum-typed column holds an unexpected value (e.g. legacy
+    // rows back-migrated from JSON, where severity/category have no DB CHECK
+    // constraint). Keeping them would fail statsSchema.parse and 500 the endpoint.
+    statuses: statusRows.filter((row) => jobStatusSet.has(row.status)).map((row) => ({ status: row.status as (typeof jobStatuses)[number], count: row.count })),
+    triggers: triggerRows.filter((row) => reviewTriggerSet.has(row.trigger)).map((row) => ({ trigger: row.trigger as (typeof reviewTriggers)[number], count: row.count })),
+    severities: severityRows.filter((row) => reviewSeveritySet.has(row.severity)).map((row) => ({ severity: row.severity as (typeof reviewSeverities)[number], count: row.count })),
+    categories: categoryRows.filter((row) => reviewCategorySet.has(row.category)).map((row) => ({ category: row.category as (typeof reviewCategories)[number], count: row.count })),
     performance: {
       avgDurationMs: performanceRow?.avg_duration_ms != null ? Math.round(performanceRow.avg_duration_ms) : null,
       p95DurationMs: performanceRow?.p95_duration_ms != null ? Math.round(performanceRow.p95_duration_ms) : null,

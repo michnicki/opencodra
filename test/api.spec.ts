@@ -155,6 +155,61 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(404);
   });
 
+  it('preserves omitted review settings when patching a single setting', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const headers = {
+      Cookie: `codra_session=${token}`,
+      'x-requested-with': 'XMLHttpRequest',
+      'content-type': 'application/json',
+    };
+
+    try {
+      const seed = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'low', maxComments: 5 }),
+      }, env);
+      expect(seed.status).toBe(200);
+
+      const commentsOnly = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ maxComments: 20 }),
+      }, env);
+      expect(commentsOnly.status).toBe(200);
+
+      const afterCommentsOnly = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(afterCommentsOnly.status).toBe(200);
+      await expect(afterCommentsOnly.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'low', maxComments: 20 },
+      });
+
+      const concurrencyOnly = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'high' }),
+      }, env);
+      expect(concurrencyOnly.status).toBe(200);
+
+      const afterConcurrencyOnly = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(afterConcurrencyOnly.status).toBe(200);
+      await expect(afterConcurrencyOnly.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'high', maxComments: 20 },
+      });
+    } finally {
+      await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'medium', maxComments: 10 }),
+      }, env);
+    }
+  });
+
   it('rejects logout without the CSRF header', async () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);

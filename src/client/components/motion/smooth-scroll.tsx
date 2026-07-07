@@ -219,6 +219,12 @@ export function SmoothScroll({
           smoothWheel: true,
           syncTouch: touch,
           easing: EASE_SCROLL,
+          // Let native scrolling take over when the wheel/touch gesture lands on
+          // a nested scrollable element (log panes, drawers, long option lists)
+          // that can still scroll in that direction. Without this, Lenis
+          // preventDefault()s every wheel event and scrolls the page instead.
+          // Escape hatch for edge cases: add `data-lenis-prevent` on the element.
+          allowNestedScroll: true,
         }}
       >
         <LenisBridge

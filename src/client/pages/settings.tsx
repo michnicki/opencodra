@@ -452,8 +452,11 @@ export function SettingsPage() {
     setProviders(current => current.map(provider => provider.id === id ? { ...provider, ...updates } : provider));
   };
 
-  const persistProvider = async (provider: ProviderDraft, { quiet = false }: { quiet?: boolean } = {}) => {
-    if (provider.enabled && !providerHasCredential(provider)) {
+  const persistProvider = async (
+    provider: ProviderDraft,
+    { quiet = false, clearApiKey = false }: { quiet?: boolean; clearApiKey?: boolean } = {},
+  ) => {
+    if (provider.enabled && !clearApiKey && !providerHasCredential(provider)) {
       if (!quiet) {
         setExpandedProviderId(provider.id);
         toast.error('Add an API key before enabling this provider.');
@@ -471,7 +474,9 @@ export function SettingsPage() {
         baseUrl: provider.baseUrl || null,
         enabled: provider.enabled,
       };
-      if (provider.apiKey.trim()) {
+      if (clearApiKey) {
+        payload.clearApiKey = true;
+      } else if (provider.apiKey.trim()) {
         payload.apiKey = provider.apiKey.trim();
       }
       const { provider: saved } = await api.updateProvider(provider.id, payload);
@@ -494,6 +499,12 @@ export function SettingsPage() {
     if (saved && saved.enabled && (saved.hasApiKey || saved.apiFormat === 'cloudflare-workers-ai')) {
       void refreshModelCatalog({ quiet: true });
     }
+  };
+
+  const clearProviderKey = async (provider: ProviderDraft) => {
+    // A provider can't stay enabled without a key, so drop it to disabled while
+    // clearing (the server rejects an enabled provider with no credential).
+    await persistProvider({ ...provider, apiKey: '', enabled: false }, { clearApiKey: true });
   };
 
   const createProvider = async () => {
@@ -930,6 +941,16 @@ export function SettingsPage() {
                               onChange={e => updateProviderDraft(provider.id, { apiKey: e.target.value })}
                               className="max-w-sm"
                             />
+                            {provider.hasApiKey && (
+                              <button
+                                type="button"
+                                onClick={() => void clearProviderKey(provider)}
+                                disabled={saving === `provider:${provider.id}`}
+                                className="mt-2 text-xs font-medium text-destructive underline-offset-2 hover:underline disabled:opacity-50"
+                              >
+                                Remove saved key
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>

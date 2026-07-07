@@ -208,6 +208,37 @@ describe('ModelService', () => {
     expect(attempts).toBe(1);
   });
 
+  it('aborts and fails fast (as a retryable timeout) when a Cloudflare model hangs past the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const env = createTestEnv({
+        AI: {
+          run(_model: string, _request: any, options?: { signal?: AbortSignal }) {
+            capturedSignal = options?.signal;
+            // Model never responds -- only the timeout can end this call.
+            return new Promise(() => {});
+          },
+        } as any,
+      });
+
+      const promise = reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
+        systemPrompt: 'system',
+        userPrompt: 'user',
+      });
+      // Prevent an unhandled-rejection warning while the timer is still pending.
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await expect(promise).rejects.toThrow('timed out after 60000ms');
+      // The underlying Workers-AI request was actually cancelled, not just abandoned.
+      expect(capturedSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('tries the smaller Google fallback after the primary Google model fails', async () => {
     let cloudflareCalls = 0;
     const fetchMock = vi.spyOn(globalThis, 'fetch')
