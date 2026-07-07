@@ -188,6 +188,66 @@ describe('ModelService', () => {
     expect(response.rawText).toContain('"findings"');
   });
 
+  it('honors Retry-After when retrying Google 429 responses', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ error: { code: 429, message: 'Rate limited.' } }),
+            { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '7' } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+              usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+
+      const promise = reviewWithGoogle(
+        { apiKey: 'test-key' },
+        'gemma-4-31b-it',
+        { systemPrompt: 'system', userPrompt: 'user' },
+      );
+      promise.catch(() => {});
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(6_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const response = await promise;
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(response.rawText).toContain('"findings"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry TypeErrors thrown after a successful Google response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => {
+        throw new TypeError('parser exploded after response');
+      },
+    } as unknown as Response);
+
+    await expect(
+      reviewWithGoogle(
+        { apiKey: 'test-key' },
+        'gemma-4-31b-it',
+        { systemPrompt: 'system', userPrompt: 'user' },
+      ),
+    ).rejects.toThrow('parser exploded after response');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not spend an extra queue slice retrying the same Cloudflare model inline', async () => {
     let attempts = 0;
     const env = createTestEnv({
@@ -338,7 +398,7 @@ describe('ModelService', () => {
     const env = createTestEnv();
     await saveTestProviderApiKey(env);
     const tracker = new TokenTracker();
-    tracker.incrementSubrequests(30); // already past MAX_SUBREQUESTS (50) - SAFE_MARGIN (22)
+    tracker.incrementSubrequests(40); // already at MAX_SUBREQUESTS (50) - SAFE_MARGIN (10)
     const service = new ModelService(env, tracker);
 
     const response = await service.reviewFile({
@@ -370,9 +430,9 @@ describe('ModelService', () => {
 
   it('skips remaining fallback models (instead of spending more of the shared budget) once near the subrequest limit', async () => {
     // Google's client retries a 5xx once internally before giving up on a model, so the
-    // primary model alone can issue more than one raw fetch call; mockResolvedValue (not
-    // Once) keeps every call -- including that internal retry -- failing the same way.
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    // primary model alone can issue more than one raw fetch call; return a fresh Response for
+    // every call so retries do not reuse an already-consumed body.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response(
         JSON.stringify({ error: { code: 500, message: 'Internal error encountered.', status: 'INTERNAL' } }),
         { status: 500, headers: { 'content-type': 'application/json' } },
@@ -381,7 +441,7 @@ describe('ModelService', () => {
     const env = createTestEnv();
     await saveTestProviderApiKey(env);
     const tracker = new TokenTracker();
-    tracker.incrementSubrequests(30); // already past MAX_SUBREQUESTS (50) - SAFE_MARGIN (22)
+    tracker.incrementSubrequests(40); // already at MAX_SUBREQUESTS (50) - SAFE_MARGIN (10)
     const service = new ModelService(env, tracker);
 
     await expect(

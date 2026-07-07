@@ -17,6 +17,7 @@ import {
   mapJob,
   markJobCheckRunCompleted,
   markJobContinuationQueued,
+  resetJobContinuationCount,
   releaseJobLease,
   supersedeOlderJobs,
   updateJobCheckRun,
@@ -47,6 +48,12 @@ const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
+// Belt-and-suspenders ceiling on how many times a job may reschedule the *same* phase without
+// completing a single file (see markJobContinuationQueued / resetJobContinuationCount). The
+// per-file cap above is the primary bound and resets this counter on any progress, so a healthy
+// job never approaches this; it only fires when a job is genuinely wedged (e.g. a provider is
+// down for the whole backoff window) and stops it from churning for hours before finalizing.
+const MAX_JOB_CONTINUATIONS = 20;
 // A job's commit (and therefore its diff) never changes, so the raw diff can be
 // cached for the job's entire lifetime instead of being re-fetched from GitHub on
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
@@ -59,23 +66,22 @@ const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
 // (ModelService.resolveModel), so the recurring cost per file is ~1 provider call per model
 // tried plus the persisted-review write -- roughly 5 in the worst case rather than 9. Lower
 // estimate => more files reviewed in parallel per chunk within the same 50-subrequest cap.
-const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
+const ESTIMATED_SUBREQUESTS_PER_FILE = 8;
 
 /**
  * How many files a single review chunk may process concurrently: the configured concurrency
  * level, capped only by what the invocation's remaining subrequest budget can safely cover.
  *
  * The cap is deliberately sized so it does NOT silently override the user's chosen concurrency
- * at a healthy budget -- that would make the concurrency setting a no-op above the cap. With
- * MAX_SUBREQUESTS 50, SAFE_MARGIN 22 and ESTIMATED_SUBREQUESTS_PER_FILE 5, a fresh invocation
- * yields floor(28/5) = 5, comfortably above the highest configured level (max = 4) even after
- * the getPullRequest preamble spends a couple of subrequests. It only throttles (down to 1)
- * once earlier failures in this invocation have actually eaten into the budget; any files a
- * throttled chunk can't reach simply roll into the next chunk. The
+ * at a healthy budget -- that would make the concurrency setting a no-op above the cap. It
+ * only throttles once earlier failures in this invocation have actually eaten into the budget;
+ * if there is not enough safe budget for one more file, the chunk yields and resumes in a fresh
+ * invocation instead of gambling past the margin. Any files a throttled chunk can't reach roll
+ * into the next chunk. The
  * chunk-file-limit-honors-configured-level invariant is pinned by a regression test.
  */
 export function budgetAwareFileLimit(remainingSafeBudget: number, configuredChunkFileLimit: number) {
-  const budgetLimit = Math.max(1, Math.floor(remainingSafeBudget / ESTIMATED_SUBREQUESTS_PER_FILE));
+  const budgetLimit = Math.floor(remainingSafeBudget / ESTIMATED_SUBREQUESTS_PER_FILE);
   return Math.min(configuredChunkFileLimit, budgetLimit);
 }
 
@@ -96,9 +102,8 @@ function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
     lower.includes('[redacted]') ||
     lower.includes('returned no review content') ||
     lower.includes('empty response') ||
-    // A file that was deferred purely because this invocation ran out of subrequest budget
-    // must be retried on a later chunk, not treated as permanently handled. (The MAX-attempts
-    // backstop below still marks it failed if the pressure never clears.)
+    // Older jobs may have persisted subrequest-budget failures before budget exhaustion became
+    // a pure chunk-level deferral. Keep retrying those rows instead of treating them as handled.
     lower.includes('subrequest')
   );
 }
@@ -323,9 +328,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      await markJobContinuationQueued(env, job.id, delaySeconds);
-      await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'next_phase', phase, delaySeconds }; // Retry same phase
+      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'transient model/provider failures');
     }
 
     // Running out of this invocation's subrequest budget is not a job failure: the prepare and
@@ -340,9 +343,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      await markJobContinuationQueued(env, job.id, delaySeconds);
-      await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'next_phase', phase, delaySeconds }; // Resume same phase, fresh budget
+      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'per-invocation subrequest limits');
     }
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
@@ -350,6 +351,38 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     await releaseJobLease(env, job.id, leaseOwner);
     return { action: 'ack' };
   }
+}
+
+// Records a same-phase continuation and enforces the MAX_JOB_CONTINUATIONS ceiling. As long as
+// the job keeps completing files, resetJobContinuationCount() keeps this counter near zero; once
+// it has rescheduled MAX_JOB_CONTINUATIONS times without a single file completing, the job is
+// genuinely wedged (e.g. a provider is down for the entire backoff window), so we fail it
+// terminally instead of letting it churn indefinitely.
+async function continueOrFailWedgedJob(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  github: GitHubService,
+  leaseOwner: string,
+  phase: 'prepare' | 'review' | 'finalize',
+  delaySeconds: number,
+  reason: string,
+): Promise<ReviewJobRunResult> {
+  const continuationCount = await markJobContinuationQueued(env, job.id, delaySeconds);
+
+  if (continuationCount > MAX_JOB_CONTINUATIONS) {
+    const message = `Review could not make progress after ${continuationCount} continuation attempts (${reason}). Failing the job to avoid an endless retry loop; re-run it once the underlying provider issue clears.`;
+    logger.error(`Review job exceeded the continuation ceiling; failing terminally: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+      phase,
+      continuationCount,
+      reason,
+    });
+    await failJobAndCheckRun(env, job, github, message);
+    await releaseJobLease(env, job.id, leaseOwner);
+    return { action: 'ack' };
+  }
+
+  await releaseJobLease(env, job.id, leaseOwner);
+  return { action: 'next_phase', phase, delaySeconds }; // Resume same phase
 }
 
 async function resolveQueuedJob(
@@ -562,6 +595,9 @@ async function runReviewPhase(
   // plan: 50) -- but sized (see budgetAwareFileLimit) so the configured concurrency level is
   // honored in full at a healthy budget and only throttled once the budget is actually spent.
   const reviewChunkFileLimit = budgetAwareFileLimit(tracker.remainingSafeBudget(), configuredChunkFileLimit);
+  if (reviewChunkFileLimit <= 0) {
+    throw new Error('Subrequest budget for this invocation was exhausted before starting the next review chunk.');
+  }
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
@@ -622,6 +658,14 @@ async function runReviewPhase(
 
   const results = await Promise.allSettled(reviewTasks);
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+
+  // A fulfilled task means a file reached a terminal state this chunk (reviewed, inherited, or
+  // marked permanently failed) -- i.e. the job made progress. Clear the no-progress continuation
+  // counter so a slow-but-advancing job never trips the MAX_JOB_CONTINUATIONS safety net; only a
+  // chunk that completes *nothing* is allowed to push the job toward that ceiling.
+  if (results.some((result) => result.status === 'fulfilled')) {
+    await resetJobContinuationCount(env, job.id);
+  }
 
   const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (rejected.length > 0) {
@@ -714,11 +758,23 @@ async function reviewAndPersistFile(
     const modelId = config.model?.main ?? 'unconfigured';
     const modelProvider = await resolveFailureModelProvider();
 
-    // A transient model/provider outage OR this invocation running out of subrequest budget:
-    // both should defer the file to a later chunk (fresh budget) rather than abandon it. The
-    // shared per-file attempt counter still bounds this, so a file that can never be reviewed
-    // is eventually marked failed and the job finalizes as a partial review instead of looping.
-    if (isRetryableModelError(error) || isSubrequestBudgetError(error)) {
+    // Per-invocation subrequest pressure clears on the next Worker invocation, so do not count
+    // it as a per-file provider outage. Let the job-level no-progress continuation ceiling bound
+    // a genuinely wedged job while this file remains pending for the fresh-budget retry.
+    if (isSubrequestBudgetError(error)) {
+      logger.warn(`File review deferred for ${file.path}; subrequest budget will retry in a fresh invocation`, {
+        error: errorMessage,
+      });
+      Object.defineProperty(error, 'retryAfterSeconds', {
+        value: RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS[0],
+        configurable: true,
+      });
+      throw error;
+    }
+
+    // Transient model/provider outages count against the file so a single unrecoverable file
+    // eventually becomes a partial-review failure instead of blocking the entire job forever.
+    if (isRetryableModelError(error)) {
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
         modelUsed: modelId,
@@ -754,7 +810,7 @@ async function reviewAndPersistFile(
         return;
       }
 
-      logger.warn(`File review deferred for ${file.path}; transient model/provider failure or subrequest-budget limit will retry later`, {
+      logger.warn(`File review deferred for ${file.path}; transient model/provider failure will retry later`, {
         error: errorMessage,
         attempts: failureCount,
       });

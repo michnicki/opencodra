@@ -28,8 +28,8 @@ describe('budgetAwareFileLimit', () => {
 
   it('throttles below the configured level only once the budget has actually been eaten into', () => {
     // Deep into a troubled invocation the cap should shrink to protect the 50-subrequest ceiling.
-    expect(budgetAwareFileLimit(4, maxLevel)).toBe(1);
-    expect(budgetAwareFileLimit(0, maxLevel)).toBe(1); // never returns 0 -- always makes progress
+    expect(budgetAwareFileLimit(4, maxLevel)).toBe(0);
+    expect(budgetAwareFileLimit(0, maxLevel)).toBe(0);
     expect(budgetAwareFileLimit(10, maxLevel)).toBeLessThan(maxLevel);
   });
 

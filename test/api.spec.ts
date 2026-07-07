@@ -1,6 +1,7 @@
 import { createApp } from '@server/app';
 import { getJobForProcessing, insertJob } from '@server/db/jobs';
 import { insertFileReview } from '@server/db/file-reviews';
+import { queryRows } from '@server/db/client';
 import { getRepoConfigRecord } from '@server/db/repo-configs';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
 import { GitHubClient } from '@server/core/github';
@@ -207,6 +208,71 @@ describe('Dashboard API Suite', () => {
         headers,
         body: JSON.stringify({ concurrencyLevel: 'medium', maxComments: 10 }),
       }, env);
+    }
+  });
+
+  it('returns 400 for malformed review settings JSON', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/settings', {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: '{',
+    }, env);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: 'Invalid review settings.' });
+  });
+
+  it('falls back invalid stored review settings independently', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    try {
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'turbo'),
+          ('review_max_comments', '20')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+
+      const invalidConcurrency = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(invalidConcurrency.status).toBe(200);
+      await expect(invalidConcurrency.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'medium', maxComments: 20 },
+      });
+
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'high'),
+          ('review_max_comments', '999')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+
+      const invalidComments = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(invalidComments.status).toBe(200);
+      await expect(invalidComments.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'high', maxComments: 10 },
+      });
+    } finally {
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'medium'),
+          ('review_max_comments', '10')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
     }
   });
 
@@ -572,7 +638,7 @@ describe('Dashboard API Suite', () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
     await saveTestProviderApiKey(env);
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({
       error: {
         code: 429,
         message: 'Quota exceeded. Please retry later.',

@@ -122,4 +122,32 @@ describe('runReviewJob subrequest-budget handling', () => {
     expect(failJobMock).toHaveBeenCalledWith(expect.anything(), JOB_ID, 'totally unexpected boom');
     expect(markJobContinuationQueuedMock).not.toHaveBeenCalled();
   });
+
+  it('keeps rescheduling while the continuation count is still under the ceiling', async () => {
+    const env = createTestEnv();
+    // markJobContinuationQueued returns the post-increment count; a value at/under the ceiling
+    // (MAX_JOB_CONTINUATIONS = 20) must still reschedule rather than give up.
+    markJobContinuationQueuedMock.mockResolvedValue(20);
+    getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
+
+    const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
+
+    expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number) });
+    expect(failJobMock).not.toHaveBeenCalled();
+  });
+
+  it('fails the job terminally once it exceeds the continuation ceiling without making progress', async () => {
+    const env = createTestEnv();
+    // Post-increment count above MAX_JOB_CONTINUATIONS (20): the job is wedged, so it must stop
+    // churning and fail terminally instead of rescheduling yet again.
+    markJobContinuationQueuedMock.mockResolvedValue(21);
+    getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
+
+    const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
+
+    expect(result).toEqual({ action: 'ack' });
+    expect(failJobMock).toHaveBeenCalledTimes(1);
+    expect(failJobMock.mock.calls[0][2]).toMatch(/could not make progress after 21 continuation attempts/);
+    expect(releaseJobLeaseMock).toHaveBeenCalled();
+  });
 });

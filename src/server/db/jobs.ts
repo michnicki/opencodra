@@ -26,6 +26,7 @@ export type JobRow = {
   lease_expires_at: string | null;
   heartbeat_at: string | null;
   recovery_count: number | null;
+  continuation_count: number | null;
   last_queue_message_at: string | null;
   total_input_tokens: number | null;
   total_output_tokens: number | null;
@@ -518,20 +519,44 @@ export async function releaseJobLease(env: Pick<AppBindings, 'HYPERDRIVE'>, jobI
   );
 }
 
+// Records that a job is rescheduling the same phase (a continuation) and returns the resulting
+// no-progress continuation count. The counter is bumped here and cleared by
+// resetJobContinuationCount() whenever a chunk actually completes a file, so a healthy job that
+// keeps making headway stays near zero while a job that can never progress climbs toward the
+// MAX_JOB_CONTINUATIONS ceiling and is failed terminally.
 export async function markJobContinuationQueued(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, delaySeconds = 0) {
-  await queryRows(
+  const rows = await queryRows<{ continuation_count: number }>(
     env,
     `
       UPDATE jobs
       SET heartbeat_at = now(),
+          continuation_count = continuation_count + 1,
           last_queue_message_at = CASE
             WHEN $2::int > 0 THEN now() + ($2::text || ' seconds')::interval
             ELSE now()
           END
       WHERE id = $1
         AND status = 'running'
+      RETURNING continuation_count
     `,
     [jobId, delaySeconds],
+  );
+  return rows[0]?.continuation_count ?? 0;
+}
+
+// Clears the no-progress continuation counter after a chunk completes at least one file review,
+// so slow-but-progressing jobs never trip the MAX_JOB_CONTINUATIONS safety net.
+export async function resetJobContinuationCount(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string) {
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET continuation_count = 0
+      WHERE id = $1
+        AND status = 'running'
+        AND continuation_count <> 0
+    `,
+    [jobId],
   );
 }
 
