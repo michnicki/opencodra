@@ -75,8 +75,26 @@ function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
     lower.includes('temporary') ||
     lower.includes('[redacted]') ||
     lower.includes('returned no review content') ||
-    lower.includes('empty response')
+    lower.includes('empty response') ||
+    // A file that was deferred purely because this invocation ran out of subrequest budget
+    // must be retried on a later chunk, not treated as permanently handled. (The MAX-attempts
+    // backstop below still marks it failed if the pressure never clears.)
+    lower.includes('subrequest')
   );
+}
+
+/**
+ * Detects Cloudflare's per-invocation subrequest-limit error (Workers Free plan: 50
+ * subrequests/invocation). Unlike a provider outage, this clears completely on the next
+ * invocation, so the correct response is never to fail the whole job or permanently abandon
+ * a file -- it is to persist whatever progress was made and reschedule the same phase, which
+ * runs in a fresh invocation with a fresh budget. Because each review chunk reviews and
+ * persists only a few files (see reviewChunkFileLimit), rescheduling reliably makes forward
+ * progress and the review grinds to completion instead of dying mid-way.
+ */
+function isSubrequestBudgetError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.toLowerCase().includes('subrequest');
 }
 
 function retryableModelFailureDelaySeconds(failureCount: number | null | undefined) {
@@ -290,6 +308,23 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       return { action: 'next_phase', phase, delaySeconds }; // Retry same phase
     }
 
+    // Running out of this invocation's subrequest budget is not a job failure: the prepare and
+    // review phases are idempotent (already-reviewed files are persisted and skipped next time),
+    // so reschedule the same phase to resume on a fresh budget instead of terminally failing the
+    // whole review. Finalize is intentionally excluded -- it posts the GitHub review and isn't
+    // safe to re-run, and with no AI calls it does not realistically approach the cap anyway.
+    if (phase !== 'finalize' && isSubrequestBudgetError(error)) {
+      const delaySeconds = getRetryableModelFailureDelaySeconds(error);
+      logger.warn(`Review job hit the per-invocation subrequest limit; rescheduling ${phase} on a fresh budget: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        error: messageText,
+        phase,
+        delaySeconds,
+      });
+      await markJobContinuationQueued(env, job.id, delaySeconds);
+      await releaseJobLease(env, job.id, leaseOwner);
+      return { action: 'next_phase', phase, delaySeconds }; // Resume same phase, fresh budget
+    }
+
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
     await failJobAndCheckRun(env, job, github, messageText);
     await releaseJobLease(env, job.id, leaseOwner);
@@ -461,10 +496,16 @@ async function runPreparePhase(
   }
 
   if (checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, checkRunId, {
-      title: `Reviewing (0/${files.length})`,
-      summary: 'Codra is analyzing changed files.',
-    });
+    // Best-effort progress cosmetics only (see runReviewPhase): don't let a failed check-run
+    // update block enqueuing the review phase that does the actual work.
+    try {
+      await github.updateCheckRun(job.owner, job.repo, checkRunId, {
+        title: `Reviewing (0/${files.length})`,
+        summary: 'Codra is analyzing changed files.',
+      });
+    } catch (error) {
+      logger.warn(`Failed to update initial progress check run for job ${job.id}; continuing to the review phase anyway`, error instanceof Error ? error : new Error(String(error)));
+    }
   }
   await enqueueJobPhase(env, job.id, 'review');
 }
@@ -571,11 +612,12 @@ async function runReviewPhase(
       logger.error(`Review chunk task ${index + 1}/${rejected.length} failed`, result.reason);
     });
     
-    // If any of the rejected tasks were transient model errors, we must throw a RetryableModelError
-    // so that the job orchestrator retries the chunk, instead of failing the job with an AggregateError.
-    const retryableError = rejected.map(r => r.reason).find(isRetryableModelError);
-    if (retryableError) {
-      throw retryableError;
+    // If any rejected task was a transient model error or a per-invocation subrequest-budget
+    // hit, surface that single error so the job orchestrator reschedules the chunk on a fresh
+    // budget, instead of failing the job with an AggregateError.
+    const deferrableError = rejected.map(r => r.reason).find(r => isRetryableModelError(r) || isSubrequestBudgetError(r));
+    if (deferrableError) {
+      throw deferrableError;
     }
 
     throw rejected.length === 1
@@ -594,10 +636,17 @@ async function runReviewPhase(
   }
 
   if (job.checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
-      title: `Reviewing (${completedCount}/${files.length})`,
-      summary: 'Codra is continuing this review in the next queue chunk.',
-    });
+    // Best-effort progress cosmetics only: the file reviews for this chunk are already
+    // persisted, so a failure here (e.g. this invocation's subrequest budget is spent) must
+    // not stop us from enqueuing the next chunk that finishes the job.
+    try {
+      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+        title: `Reviewing (${completedCount}/${files.length})`,
+        summary: 'Codra is continuing this review in the next queue chunk.',
+      });
+    } catch (error) {
+      logger.warn(`Failed to update progress check run for job ${job.id}; continuing to the next chunk anyway`, error instanceof Error ? error : new Error(String(error)));
+    }
   }
   await enqueueJobPhase(env, job.id, 'review');
 }
@@ -648,7 +697,11 @@ async function reviewAndPersistFile(
     const modelId = config.model?.main ?? 'unconfigured';
     const modelProvider = await resolveFailureModelProvider();
 
-    if (isRetryableModelError(error)) {
+    // A transient model/provider outage OR this invocation running out of subrequest budget:
+    // both should defer the file to a later chunk (fresh budget) rather than abandon it. The
+    // shared per-file attempt counter still bounds this, so a file that can never be reviewed
+    // is eventually marked failed and the job finalizes as a partial review instead of looping.
+    if (isRetryableModelError(error) || isSubrequestBudgetError(error)) {
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
         modelUsed: modelId,
@@ -684,7 +737,7 @@ async function reviewAndPersistFile(
         return;
       }
 
-      logger.warn(`File review deferred for ${file.path}; transient model/provider failure will retry later`, {
+      logger.warn(`File review deferred for ${file.path}; transient model/provider failure or subrequest-budget limit will retry later`, {
         error: errorMessage,
         attempts: failureCount,
       });
@@ -697,13 +750,16 @@ async function reviewAndPersistFile(
 
     logger.error(`File review failed for ${file.path}`, { error });
 
+    // A genuine provider allocation exhaustion (e.g. Cloudflare Workers AI daily free
+    // allocation, error 4006) won't clear by retrying within this job, so mark the file failed
+    // and let the PR review complete as a partial review. (Per-invocation subrequest limits are
+    // NOT hard limits -- they're handled as deferrals above and retried on a fresh budget.)
     const isHardLimit =
-      errorMessage.toLowerCase().includes('subrequest') ||
       errorMessage.includes('4006') ||
       errorMessage.toLowerCase().includes('allocation');
 
     if (isHardLimit) {
-      logger.warn(`File review hit hard limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
+      logger.warn(`File review hit hard provider allocation limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
       // We don't throw here; we just fall through and let it be marked as failed
       // so the PR review can continue and complete as a partial review.
     }
