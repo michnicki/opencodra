@@ -52,12 +52,32 @@ const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
 // hits every retryable-failure backoff (up to 15 min each, several times over).
 const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
-// Conservative worst-case subrequest cost of reviewing one file: up to ~3 models in a
-// fallback chain (primary + fallbacks), each costing up to ~3 subrequests (model config
-// lookup, an optional provider-availability check, and the provider call itself). Used only
-// to size how many files can safely be reviewed concurrently in a chunk given the job's
-// remaining subrequest budget for this invocation -- see budgetAwareChunkFileLimit below.
-const ESTIMATED_SUBREQUESTS_PER_FILE = 9;
+// Estimated subrequest cost of reviewing one file, used only to size how many files can
+// safely be reviewed concurrently in a chunk given the job's remaining subrequest budget for
+// this invocation (see budgetAwareChunkFileLimit below). A file walks a fallback chain of up
+// to ~3 models, but the per-model model-config lookup is now cached per invocation
+// (ModelService.resolveModel), so the recurring cost per file is ~1 provider call per model
+// tried plus the persisted-review write -- roughly 5 in the worst case rather than 9. Lower
+// estimate => more files reviewed in parallel per chunk within the same 50-subrequest cap.
+const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
+
+/**
+ * How many files a single review chunk may process concurrently: the configured concurrency
+ * level, capped only by what the invocation's remaining subrequest budget can safely cover.
+ *
+ * The cap is deliberately sized so it does NOT silently override the user's chosen concurrency
+ * at a healthy budget -- that would make the concurrency setting a no-op above the cap. With
+ * MAX_SUBREQUESTS 50, SAFE_MARGIN 22 and ESTIMATED_SUBREQUESTS_PER_FILE 5, a fresh invocation
+ * yields floor(28/5) = 5, comfortably above the highest configured level (max = 4) even after
+ * the getPullRequest preamble spends a couple of subrequests. It only throttles (down to 1)
+ * once earlier failures in this invocation have actually eaten into the budget; any files a
+ * throttled chunk can't reach simply roll into the next chunk. The
+ * chunk-file-limit-honors-configured-level invariant is pinned by a regression test.
+ */
+export function budgetAwareFileLimit(remainingSafeBudget: number, configuredChunkFileLimit: number) {
+  const budgetLimit = Math.max(1, Math.floor(remainingSafeBudget / ESTIMATED_SUBREQUESTS_PER_FILE));
+  return Math.min(configuredChunkFileLimit, budgetLimit);
+}
 
 function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
   if (!message) return false;
@@ -537,14 +557,11 @@ async function runReviewPhase(
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
   const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
-  // Cap this chunk's concurrency by the shared job's remaining subrequest budget, so a run
-  // of model/provider failures earlier in this invocation can't push it over Cloudflare's
-  // per-invocation subrequest cap (Workers Free plan: 50). While the budget is healthy this
-  // is a no-op and the chunk still runs at the fully configured concurrency for speed; it
-  // only throttles down (to as little as 1 file at a time) once failures have actually eaten
-  // into the budget, and any files it can't get to this chunk simply roll into the next one.
-  const budgetAwareChunkFileLimit = Math.max(1, Math.floor(tracker.remainingSafeBudget() / ESTIMATED_SUBREQUESTS_PER_FILE));
-  const reviewChunkFileLimit = Math.min(configuredChunkFileLimit, budgetAwareChunkFileLimit);
+  // Cap this chunk's concurrency by the invocation's remaining subrequest budget so a run of
+  // model/provider failures can't push it over Cloudflare's per-invocation cap (Workers Free
+  // plan: 50) -- but sized (see budgetAwareFileLimit) so the configured concurrency level is
+  // honored in full at a healthy budget and only throttled once the budget is actually spent.
+  const reviewChunkFileLimit = budgetAwareFileLimit(tracker.remainingSafeBudget(), configuredChunkFileLimit);
   const startedAt = Date.now();
   let processedThisChunk = 0;
 

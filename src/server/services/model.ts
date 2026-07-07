@@ -84,6 +84,14 @@ function isTransientModelFailure(error: unknown) {
 }
 
 export class ModelService {
+  // Model configs don't change during a single review invocation, but resolveModel() is called
+  // once per file *and* once per fallback model. Left uncached that's a Hyperdrive round-trip
+  // (a counted subrequest) for every one of those, which both burns the per-invocation
+  // subrequest budget (shrinking how many files a chunk can review in parallel) and floods the
+  // connection pool. Memoize per ModelService instance (one instance == one invocation/chunk)
+  // so each distinct model is resolved from the DB at most once.
+  private readonly resolvedModelCache = new Map<string, ResolvedModelConfig | null>();
+
   constructor(
     private env: AppBindings,
     private tracker?: TokenTracker,
@@ -161,7 +169,13 @@ export class ModelService {
 
   private async resolveModel(model: string) {
     const normalized = normalizeModel(model);
-    const resolved = await getResolvedModelConfig(this.env, normalized);
+    let resolved = this.resolvedModelCache.get(normalized);
+    if (resolved === undefined) {
+      // Cache the DB answer -- including a null "not configured" result -- so a missing or
+      // repeatedly-used model isn't re-queried for every file in the chunk.
+      resolved = await getResolvedModelConfig(this.env, normalized);
+      this.resolvedModelCache.set(normalized, resolved);
+    }
     if (!resolved) {
       throw new Error(`Model ${normalized} is not configured. Add it in Settings before using it in a route.`);
     }

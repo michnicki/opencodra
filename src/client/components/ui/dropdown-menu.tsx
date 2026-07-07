@@ -1,5 +1,5 @@
 import { Slot } from '@radix-ui/react-slot';
-import { motion, useReducedMotion, type Transition } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion, type Transition } from 'motion/react';
 import {
   createContext,
   useContext,
@@ -8,6 +8,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type ReactNode,
   type RefCallback,
@@ -100,6 +101,10 @@ export interface DropdownMenuContentProps {
   children: ReactNode;
 }
 
+const VIEWPORT_PADDING = 8;
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
 export function DropdownMenuContent({
   side = 'bottom',
   align = 'start',
@@ -110,17 +115,35 @@ export function DropdownMenuContent({
 }: DropdownMenuContentProps) {
   const ctx = useMenuCtx('DropdownMenuContent');
   const reduce = useReducedMotion() ?? false;
-  const [style, setStyle] = useState<React.CSSProperties>({});
-  // Mount once on first open and keep mounted so the close animation can play
-  // (matches the pattern used by ui/select.tsx).
-  const [mounted, setMounted] = useState(false);
+  const [style, setStyle] = useState<React.CSSProperties>({ position: 'fixed', visibility: 'hidden' });
 
   const setRefs: RefCallback<HTMLDivElement> = (node) => {
     ctx.panelRef.current = node;
   };
 
+  const getItems = () =>
+    Array.from(
+      ctx.panelRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"]):not([disabled])') ?? [],
+    );
+
+  // Move focus into the menu on open and restore it to the trigger on close, so
+  // keyboard users land on the first item and return to where they were.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (ctx.open) setMounted(true);
+    if (ctx.open) {
+      wasOpen.current = true;
+      const id = requestAnimationFrame(() => getItems()[0]?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    if (wasOpen.current) {
+      wasOpen.current = false;
+      // Only pull focus back to the trigger if it isn't already somewhere
+      // deliberate (e.g. an outside click that landed on another control).
+      const active = document.activeElement;
+      if (!active || active === document.body || ctx.panelRef.current?.contains(active)) {
+        ctx.triggerRef.current?.focus();
+      }
+    }
   }, [ctx.open]);
 
   useLayoutEffect(() => {
@@ -129,22 +152,39 @@ export function DropdownMenuContent({
     if (!trigger) return;
     const update = () => {
       const r = trigger.getBoundingClientRect();
-      const next: React.CSSProperties = { position: 'fixed' };
+      const panel = ctx.panelRef.current;
+      const menuW = panel?.offsetWidth ?? 0;
+      const menuH = panel?.offsetHeight ?? 0;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
 
-      if (side === 'bottom') next.top = r.bottom + sideOffset;
-      else if (side === 'top') next.bottom = window.innerHeight - r.top + sideOffset;
-      else if (side === 'right') next.left = r.right + sideOffset;
-      else next.right = window.innerWidth - r.left + sideOffset;
+      let top: number;
+      let left: number;
 
       if (side === 'top' || side === 'bottom') {
-        if (align === 'start') next.left = r.left + alignOffset;
-        else next.right = window.innerWidth - r.right + alignOffset;
+        top = side === 'bottom' ? r.bottom + sideOffset : r.top - sideOffset - menuH;
+        left = align === 'start' ? r.left + alignOffset : r.right - menuW - alignOffset;
+        // Flip to the other side if the preferred one overflows and the opposite fits.
+        if (side === 'bottom' && top + menuH > vh - VIEWPORT_PADDING && r.top - sideOffset - menuH >= VIEWPORT_PADDING) {
+          top = r.top - sideOffset - menuH;
+        } else if (side === 'top' && top < VIEWPORT_PADDING && r.bottom + sideOffset + menuH <= vh - VIEWPORT_PADDING) {
+          top = r.bottom + sideOffset;
+        }
       } else {
-        if (align === 'start') next.top = r.top + alignOffset;
-        else next.bottom = window.innerHeight - r.bottom + alignOffset;
+        left = side === 'right' ? r.right + sideOffset : r.left - sideOffset - menuW;
+        top = align === 'start' ? r.top + alignOffset : r.bottom - menuH - alignOffset;
+        if (side === 'right' && left + menuW > vw - VIEWPORT_PADDING && r.left - sideOffset - menuW >= VIEWPORT_PADDING) {
+          left = r.left - sideOffset - menuW;
+        } else if (side === 'left' && left < VIEWPORT_PADDING && r.right + sideOffset + menuW <= vw - VIEWPORT_PADDING) {
+          left = r.right + sideOffset;
+        }
       }
 
-      setStyle(next);
+      // Keep the panel within the viewport regardless of side/align.
+      top = clamp(top, VIEWPORT_PADDING, Math.max(VIEWPORT_PADDING, vh - menuH - VIEWPORT_PADDING));
+      left = clamp(left, VIEWPORT_PADDING, Math.max(VIEWPORT_PADDING, vw - menuW - VIEWPORT_PADDING));
+
+      setStyle({ position: 'fixed', top, left, visibility: 'visible' });
     };
     update();
     window.addEventListener('scroll', update, true);
@@ -154,6 +194,30 @@ export function DropdownMenuContent({
       window.removeEventListener('resize', update);
     };
   }, [ctx.open, ctx.triggerRef, side, align, sideOffset, alignOffset]);
+
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      ctx.setOpen(false);
+      return;
+    }
+    const items = getItems();
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(current + 1 + items.length) % items.length].focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(current - 1 + items.length) % items.length].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    }
+  };
 
   const originX = side === 'top' || side === 'bottom' ? (align === 'start' ? 'left' : 'right') : side === 'right' ? 'left' : 'right';
   const originY = side === 'bottom' ? 'top' : side === 'top' ? 'bottom' : align === 'start' ? 'top' : 'bottom';
@@ -171,33 +235,30 @@ export function DropdownMenuContent({
     ? { duration: 0.1 }
     : { type: 'spring', duration: 0.35, bounce: 0.15 };
 
-  if (!mounted) return null;
-
   return createPortal(
-    <motion.div
-      ref={setRefs}
-      id={ctx.contentId}
-      role="menu"
-      aria-hidden={!ctx.open}
-      initial={false}
-      animate={
-        reduce
-          ? { opacity: ctx.open ? 1 : 0 }
-          : { opacity: ctx.open ? 1 : 0, scale: ctx.open ? 1 : 0.96, ...(ctx.open ? { x: 0, y: 0 } : hiddenOffset) }
-      }
-      transition={transition}
-      style={{
-        ...style,
-        transformOrigin: `${originX} ${originY}`,
-        pointerEvents: ctx.open ? 'auto' : 'none',
-      }}
-      className={cn(
-        'z-50 min-w-[8rem] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 text-zinc-900 shadow-sm shadow-black/[0.02] dark:border-border dark:bg-popover dark:text-popover-foreground dark:shadow-black/50',
-        className,
+    // AnimatePresence unmounts the menu after its exit animation, so the closed
+    // menu leaves no invisible, focusable items in the tab order.
+    <AnimatePresence>
+      {ctx.open && (
+        <motion.div
+          ref={setRefs}
+          id={ctx.contentId}
+          role="menu"
+          onKeyDown={onKeyDown}
+          initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.96, ...hiddenOffset }}
+          animate={reduce ? { opacity: 1 } : { opacity: 1, scale: 1, x: 0, y: 0 }}
+          exit={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.96, ...hiddenOffset }}
+          transition={transition}
+          style={{ ...style, transformOrigin: `${originX} ${originY}` }}
+          className={cn(
+            'z-50 min-w-[8rem] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 text-zinc-900 shadow-sm shadow-black/[0.02] dark:border-border dark:bg-popover dark:text-popover-foreground dark:shadow-black/50',
+            className,
+          )}
+        >
+          {children}
+        </motion.div>
       )}
-    >
-      {children}
-    </motion.div>,
+    </AnimatePresence>,
     document.body,
   );
 }

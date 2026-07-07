@@ -3,8 +3,14 @@ import type { AppBindings } from '@server/env';
 import { TimeoutError } from '@server/core/timeout';
 import { ProviderRequestError, type ModelResponse } from './types';
 
-/** Max wall-clock time allowed for a single Workers-AI call. */
-const CLOUDFLARE_TIMEOUT_MS = 180_000;
+/**
+ * Max wall-clock time allowed for a single Workers-AI call. Kept well under the review
+ * workflow's 15-minute step timeout: a model that hasn't answered a code-review prompt in
+ * this long (reasoning models under strict-JSON decoding are the usual offenders -- they burn
+ * the whole token budget "thinking" and never emit the JSON) is not going to, so we fail fast
+ * and let the file defer to a fresh invocation instead of stalling the whole review.
+ */
+const CLOUDFLARE_TIMEOUT_MS = 60_000;
 const CLOUDFLARE_MAX_RETRIES = 0;
 const CLOUDFLARE_MAX_OUTPUT_TOKENS = 8192;
 const REVIEW_RESPONSE_SCHEMA = {
@@ -168,8 +174,16 @@ export async function reviewWithCloudflare(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
+    // Abort the underlying Workers-AI request when the timeout fires. Promise.race on its own
+    // only stops *us* awaiting -- the subrequest would keep running in the background, holding
+    // this invocation's wall-clock and pushing the workflow toward its 15-minute step cap long
+    // after we've given up. Aborting via the AI binding's signal actually cancels it.
+    const controller = new AbortController();
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new TimeoutError(`Cloudflare (${model})`, CLOUDFLARE_TIMEOUT_MS)), CLOUDFLARE_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new TimeoutError(`Cloudflare (${model})`, CLOUDFLARE_TIMEOUT_MS));
+      }, CLOUDFLARE_TIMEOUT_MS);
     });
 
     try {
@@ -182,29 +196,30 @@ export async function reviewWithCloudflare(
 
       logger.info(`Calling Cloudflare model: ${model}`);
       const startTime = Date.now();
-      const result = await Promise.race([
-        env.AI.run(model as any, {
-          messages: [
-            {
-              role: 'system',
-              content: `${input.systemPrompt}\n\nReturn only the JSON object. Do not include chain-of-thought, analysis, markdown, code fences, or explanatory prose.`,
-            },
-            { role: 'user', content: `${input.userPrompt}\n\nRespond with the required JSON object only.` },
-          ],
-          max_completion_tokens: CLOUDFLARE_MAX_OUTPUT_TOKENS,
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'codra_file_review',
-              strict: true,
-              schema: REVIEW_RESPONSE_SCHEMA,
-            },
+      const runPromise = env.AI.run(model as any, {
+        messages: [
+          {
+            role: 'system',
+            content: `${input.systemPrompt}\n\nReturn only the JSON object. Do not include chain-of-thought, analysis, markdown, code fences, or explanatory prose.`,
           },
-          temperature: 0,
-          top_p: 0.1,
-        }),
-        timeoutPromise,
-      ]);
+          { role: 'user', content: `${input.userPrompt}\n\nRespond with the required JSON object only.` },
+        ],
+        max_completion_tokens: CLOUDFLARE_MAX_OUTPUT_TOKENS,
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'codra_file_review',
+            strict: true,
+            schema: REVIEW_RESPONSE_SCHEMA,
+          },
+        },
+        temperature: 0,
+        top_p: 0.1,
+      }, { signal: controller.signal });
+      // Once the timeout wins the race the aborted run still settles (as a rejection); attach a
+      // no-op handler so that late rejection can't surface as an unhandled promise rejection.
+      runPromise.catch(() => {});
+      const result = await Promise.race([runPromise, timeoutPromise]);
       const durationMs = Date.now() - startTime;
       logger.info(`AI model ${model} responded in ${durationMs}ms`);
 
