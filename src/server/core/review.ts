@@ -47,6 +47,17 @@ const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
 const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
+// A job's commit (and therefore its diff) never changes, so the raw diff can be
+// cached for the job's entire lifetime instead of being re-fetched from GitHub on
+// every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
+// hits every retryable-failure backoff (up to 15 min each, several times over).
+const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
+// Conservative worst-case subrequest cost of reviewing one file: up to ~3 models in a
+// fallback chain (primary + fallbacks), each costing up to ~3 subrequests (model config
+// lookup, an optional provider-availability check, and the provider call itself). Used only
+// to size how many files can safely be reviewed concurrently in a chunk given the job's
+// remaining subrequest budget for this invocation -- see budgetAwareChunkFileLimit below.
+const ESTIMATED_SUBREQUESTS_PER_FILE = 9;
 
 function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
   if (!message) return false;
@@ -249,7 +260,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     } else if (phase === 'finalize') {
       await runFinalizePhase(env, job, leaseOwner, github, formatter);
     } else {
-      await runReviewPhase(env, job, leaseOwner, github, model);
+      await runReviewPhase(env, job, leaseOwner, github, model, tracker);
     }
 
     await releaseJobLease(env, job.id, leaseOwner);
@@ -439,8 +450,7 @@ async function runPreparePhase(
     await updateJobCheckRun(env, job.id, checkRun.id);
   }
 
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+  const files = await getDiffFiles(env, job, github, config);
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -465,6 +475,7 @@ async function runReviewPhase(
   leaseOwner: string,
   github: GitHubService,
   model: ModelService,
+  tracker: TokenTracker,
 ) {
   if (!hasCompletedStep(job, 'Preparation')) {
     await runPreparePhase(env, job, leaseOwner, github);
@@ -481,11 +492,18 @@ async function runReviewPhase(
     failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
     return failureModelProviderPromise;
   };
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+  const files = await getDiffFiles(env, job, github, config);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
-  const reviewChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
+  const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
+  // Cap this chunk's concurrency by the shared job's remaining subrequest budget, so a run
+  // of model/provider failures earlier in this invocation can't push it over Cloudflare's
+  // per-invocation subrequest cap (Workers Free plan: 50). While the budget is healthy this
+  // is a no-op and the chunk still runs at the fully configured concurrency for speed; it
+  // only throttles down (to as little as 1 file at a time) once failures have actually eaten
+  // into the budget, and any files it can't get to this chunk simply roll into the next one.
+  const budgetAwareChunkFileLimit = Math.max(1, Math.floor(tracker.remainingSafeBudget() / ESTIMATED_SUBREQUESTS_PER_FILE));
+  const reviewChunkFileLimit = Math.min(configuredChunkFileLimit, budgetAwareChunkFileLimit);
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
@@ -720,8 +738,7 @@ async function runFinalizePhase(
 
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+  const files = await getDiffFiles(env, job, github, config);
   const reviews = await getFileReviewsForJobs(env, [job.id]);
 
   if (reviews.length < files.length) {
@@ -918,14 +935,56 @@ function hasCompletedStep(job: PersistedReviewJob, stepName: string) {
   return job.steps.some((step) => step.name === stepName && step.status === 'done');
 }
 
-async function failJobAndCheckRun(
+function diffCacheKey(jobId: string) {
+  return `diff:${jobId}`;
+}
+
+/**
+ * Returns the job's reviewable files, fetching and parsing the PR diff from
+ * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ */
+export async function getDiffFiles(
   env: AppBindings,
-  job: PersistedReviewJob,
-  github: GitHubService,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
+  github: Pick<GitHubService, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  const cacheKey = diffCacheKey(job.id);
+  let rawDiff = await env.APP_KV.get(cacheKey);
+
+  if (!rawDiff) {
+    rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
+    try {
+      await env.APP_KV.put(cacheKey, rawDiff, { expirationTtl: DIFF_CACHE_TTL_SECONDS });
+    } catch (error) {
+      logger.warn(`Failed to cache PR diff for job ${job.id}; it will be re-fetched on the next phase`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  return filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+}
+
+export async function failJobAndCheckRun(
+  env: AppBindings,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'checkRunId'>,
+  github: Pick<GitHubService, 'updateCheckRun'>,
   message: string,
 ) {
+  // Marking the job failed in the DB is the critical, must-not-lose write: it's what
+  // makes the job terminal so it stops being retried, and it's what makes it eligible
+  // for completeTerminalCheckRuns() to pick up later if the GitHub call below fails.
   try {
     await failJob(env, job.id, message);
+  } catch (dbError) {
+    logger.error(`Critical: failed to mark job ${job.id} as failed in the DB; it may remain stuck until lease-expiry recovery reclaims it`, dbError);
+    return;
+  }
+
+  // Updating the GitHub check run is best-effort here. If it fails (e.g. the Worker's
+  // subrequest budget for this invocation is already exhausted from the review itself),
+  // the job is still durably marked failed above, and the opportunistic maintenance sweep
+  // (completeTerminalCheckRuns) will retry this update on a later invocation with a fresh budget.
+  try {
     const latest = await getJobForProcessing(env, job.id);
     const checkRunId = latest?.check_run_id ?? job.checkRunId;
     if (checkRunId) {
@@ -937,7 +996,7 @@ async function failJobAndCheckRun(
       });
       await markJobCheckRunCompleted(env, job.id);
     }
-  } catch (innerError) {
-    logger.error('Failed to record job failure in DB/GitHub', innerError);
+  } catch (checkRunError) {
+    logger.warn(`Failed to update GitHub check run for failed job ${job.id}; opportunistic maintenance will retry it`, checkRunError);
   }
 }
