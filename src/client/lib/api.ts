@@ -231,7 +231,7 @@ export const api = {
     return request<{ settings: ReviewSettings }>('/api/settings');
   },
   updateReviewSettings(settings: ReviewSettings) {
-    return request<{ ok: boolean }>('/api/settings', {
+    return request<{ ok: boolean; settings: ReviewSettings }>('/api/settings', {
       method: 'PATCH',
       body: JSON.stringify(settings),
     });

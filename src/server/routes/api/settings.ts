@@ -25,7 +25,8 @@ export function createSettingsRouter() {
   });
 
   app.patch('/', async (c) => {
-    const parsed = reviewSettingsPatchSchema.safeParse(await c.req.json());
+    const body = await c.req.json().catch(() => null);
+    const parsed = reviewSettingsPatchSchema.safeParse(body);
     if (!parsed.success) {
       return jsonError('Invalid review settings.', 400);
     }

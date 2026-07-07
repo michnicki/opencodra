@@ -1,12 +1,14 @@
 import type { AppBindings } from '@server/env';
 import { queryRows } from './client';
 import { logger } from '@server/core/logger';
-import { reviewSettingsSchema, type ReviewSettings } from '@shared/schema';
+import { reviewConcurrencyLevels, reviewMaxCommentsOptions, reviewSettingsSchema, type ReviewSettings } from '@shared/schema';
 
 const CONCURRENCY_KEY = 'review_concurrency_level';
 const MAX_COMMENTS_KEY = 'review_max_comments';
 
 const DEFAULT_REVIEW_SETTINGS: ReviewSettings = reviewSettingsSchema.parse({});
+const CONCURRENCY_LEVELS = new Set<string>(reviewConcurrencyLevels);
+const MAX_COMMENTS_OPTIONS = new Set<number>(reviewMaxCommentsOptions);
 
 export async function getReviewSettings(env: Pick<AppBindings, 'HYPERDRIVE'>): Promise<ReviewSettings> {
   try {
@@ -16,11 +18,18 @@ export async function getReviewSettings(env: Pick<AppBindings, 'HYPERDRIVE'>): P
       [[CONCURRENCY_KEY, MAX_COMMENTS_KEY]],
     );
     const map = new Map(rows.map((row) => [row.key, row.value]));
-    const parsed = reviewSettingsSchema.safeParse({
-      concurrencyLevel: map.get(CONCURRENCY_KEY),
-      maxComments: map.has(MAX_COMMENTS_KEY) ? Number(map.get(MAX_COMMENTS_KEY)) : undefined,
+    const storedConcurrency = map.get(CONCURRENCY_KEY);
+    const storedMaxComments = map.get(MAX_COMMENTS_KEY);
+    const parsedMaxComments = storedMaxComments === undefined ? NaN : Number(storedMaxComments);
+
+    return reviewSettingsSchema.parse({
+      concurrencyLevel: storedConcurrency && CONCURRENCY_LEVELS.has(storedConcurrency)
+        ? storedConcurrency
+        : DEFAULT_REVIEW_SETTINGS.concurrencyLevel,
+      maxComments: MAX_COMMENTS_OPTIONS.has(parsedMaxComments)
+        ? parsedMaxComments
+        : DEFAULT_REVIEW_SETTINGS.maxComments,
     });
-    return parsed.success ? parsed.data : DEFAULT_REVIEW_SETTINGS;
   } catch (error) {
     logger.warn('Failed to load review settings, using defaults', {
       error: error instanceof Error ? error.message : String(error),

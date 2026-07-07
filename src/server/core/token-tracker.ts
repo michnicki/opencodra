@@ -14,7 +14,7 @@ export class TokenTracker {
   private usage: Map<string, ModelUsage> = new Map();
   private subrequests = 0;
   private readonly MAX_SUBREQUESTS = 50;
-  private readonly SAFE_MARGIN = 22; // Increased even further to handle finalization overhead
+  private readonly SAFE_MARGIN = 10; // Lowered since finalize runs in a separate invocation
 
   incrementSubrequests(count = 1) {
     this.subrequests += count;

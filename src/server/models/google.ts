@@ -9,7 +9,33 @@ const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524;
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524;
+}
+
+function defaultRetryDelayMs(attempt: number) {
+  return Math.pow(2, attempt + 1) * 1000 + Math.random() * 1000;
+}
+
+function retryAfterDelayMs(value: string | null) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  return null;
+}
+
+function isRetryableTransportError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'TimeoutError' || error.message.toLowerCase().includes('timeout')) return true;
+  if (error.message.includes('fetch failed')) return true;
+  return error instanceof TypeError;
 }
 
 function isPrivateIP(hostname: string) {
@@ -55,17 +81,19 @@ export async function reviewWithGoogle(
   const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
   const maxRetries = GEMINI_MAX_RETRIES;
   let lastError: unknown;
+  let delayBeforeAttemptMs = 0;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (delayBeforeAttemptMs > 0) {
+      logger.info(`Retrying Gemini request (attempt ${attempt}/${maxRetries}) in ${Math.round(delayBeforeAttemptMs)}ms`);
+      await new Promise(resolve => setTimeout(resolve, delayBeforeAttemptMs));
+      delayBeforeAttemptMs = 0;
+    }
+
+    let response: Response;
     try {
       if (tracker) tracker.incrementSubrequests(1);
-      if (attempt > 0) {
-        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
-        logger.info(`Retrying Gemini request (attempt ${attempt}/${maxRetries}) in ${Math.round(delay)}ms`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-
-      const response = await withTimeout('Gemini API', GEMINI_TIMEOUT_MS, (signal) =>
+      response = await withTimeout('Gemini API', GEMINI_TIMEOUT_MS, (signal) =>
         fetch(url, {
           method: 'POST',
           signal,
@@ -90,58 +118,63 @@ export async function reviewWithGoogle(
           }),
         }),
       );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        const message = providerErrorMessage(errorText);
-        const isRetryable = isRetryableGeminiStatus(response.status);
-
-        const logData = {
-          error: message,
-          attempt,
-          willRetry: isRetryable && attempt < maxRetries,
-        };
-        if (isRetryable && attempt < maxRetries) {
-          logger.warn(`Gemini request failed with ${response.status}; retrying`, logData);
-          lastError = new ProviderRequestError(config.providerName ?? 'Google', response.status, message);
-          continue;
-        }
-
-        logger.error(`Gemini request failed with ${response.status}`, logData);
-        throw new ProviderRequestError(config.providerName ?? 'Google', response.status, message);
-      }
-
-      const durationMs = Date.now() - startTime;
-      logger.info(`AI model ${model} responded in ${durationMs}ms`);
-
-      const data = (await response.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-        usageMetadata?: {
-          promptTokenCount?: number;
-          candidatesTokenCount?: number;
-        };
-      };
-
-      const rawText = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('')?.trim();
-      if (!rawText) {
-        throw new Error('Gemini returned an empty response.');
-      }
-
-      return {
-        rawText,
-        inputTokens: data.usageMetadata?.promptTokenCount ?? 0,
-        outputTokens: data.usageMetadata?.candidatesTokenCount ?? 0,
-        modelUsed: model,
-        provider: config.providerName ?? 'Google',
-      };
     } catch (error) {
       lastError = error;
-      const isTimeout = error instanceof Error && (error.name === 'TimeoutError' || error.message.includes('timeout'));
-      if (isTimeout && attempt < maxRetries) {
+      if (isRetryableTransportError(error) && attempt < maxRetries) {
+        delayBeforeAttemptMs = defaultRetryDelayMs(attempt);
         continue;
       }
       throw error;
     }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const message = providerErrorMessage(errorText);
+      const isRetryable = isRetryableGeminiStatus(response.status);
+      const retryDelayMs = response.status === 429
+        ? retryAfterDelayMs(response.headers.get('retry-after')) ?? defaultRetryDelayMs(attempt)
+        : defaultRetryDelayMs(attempt);
+
+      const logData = {
+        error: message,
+        attempt,
+        willRetry: isRetryable && attempt < maxRetries,
+        retryDelayMs: isRetryable && attempt < maxRetries ? retryDelayMs : undefined,
+      };
+      if (isRetryable && attempt < maxRetries) {
+        logger.warn(`Gemini request failed with ${response.status}; retrying`, logData);
+        lastError = new ProviderRequestError(config.providerName ?? 'Google', response.status, message);
+        delayBeforeAttemptMs = retryDelayMs;
+        continue;
+      }
+
+      logger.error(`Gemini request failed with ${response.status}`, logData);
+      throw new ProviderRequestError(config.providerName ?? 'Google', response.status, message);
+    }
+
+    const durationMs = Date.now() - startTime;
+    logger.info(`AI model ${model} responded in ${durationMs}ms`);
+
+    const data = (await response.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+      };
+    };
+
+    const rawText = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('')?.trim();
+    if (!rawText) {
+      throw new Error('Gemini returned an empty response.');
+    }
+
+    return {
+      rawText,
+      inputTokens: data.usageMetadata?.promptTokenCount ?? 0,
+      outputTokens: data.usageMetadata?.candidatesTokenCount ?? 0,
+      modelUsed: model,
+      provider: config.providerName ?? 'Google',
+    };
   }
 
   throw lastError;
