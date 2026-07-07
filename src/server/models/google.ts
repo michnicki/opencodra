@@ -3,13 +3,13 @@ import { withTimeout } from '@server/core/timeout';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
 /** Max wall-clock time allowed for a single Google AI Studio call. */
-const GEMINI_TIMEOUT_MS = 180_000;
+const GEMINI_TIMEOUT_MS = 80_000;
 const GEMINI_MAX_RETRIES = 1;
 const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524;
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 function defaultRetryDelayMs(attempt: number) {
@@ -112,7 +112,7 @@ export async function reviewWithGoogle(
               },
             ],
             generationConfig: {
-              responseMimeType: 'application/json',
+              ...(model.toLowerCase().includes('gemma') ? {} : { responseMimeType: 'application/json' }),
               maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
             },
           }),

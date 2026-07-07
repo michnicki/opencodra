@@ -71,36 +71,46 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
       `
         SELECT status, COUNT(*)::int AS count
         FROM jobs
+        WHERE created_at >= now() - ($1::int * interval '1 day')
         GROUP BY status
         ORDER BY count DESC
       `,
+      [clampedDays],
     ),
     queryRows<{ trigger: string; count: number }>(
       env,
       `
         SELECT trigger, COUNT(*)::int AS count
         FROM jobs
+        WHERE created_at >= now() - ($1::int * interval '1 day')
         GROUP BY trigger
         ORDER BY count DESC
       `,
+      [clampedDays],
     ),
     queryRows<{ severity: string; count: number }>(
       env,
       `
-        SELECT severity, COUNT(*)::int AS count
-        FROM review_comments
-        GROUP BY severity
+        SELECT rc.severity, COUNT(*)::int AS count
+        FROM review_comments rc
+        JOIN file_reviews fr ON fr.id = rc.file_review_id
+        WHERE fr.created_at >= now() - ($1::int * interval '1 day')
+        GROUP BY rc.severity
         ORDER BY count DESC
       `,
+      [clampedDays],
     ),
     queryRows<{ category: string; count: number }>(
       env,
       `
-        SELECT category, COUNT(*)::int AS count
-        FROM review_comments
-        GROUP BY category
+        SELECT rc.category, COUNT(*)::int AS count
+        FROM review_comments rc
+        JOIN file_reviews fr ON fr.id = rc.file_review_id
+        WHERE fr.created_at >= now() - ($1::int * interval '1 day')
+        GROUP BY rc.category
         ORDER BY count DESC
       `,
+      [clampedDays],
     ),
     queryRows<{ avg_duration_ms: number | null; p95_duration_ms: number | null; avg_confidence: number | null }>(
       env,
@@ -110,8 +120,9 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000) AS p95_duration_ms,
           AVG(overall_confidence_score) AS avg_confidence
         FROM jobs
-        WHERE finished_at IS NOT NULL AND started_at IS NOT NULL
+        WHERE finished_at IS NOT NULL AND started_at IS NOT NULL AND created_at >= now() - ($1::int * interval '1 day')
       `,
+      [clampedDays],
     ),
   ]);
 

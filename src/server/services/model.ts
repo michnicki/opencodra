@@ -89,8 +89,11 @@ export class ModelService {
   // (a counted subrequest) for every one of those, which both burns the per-invocation
   // subrequest budget (shrinking how many files a chunk can review in parallel) and floods the
   // connection pool. Memoize per ModelService instance (one instance == one invocation/chunk)
-  // so each distinct model is resolved from the DB at most once.
-  private readonly resolvedModelCache = new Map<string, ResolvedModelConfig | null>();
+  // so each distinct model is resolved from the DB at most once. Cache the in-flight promise
+  // (not just the settled value) so concurrent resolveModel() calls for the same model made
+  // before the first DB round-trip completes all await the same request instead of each firing
+  // their own.
+  private readonly resolvedModelCache = new Map<string, Promise<ResolvedModelConfig | null>>();
 
   constructor(
     private env: AppBindings,
@@ -169,13 +172,17 @@ export class ModelService {
 
   private async resolveModel(model: string) {
     const normalized = normalizeModel(model);
-    let resolved = this.resolvedModelCache.get(normalized);
-    if (resolved === undefined) {
+    let pending = this.resolvedModelCache.get(normalized);
+    if (!pending) {
       // Cache the DB answer -- including a null "not configured" result -- so a missing or
       // repeatedly-used model isn't re-queried for every file in the chunk.
-      resolved = await getResolvedModelConfig(this.env, normalized);
-      this.resolvedModelCache.set(normalized, resolved);
+      pending = getResolvedModelConfig(this.env, normalized);
+      this.resolvedModelCache.set(normalized, pending);
+      // A failed lookup (e.g. a transient DB error) shouldn't poison the cache for the rest of
+      // the invocation -- drop it so the next call retries instead of rejecting immediately.
+      pending.catch(() => this.resolvedModelCache.delete(normalized));
     }
+    const resolved = await pending;
     if (!resolved) {
       throw new Error(`Model ${normalized} is not configured. Add it in Settings before using it in a route.`);
     }

@@ -2,6 +2,7 @@ import { Check, ChevronDown } from 'lucide-react';
 import { motion, type Transition, useReducedMotion, type Variants } from 'motion/react';
 import {
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useEffect,
   useId,
@@ -76,8 +77,23 @@ export function Select({
   const [placement, setPlacement] = useState<Placement>('bottom');
   const [height, setHeight] = useState(0);
   const [rect, setRect] = useState<{ left: number; width: number; top: number; bottom: number } | null>(null);
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const selectedOption = options.find((opt) => opt.value === value);
+
+  // Move the active-descendant highlight onto the current selection (or the first option)
+  // each time the listbox opens, so arrow-key navigation always starts from a sane position.
+  useEffect(() => {
+    if (!open) return;
+    const idx = options.findIndex((opt) => opt.value === value);
+    setHighlightedIndex(idx >= 0 ? idx : 0);
+  }, [open, options, value]);
+
+  useEffect(() => {
+    if (!open) return;
+    optionRefs.current[highlightedIndex]?.scrollIntoView({ block: 'nearest' });
+  }, [open, highlightedIndex]);
 
   // close on outside pointer / escape
   useEffect(() => {
@@ -105,15 +121,19 @@ export function Select({
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  });
+  }, []);
 
   // Track the trigger's viewport position so the portaled panel can follow it,
-  // and flip upward when there isn't room below and there's more above.
+  // and flip upward when there isn't room below and there's more above. Scroll/resize
+  // fire far more often than the display repaints, so batch updates to at most once per
+  // animation frame instead of re-rendering on every raw event.
   useLayoutEffect(() => {
     if (!open) return;
     const trigger = triggerRef.current;
     if (!trigger) return;
+    let frame: number | null = null;
     const update = () => {
+      frame = null;
       const r = trigger.getBoundingClientRect();
       setRect({ left: r.left, width: r.width, top: r.top, bottom: r.bottom });
       const h = innerRef.current?.offsetHeight ?? 0;
@@ -121,14 +141,63 @@ export function Select({
       const above = r.top;
       setPlacement(below < h + 16 && above > below ? 'top' : 'bottom');
     };
+    const scheduleUpdate = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(update);
+    };
     update();
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
+    window.addEventListener('scroll', scheduleUpdate, true);
+    window.addEventListener('resize', scheduleUpdate);
     return () => {
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
+      if (frame !== null) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', scheduleUpdate, true);
+      window.removeEventListener('resize', scheduleUpdate);
     };
   }, [open]);
+
+  const moveHighlight = (next: number) => {
+    setHighlightedIndex(Math.min(Math.max(next, 0), options.length - 1));
+  };
+
+  const onTriggerKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    if (options.length === 0) return;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        moveHighlight(highlightedIndex + 1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        moveHighlight(highlightedIndex - 1);
+        break;
+      case 'Home':
+        e.preventDefault();
+        moveHighlight(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        moveHighlight(options.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        onValueChange(options[highlightedIndex].value);
+        setOpen(false);
+        break;
+      case 'Tab':
+        setOpen(false);
+        break;
+      default:
+        break;
+    }
+  };
 
   const isTop = placement === 'top';
 
@@ -167,7 +236,9 @@ export function Select({
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={listId}
+          aria-activedescendant={open && options[highlightedIndex] ? `${listId}-option-${highlightedIndex}` : undefined}
           onClick={() => setOpen((v) => !v)}
+          onKeyDown={onTriggerKeyDown}
           initial={false}
           animate={{
             borderTopLeftRadius: isTop ? kf : 12,
@@ -271,14 +342,21 @@ export function Select({
             animate={open ? 'show' : 'hidden'}
             className="max-h-[min(28rem,60vh)] overflow-y-auto p-1"
           >
-            {options.map((option) => {
+            {options.map((option, index) => {
               const selected = option.value === value;
+              const highlighted = index === highlightedIndex;
               return (
                 <motion.li key={option.value} variants={reduce ? undefined : ITEM_VARIANTS}>
                   <button
+                    ref={(node) => {
+                      optionRefs.current[index] = node;
+                    }}
+                    id={`${listId}-option-${index}`}
                     type="button"
                     role="option"
                     aria-selected={selected}
+                    tabIndex={-1}
+                    onMouseEnter={() => setHighlightedIndex(index)}
                     onClick={() => {
                       onValueChange(option.value);
                       setOpen(false);
@@ -288,6 +366,7 @@ export function Select({
                       selected
                         ? 'bg-primary/10 font-medium text-primary dark:bg-primary/[0.12] dark:text-primary'
                         : 'text-foreground/90 hover:bg-muted hover:text-foreground focus-visible:bg-muted',
+                      highlighted && !selected && 'bg-muted text-foreground',
                     )}
                   >
                     <span className="min-w-0">{option.label}</span>
