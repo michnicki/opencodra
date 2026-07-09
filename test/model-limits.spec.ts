@@ -15,8 +15,9 @@ describe('adaptiveModelTimeoutMs', () => {
   });
 
   it('scales with diff size beyond the free-line allowance', () => {
-    expect(adaptiveModelTimeoutMs(400)).toBe(MODEL_TIMEOUT_BASE_MS + 300 * 100);
-    expect(adaptiveModelTimeoutMs(400)).toBeGreaterThan(adaptiveModelTimeoutMs(200));
+    // Use line counts that stay below the MAX cap so the linear scaling is observable.
+    expect(adaptiveModelTimeoutMs(200)).toBe(MODEL_TIMEOUT_BASE_MS + 100 * 100);
+    expect(adaptiveModelTimeoutMs(250)).toBeGreaterThan(adaptiveModelTimeoutMs(150));
   });
 
   it('caps at the maximum regardless of diff size', () => {

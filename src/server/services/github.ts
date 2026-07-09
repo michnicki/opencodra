@@ -20,7 +20,7 @@ export class GitHubService {
     return this.client.createCheckRun(owner, repo, params);
   }
 
-  async updateCheckRun(owner: string, repo: string, checkRunId: number, params: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' }) {
+  async updateCheckRun(owner: string, repo: string, checkRunId: number, params: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' | 'cancelled' }) {
     return this.client.updateCheckRun(owner, repo, checkRunId, params);
   }
 

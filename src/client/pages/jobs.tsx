@@ -102,7 +102,8 @@ export function JobsPage() {
               { value: 'running', label: 'Running' },
               { value: 'done', label: 'Done' },
               { value: 'failed', label: 'Failed' },
-              { value: 'superseded', label: 'Superseded' }
+              { value: 'superseded', label: 'Superseded' },
+              { value: 'cancelled', label: 'Cancelled' }
             ]}
             triggerClassName="bg-transparent"
           />

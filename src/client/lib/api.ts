@@ -172,6 +172,21 @@ export const api = {
       method: 'POST',
     });
   },
+  rerunJob(id: string) {
+    return request<RetryJobResponse>(`/api/jobs/${pathSegment(id)}/rerun`, {
+      method: 'POST',
+    });
+  },
+  stopJob(id: string) {
+    return request<RetryJobResponse>(`/api/jobs/${pathSegment(id)}/stop`, {
+      method: 'POST',
+    });
+  },
+  deleteJob(id: string) {
+    return request<void>(`/api/jobs/${pathSegment(id)}`, {
+      method: 'DELETE',
+    });
+  },
   getRepos() {
     return request<RepoConfigsResponse>('/api/repos');
   },

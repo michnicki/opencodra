@@ -11,17 +11,17 @@ import { TokenTracker } from '@server/core/token-tracker';
 describe('TokenTracker.remainingSafeBudget', () => {
   it('starts with the full margin below the hard cap available', () => {
     const tracker = new TokenTracker();
-    // MAX_SUBREQUESTS (50) - SAFE_MARGIN (10) = 40, with nothing spent yet.
-    expect(tracker.remainingSafeBudget()).toBe(40);
+    // MAX_SUBREQUESTS (50) - SAFE_MARGIN (25) = 25, with nothing spent yet.
+    expect(tracker.remainingSafeBudget()).toBe(25);
   });
 
   it('shrinks by exactly what has been spent so far', () => {
     const tracker = new TokenTracker();
     tracker.incrementSubrequests(10);
-    expect(tracker.remainingSafeBudget()).toBe(30);
+    expect(tracker.remainingSafeBudget()).toBe(15);
 
     tracker.incrementSubrequests(5);
-    expect(tracker.remainingSafeBudget()).toBe(25);
+    expect(tracker.remainingSafeBudget()).toBe(10);
   });
 
   it('never goes negative once spending exceeds the safe margin', () => {
@@ -35,7 +35,8 @@ describe('TokenTracker.remainingSafeBudget', () => {
 
   it('agrees with isNearLimit at the same threshold', () => {
     const tracker = new TokenTracker();
-    tracker.incrementSubrequests(39);
+    // Near-limit / zero-safe-budget threshold is MAX_SUBREQUESTS (50) - SAFE_MARGIN (25) = 25.
+    tracker.incrementSubrequests(24);
     expect(tracker.isNearLimit()).toBe(false);
     expect(tracker.remainingSafeBudget()).toBeGreaterThan(0);
 

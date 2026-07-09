@@ -58,9 +58,18 @@ export class MockQueue {
 
 export class MockWorkflow {
   public readonly created: any[] = [];
+  public readonly terminated: string[] = [];
 
   async create(opts: any) {
     this.created.push(opts);
+  }
+
+  async get(id: string) {
+    return {
+      terminate: async () => {
+        this.terminated.push(id);
+      },
+    };
   }
 }
 

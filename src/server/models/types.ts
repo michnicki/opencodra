@@ -17,6 +17,20 @@ export class ProviderRequestError extends Error {
   }
 }
 
+/**
+ * Thrown when a model responds but produces no reviewable output -- reasoning/thinking only, a
+ * response truncated at the token limit, or an empty body. The file was NOT actually reviewed, so
+ * rather than synthesizing a fake "inconclusive" pass we throw: the fallback chain tries the next
+ * model, and if none succeed the file is honestly marked `failed`. Treated as a PERMANENT failure
+ * (not transient) because the outcome is deterministic -- retrying the same model just burns quota.
+ */
+export class UnparseableModelResponseError extends Error {
+  constructor(public readonly model: string, public readonly reason: string) {
+    super(`Model ${model} produced no reviewable output (${reason}); the file review failed.`);
+    this.name = 'UnparseableModelResponseError';
+  }
+}
+
 export function providerErrorMessage(errorText: string) {
   try {
     const parsed = JSON.parse(errorText) as unknown;

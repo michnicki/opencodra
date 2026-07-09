@@ -1,16 +1,43 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronRight, ExternalLink, RotateCcw, Terminal } from 'lucide-react';
+import {
+  ChevronRight,
+  CircleStop,
+  ExternalLink,
+  Loader2,
+  RotateCcw,
+  Terminal,
+  Trash2,
+} from 'lucide-react';
 import { Button } from '@client/components/ui/button';
+import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
 import { UpdatesEmailPrompt } from '@client/components/features/dashboard/updates-email-prompt';
 import type { JobDetail } from '@shared/schema';
 
 interface JobHeaderProps {
   job: JobDetail;
-  isRetrying: boolean;
-  onRetry: () => void;
+  isRerunning: boolean;
+  isStopping: boolean;
+  isDeleting: boolean;
+  onRerun: () => void;
+  onStop: () => void;
+  onDelete: () => void;
 }
 
-export function JobHeader({ job, isRetrying, onRetry }: JobHeaderProps) {
+export function JobHeader({
+  job,
+  isRerunning,
+  isStopping,
+  isDeleting,
+  onRerun,
+  onStop,
+  onDelete,
+}: JobHeaderProps) {
+  const [stopOpen, setStopOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const canStop = job.status === 'running' || job.status === 'queued';
+
   return (
     <>
       <header className="flex flex-col sm:flex-row items-start justify-between gap-4">
@@ -43,24 +70,70 @@ export function JobHeader({ job, isRetrying, onRetry }: JobHeaderProps) {
         </p>
       </div>
 
-      <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-        <Button variant="outline" asChild className="w-full sm:w-auto gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+        <Button variant="outline" asChild className="gap-2">
           <Link to={`/jobs/${job.id}/logs`}>
             <Terminal size={14} />
             Raw Logs
           </Link>
         </Button>
+
+        {/* A single re-run control. It always restarts the review from the beginning (a fresh
+            review of every file) and works whether the job is finished, failed, or still running. */}
         <Button
-          variant={job.status === 'failed' ? 'destructive' : 'default'}
-          disabled={isRetrying || job.status === 'running' || job.status === 'queued'}
-          onClick={onRetry}
-          className="shrink-0 gap-2 w-full sm:w-auto"
+          variant="default"
+          disabled={isRerunning}
+          onClick={onRerun}
+          className="gap-2 shrink-0"
         >
-          <RotateCcw size={14} />
-          {isRetrying ? 'Starting…' : job.status === 'failed' ? 'Retry job' : 'Re-run job'}
+          {isRerunning ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+          {isRerunning ? 'Starting…' : job.status === 'failed' ? 'Retry job' : 'Re-run job'}
+        </Button>
+
+        <Button
+          variant="warning-outline"
+          size="icon"
+          disabled={!canStop || isStopping}
+          onClick={() => setStopOpen(true)}
+          title="Stop review"
+          aria-label="Stop review"
+        >
+          {isStopping ? <Loader2 size={14} className="animate-spin" /> : <CircleStop size={14} />}
+        </Button>
+
+        <Button
+          variant="destructive-outline"
+          size="icon"
+          disabled={isDeleting}
+          onClick={() => setDeleteOpen(true)}
+          title="Delete job"
+          aria-label="Delete job"
+        >
+          {isDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
         </Button>
       </div>
       </header>
+
+      <ConfirmDialog
+        open={stopOpen}
+        onOpenChange={setStopOpen}
+        title="Stop this review?"
+        description="This cancels the ongoing review for this pull request. Any files not yet reviewed will be left unreviewed."
+        confirmLabel="Stop review"
+        confirmVariant="destructive"
+        onConfirm={onStop}
+      />
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title="Delete this job?"
+        description="This permanently removes the job and its review history. This action cannot be undone."
+        confirmLabel="Delete job"
+        confirmVariant="destructive"
+        onConfirm={onDelete}
+      />
+
       <UpdatesEmailPrompt />
     </>
   );

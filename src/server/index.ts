@@ -5,7 +5,7 @@ import type { AppBindings } from './env';
 import { reviewJobMessageSchema } from '@shared/schema';
 import { logger } from '@server/core/logger';
 import { runWithDb } from '@server/db/client';
-import { failJob } from '@server/db/jobs';
+import { failJob, hasPendingMaintenanceWork, clearSystemActive } from '@server/db/jobs';
 import { runBestEffortJobMaintenance } from '@server/core/job-recovery';
 
 const app = createApp();
@@ -18,8 +18,32 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: AppBindings, _ctx: ExecutionContext) {
+    // The cron fires every 2 minutes, but its only job is maintenance (recovering stuck jobs and
+    // finishing check runs). Touching Postgres on every tick would keep the serverless DB awake
+    // 24/7. So gate the DB work on a KV flag that is set whenever a job is created/claimed and
+    // cleared below once there is genuinely nothing left to maintain. When the flag is absent we
+    // return without ever opening a DB connection, letting Postgres suspend.
+    try {
+      const active = await env.APP_KV.get('system:active_jobs');
+      if (!active) {
+        return;
+      }
+    } catch (error) {
+      logger.warn('Failed to read active jobs flag from KV, proceeding with maintenance', error instanceof Error ? error : new Error(String(error)));
+    }
+
     return runWithDb(env, async () => {
       await runBestEffortJobMaintenance(env);
+      // As soon as no jobs are running/recoverable and no check runs are outstanding, drop the
+      // flag so the next tick skips Postgres entirely (instead of waiting out the 20-minute TTL).
+      // A new job re-sets the flag on insert/claim, so this only trims the idle tail.
+      try {
+        if (!(await hasPendingMaintenanceWork(env))) {
+          await clearSystemActive(env);
+        }
+      } catch (error) {
+        logger.warn('Failed to evaluate pending maintenance work; leaving active-jobs flag to expire via TTL', error instanceof Error ? error : new Error(String(error)));
+      }
     });
   },
 

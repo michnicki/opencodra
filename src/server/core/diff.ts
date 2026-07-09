@@ -322,3 +322,62 @@ export function truncateFileDiff(file: FileDiff, maxLines: number): FileDiff {
     originalLineCount: file.lineCount,
   };
 }
+
+export function chunkFileDiff(file: FileDiff, maxLinesPerChunk: number): FileDiff[] {
+  if (file.lineCount <= maxLinesPerChunk) {
+    return [file];
+  }
+
+  const chunks: FileDiff[] = [];
+  let currentHunks: DiffHunk[] = [];
+  let currentLines = 0;
+
+  for (const hunk of file.hunks) {
+    let linesRemainingInHunk = hunk.lines;
+
+    while (linesRemainingInHunk.length > 0) {
+      const roomInChunk = maxLinesPerChunk - currentLines;
+
+      if (roomInChunk <= 0) {
+        chunks.push({
+          ...file,
+          hunks: currentHunks,
+          lineCount: currentLines,
+          isTruncated: true,
+          originalLineCount: file.lineCount,
+        });
+        currentHunks = [];
+        currentLines = 0;
+        continue;
+      }
+
+      if (linesRemainingInHunk.length <= roomInChunk) {
+        currentHunks.push({
+          ...hunk,
+          lines: linesRemainingInHunk,
+        });
+        currentLines += linesRemainingInHunk.length;
+        linesRemainingInHunk = [];
+      } else {
+        currentHunks.push({
+          ...hunk,
+          lines: linesRemainingInHunk.slice(0, roomInChunk),
+        });
+        currentLines += roomInChunk;
+        linesRemainingInHunk = linesRemainingInHunk.slice(roomInChunk);
+      }
+    }
+  }
+
+  if (currentHunks.length > 0) {
+    chunks.push({
+      ...file,
+      hunks: currentHunks,
+      lineCount: currentLines,
+      isTruncated: true,
+      originalLineCount: file.lineCount,
+    });
+  }
+
+  return chunks;
+}

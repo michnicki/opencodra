@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const reviewTriggers = ['auto', 'mention', 'retry'] as const;
-export const jobStatuses = ['queued', 'running', 'done', 'failed', 'superseded'] as const;
+export const jobStatuses = ['queued', 'running', 'done', 'failed', 'superseded', 'cancelled'] as const;
 export const fileStatuses = ['pending', 'done', 'skipped', 'failed'] as const;
 export const reviewVerdicts = ['approve', 'comment'] as const;
 export const reviewSeverities = ['P0', 'P1', 'P2', 'P3', 'nit'] as const;

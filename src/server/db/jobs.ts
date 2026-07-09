@@ -15,7 +15,7 @@ export type JobRow = {
   commit_sha: ByteaValue;
   base_sha: ByteaValue;
   trigger: 'auto' | 'mention' | 'retry';
-  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded' | 'cancelled';
   config_snapshot: { review?: RepoConfig['review']; model?: RepoConfig['model'] } | string | null;
   check_run_id: number | null;
   check_run_completed_at: string | null;
@@ -155,8 +155,44 @@ export async function setJobWorkflowInstance(env: Pick<AppBindings, 'HYPERDRIVE'
   );
 }
 
+export async function markSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
+  try {
+    await env.APP_KV.put('system:active_jobs', '1', { expirationTtl: 20 * 60 });
+  } catch (error) {
+    // Ignore KV errors to avoid failing the DB transaction
+  }
+}
+
+export async function clearSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
+  try {
+    await env.APP_KV.delete('system:active_jobs');
+  } catch (error) {
+    // Best-effort: the 20-minute TTL on the flag is the backstop if this delete fails.
+  }
+}
+
+/**
+ * Whether the scheduled maintenance loop still has anything to do: any job that could still be
+ * running/recoverable (queued/running) or any terminal job whose GitHub check run hasn't been
+ * completed yet. When this is false the cron can clear the `system:active_jobs` flag so subsequent
+ * ticks skip the DB entirely and the serverless Postgres is allowed to suspend.
+ */
+export async function hasPendingMaintenanceWork(env: Pick<AppBindings, 'HYPERDRIVE'>): Promise<boolean> {
+  const rows = await queryRows<{ has_work: boolean }>(
+    env,
+    `
+      SELECT EXISTS (
+        SELECT 1 FROM jobs
+        WHERE status IN ('queued', 'running')
+           OR (status IN ('failed', 'superseded', 'cancelled') AND check_run_id IS NOT NULL AND check_run_completed_at IS NULL)
+      ) AS has_work
+    `,
+  );
+  return rows[0]?.has_work === true;
+}
+
 export async function insertJob(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   input: {
     installationId: string;
     owner: string;
@@ -219,6 +255,7 @@ export async function insertJob(
     ],
   );
 
+  await markSystemActive(env);
   return mapJob(row);
 }
 
@@ -423,7 +460,7 @@ export async function startJobProcessing(env: Pick<AppBindings, 'HYPERDRIVE'>, j
 }
 
 export async function claimJobLease(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   jobId: string,
   leaseOwner: string,
   leaseSeconds: number,
@@ -462,6 +499,7 @@ export async function claimJobLease(
   );
 
   if (claimed) {
+    await markSystemActive(env);
     return { status: 'claimed', row: claimed };
   }
 
@@ -486,7 +524,7 @@ export async function claimJobLease(
 }
 
 export async function heartbeatJobLease(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   jobId: string,
   leaseOwner: string,
   leaseSeconds: number,
@@ -503,6 +541,7 @@ export async function heartbeatJobLease(
     `,
     [jobId, leaseOwner, String(leaseSeconds)],
   );
+  await markSystemActive(env);
 }
 
 export async function releaseJobLease(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, leaseOwner: string) {
@@ -648,7 +687,7 @@ export async function completeJob(
   );
 }
 
-export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, errorMessage: string) {
+export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>, jobId: string, errorMessage: string) {
   await queryRows(
     env,
     `
@@ -674,6 +713,59 @@ export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: strin
     `,
     [jobId, errorMessage],
   );
+  await markSystemActive(env);
+}
+
+/**
+ * Stop an ongoing (queued/running) job at the user's request: mark it terminal as 'cancelled',
+ * clear the lease (so lease-recovery won't requeue it) and mark any running steps failed. Returns
+ * true if a job was actually transitioned (false if it was already terminal). The caller is
+ * responsible for terminating the Cloudflare Workflow instance.
+ */
+export async function cancelJob(env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>, jobId: string): Promise<boolean> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `
+      UPDATE jobs
+      SET status = 'cancelled',
+          finished_at = now(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          error_msg = COALESCE(error_msg, 'Stopped by user.'),
+          steps = CASE
+            WHEN steps IS NOT NULL THEN (
+              SELECT jsonb_agg(
+                CASE
+                  WHEN s->>'status' = 'running'
+                  THEN s || jsonb_build_object('status', 'failed', 'finishedAt', now(), 'error', 'Stopped by user.')
+                  ELSE s
+                END
+              ) FROM jsonb_array_elements(steps) s
+            )
+            ELSE steps
+          END
+      WHERE id = $1 AND status IN ('queued', 'running')
+      RETURNING id
+    `,
+    [jobId],
+  );
+  // Keep the maintenance flag set so the cron completes the GitHub check run for the cancelled job.
+  if (rows.length > 0) await markSystemActive(env);
+  return rows.length > 0;
+}
+
+/**
+ * Permanently delete a job. file_reviews and review_comments cascade automatically (ON DELETE
+ * CASCADE); child retry jobs have their retry_of_job_id nulled (ON DELETE SET NULL). Returns true
+ * if a row was deleted.
+ */
+export async function deleteJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string): Promise<boolean> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `DELETE FROM jobs WHERE id = $1 RETURNING id`,
+    [jobId],
+  );
+  return rows.length > 0;
 }
 
 export async function markJobCheckRunCompleted(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string) {
@@ -927,7 +1019,7 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
       SELECT j.*, r.owner, r.repo, r.installation_id
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
-      WHERE j.status IN ('failed', 'superseded')
+      WHERE j.status IN ('failed', 'superseded', 'cancelled')
         AND j.check_run_id IS NOT NULL
         AND j.check_run_completed_at IS NULL
       ORDER BY COALESCE(j.finished_at, j.started_at, j.created_at) ASC

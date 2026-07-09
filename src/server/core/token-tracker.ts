@@ -14,7 +14,10 @@ export class TokenTracker {
   private usage: Map<string, ModelUsage> = new Map();
   private subrequests = 0;
   private readonly MAX_SUBREQUESTS = 50;
-  private readonly SAFE_MARGIN = 10; // Lowered since finalize runs in a separate invocation
+  // Increased from 10 to 25 to account for the untracked Hyperdrive queries that happen per chunk
+  // (e.g. lease heartbeats, getting reviews, upserting reviews, etc.) which can easily add ~15
+  // subrequests that the tracker doesn't see.
+  private readonly SAFE_MARGIN = 25;
 
   incrementSubrequests(count = 1) {
     this.subrequests += count;
