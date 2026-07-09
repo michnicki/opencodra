@@ -1,5 +1,4 @@
 import { createApp } from './app';
-import { runReviewJob } from './core/review';
 import { ReviewWorkflow } from './workflows/review';
 import type { AppBindings } from './env';
 import { reviewJobMessageSchema } from '@shared/schema';
@@ -63,12 +62,29 @@ export default {
             body: message.body,
             error: parseResult.error.flatten(),
           });
-          message.ack(); // Drop invalid schema messages
+          // A malformed message can't be processed and retrying won't help, so ack it -- but if it
+          // still carries a recognizable jobId, fail that job so it doesn't sit 'queued' forever
+          // (lease recovery only revives 'running' rows).
+          const strandedId = (message.body as { jobId?: unknown })?.jobId;
+          if (typeof strandedId === 'string' && /^[0-9a-f-]{36}$/i.test(strandedId)) {
+            try {
+              await failJob(env, strandedId, 'Review dropped: the queue message failed schema validation.');
+            } catch (failError) {
+              logger.error('Failed to fail job stranded by an invalid queue message', failError instanceof Error ? failError : new Error(String(failError)));
+            }
+          }
+          message.ack();
           continue;
         }
 
         try {
-          const id = parseResult.data.jobId ?? parseResult.data.deliveryId;
+          // Recovery re-enqueues a stuck job under its original jobId; keying the instance on jobId
+          // would collide with the dead instance (instance.already_exists) and get dropped as a
+          // duplicate, so recovery sets forceFreshInstance to key the new instance on the (fresh)
+          // deliveryId. deliveryId is a UUID, matching the workflow_instance_id column type.
+          const id = parseResult.data.forceFreshInstance
+            ? parseResult.data.deliveryId
+            : (parseResult.data.jobId ?? parseResult.data.deliveryId);
           if (!id) {
             logger.error('Message missing identifiers; dropping', { body: message.body });
             message.ack();

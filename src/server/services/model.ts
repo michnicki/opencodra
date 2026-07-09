@@ -12,6 +12,7 @@ import type { TokenTracker } from '../core/token-tracker';
 import { UnparseableModelResponseError, type ModelResponse } from '../models/types';
 import { logger } from '../core/logger';
 import { normalizeModelId } from '@shared/schema';
+import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import { getResolvedModelConfig, type ResolvedModelConfig } from '@server/db/model-configs';
 import { decryptLlmApiKey } from '@server/core/llm-crypto';
 import { ModelCallGate, adaptiveModelTimeoutMs, MODEL_FALLBACK_CHAIN_BUDGET_MS } from '../models/limits';
@@ -76,20 +77,22 @@ function isTransientModelFailure(error: unknown) {
   const lower = message.toLowerCase();
 
   // Explicitly fail fast for timeouts so they don't loop endlessly
-  if (lower.includes('timed out') || lower.includes('timeout')) {
+  if (isTimeoutMessage(lower)) {
     return false;
   }
 
   return (
     isGoogleRateLimitError(error) ||
-    lower.includes('unavailable') ||
-    lower.includes('high demand') ||
+    matchesAnyTransientSubstring(lower) ||
     lower.includes('fetch failed') ||
     lower.includes('network') ||
     lower.includes('temporar') ||
-    lower.includes('returned no review content') ||
-    lower.includes('empty response') ||
-    lower.includes('[redacted]')
+    // Upstream 5xx (e.g. Gemini's frequent "request failed with 500: Internal error encountered")
+    // is a transient server-side outage, not a deterministic client error. Without this a sustained
+    // 5xx run makes every model in the chain throw a non-transient error, so the file is marked
+    // permanently failed instead of being deferred and retried once the provider recovers.
+    /\b50[0-9]\b/.test(lower) ||
+    lower.includes('internal error')
   );
 }
 
@@ -314,7 +317,9 @@ export class ModelService {
       : configuredLineCap;
 
     let chunks = chunkFileDiff(params.file, modelLineCap);
-    
+    // Remember the pre-cap chunk count so wasPromptTruncated doesn't have to re-run chunkFileDiff.
+    const totalChunkCount = chunks.length;
+
     // Cap chunks to prevent single files from burning all subrequests and getting stuck.
     const MAX_CHUNKS = 4;
     if (chunks.length > MAX_CHUNKS) {
@@ -347,7 +352,10 @@ export class ModelService {
     }
 
     const combinedFindings = results.flatMap(r => r.parsed.comments);
-    const primaryResult = results[results.length - 1];
+    // Report the file with the most serious chunk's verdict/summary/correctness, not just the last
+    // chunk's: taking `results[results.length - 1]` would let a clean final chunk mask real findings
+    // from an earlier chunk of the same file (reporting verdict 'approve' while carrying its comments).
+    const primaryResult = results.find(r => r.parsed.verdict === 'comment') ?? results[results.length - 1];
 
     return {
       ...primaryResult,
@@ -358,7 +366,7 @@ export class ModelService {
         comments: combinedFindings,
       },
       reviewedLineCount: results.reduce((sum, r) => sum + r.reviewedLineCount, 0),
-      wasPromptTruncated: chunks.length < chunkFileDiff(params.file, modelLineCap).length || results.length < chunks.length,
+      wasPromptTruncated: chunks.length < totalChunkCount || results.length < chunks.length,
     };
   }
 
@@ -542,52 +550,40 @@ export class ModelService {
         continue;
       }
 
-      let attempts = 0;
-      const maxAttempts = 1;
+      // One shot per model: a failed call is never retried against the same model (a retryable
+      // outage is handled by deferring the whole file to a fresh invocation), so on failure we just
+      // fall through to the next model in the fallback chain.
+      try {
+        const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt }, timeoutMs);
 
-      while (attempts < maxAttempts) {
-        try {
-          const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt }, timeoutMs);
-
-          if (this.tracker) {
-            this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
-          }
-
-          const parsed = parseFileReviewResponse(response.rawText, params.file);
-          return {
-            ...response,
-            parsed,
-            userPrompt,
-            reviewedLineCount: params.file.lineCount,
-            wasPromptTruncated: params.file.isTruncated === true,
-          };
-        } catch (error) {
-          lastError = error;
-          if (isTransientModelFailure(error)) {
-            sawTransientFailure = true;
-            lastTransientError = error;
-          }
-          attempts++;
-          if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
-            await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
-          }
-
-          const isRateLimit = isGoogleRateLimitError(error);
-          const isRetryable = false;
-          const errorMessage = error instanceof Error ? error.message : String(error);
-
-          logger.warn(`Model ${currentModel} failed for ${params.file.path} (attempt ${attempts}/${maxAttempts})`, {
-            error: errorMessage,
-            rateLimited: isRateLimit,
-            willRetrySameModel: isRetryable,
-            willTryFallback: !isRetryable && modelsToTry.indexOf(currentModel) < modelsToTry.length - 1
-          });
-
-          if (isRetryable) {
-            continue;
-          }
-          break; // Move to next model in fallbacks
+        if (this.tracker) {
+          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
         }
+
+        const parsed = parseFileReviewResponse(response.rawText, params.file);
+        return {
+          ...response,
+          parsed,
+          userPrompt,
+          reviewedLineCount: params.file.lineCount,
+          wasPromptTruncated: params.file.isTruncated === true,
+        };
+      } catch (error) {
+        lastError = error;
+        if (isTransientModelFailure(error)) {
+          sawTransientFailure = true;
+          lastTransientError = error;
+        }
+        if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
+          await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
+        }
+
+        logger.warn(`Model ${currentModel} failed for ${params.file.path}`, {
+          error: error instanceof Error ? error.message : String(error),
+          rateLimited: isGoogleRateLimitError(error),
+          willTryFallback: modelIndex < modelsToTry.length - 1,
+        });
+        // Fall through to the next model in the fallback chain.
       }
     }
 

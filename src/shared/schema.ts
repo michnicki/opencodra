@@ -160,6 +160,12 @@ export const reviewJobMessageSchema = z.object({
   commitSha: z.string().min(1).optional(),
   trigger: z.enum(reviewTriggers).optional(),
   requestId: z.string().optional(),
+  // The actual Cloudflare Workflow instance id, injected by the workflow so runReviewJob can bind
+  // it to the resolved job row (webhook jobs can't be bound at instance-create time).
+  workflowInstanceId: z.string().optional(),
+  // Set by lease recovery so the queue consumer creates a FRESH instance (keyed on deliveryId)
+  // instead of colliding with the dead instance that is still keyed on jobId.
+  forceFreshInstance: z.boolean().optional(),
 }).superRefine((message, ctx) => {
   if (message.jobId || message.eventName) {
     return;

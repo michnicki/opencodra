@@ -13,6 +13,10 @@ export async function recoverJobs(env: AppBindings) {
         jobId,
         deliveryId: crypto.randomUUID(),
         phase: 'review',
+        // The job's previous Workflow instance (keyed on jobId) is dead but still exists, so a
+        // same-id create() would be dropped as a duplicate. Force a fresh instance keyed on the new
+        // deliveryId so the recovered job actually resumes instead of climbing recovery_count.
+        forceFreshInstance: true,
       });
     }
 
