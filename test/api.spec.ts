@@ -704,7 +704,8 @@ describe('Dashboard API Suite', () => {
     }, env);
 
     expect(response.status).toBe(502);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // GEMINI_MAX_RETRIES = 2, so a persistent 5xx is attempted 3 times before giving up.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const data = await response.json() as { error: string };
     expect(data.error).toContain('Internal error encountered.');
   });
@@ -957,6 +958,76 @@ describe('Dashboard API Suite', () => {
         },
       ],
     });
+  });
+
+  it('stops an ongoing job: marks it cancelled and terminates the workflow', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `stop-${Date.now()}`, prNumber: 1,
+      prTitle: 'Stop', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${job.id}/stop`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { job: { status: string } };
+    expect(body.job.status).toBe('cancelled');
+    expect((env.REVIEW_WORKFLOW as any).terminated).toContain(job.id);
+
+    const row = await getJobForProcessing(env, job.id);
+    expect(row?.status).toBe('cancelled');
+
+    // Stopping an already-terminal job is a 409.
+    const second = await app.request(`/api/jobs/${job.id}/stop`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+    expect(second.status).toBe(409);
+  });
+
+  it('deletes a job (and it is gone afterwards)', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `delete-${Date.now()}`, prNumber: 1,
+      prTitle: 'Delete', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${job.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(204);
+    expect(await getJobForProcessing(env, job.id)).toBeNull();
+  });
+
+  it('reruns a job from start: creates a fresh job that does NOT inherit the parent (no retryOfJobId)', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const source = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `rerun-${Date.now()}`, prNumber: 1,
+      prTitle: 'Rerun', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${source.id}/rerun`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(202);
+    const body = await response.json() as { job: { id: string } };
+    expect(body.job.id).not.toBe(source.id);
+    const fresh = await getJobForProcessing(env, body.job.id);
+    // Rerun-from-start must not inherit parent file reviews, so retry_of_job_id stays null.
+    expect(fresh?.retry_of_job_id ?? null).toBeNull();
   });
 
   it('accepts legacy jobId-only queue messages during schema transition', () => {

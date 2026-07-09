@@ -28,19 +28,26 @@ export async function recoverJobs(env: AppBindings) {
 }
 
 export async function completeTerminalCheckRuns(env: AppBindings) {
-  // Limit to 5 to avoid Cloudflare's 50 subrequest limit per invocation.
-  // Each job requires 1 GitHub API request and 1 DB update.
-  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env, 5);
+  // Limit to 1 to avoid Cloudflare's 50 subrequest limit per invocation,
+  // especially when called opportunistically via waitUntil during API polling.
+  // Each job requires multiple subrequests (KV, GitHub API, Hyperdrive).
+  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env, 1);
   for (const job of jobs) {
     if (!job.check_run_id) continue;
 
     try {
       const github = new GitHubService(env, job.installation_id);
+      const checkRunPresentation = {
+        superseded: { conclusion: 'neutral' as const, title: 'Review superseded', summary: 'Superseded by a newer commit or job.' },
+        cancelled: { conclusion: 'cancelled' as const, title: 'Review stopped', summary: 'Stopped by user.' },
+        failed: { conclusion: 'failure' as const, title: 'Review failed', summary: 'Review failed.' },
+      };
+      const presentation = checkRunPresentation[job.status as keyof typeof checkRunPresentation] ?? checkRunPresentation.failed;
       await github.updateCheckRun(job.owner, job.repo, job.check_run_id, {
         status: 'completed',
-        conclusion: job.status === 'superseded' ? 'neutral' : 'failure',
-        title: job.status === 'superseded' ? 'Review superseded' : 'Review failed',
-        summary: job.error_msg ?? (job.status === 'superseded' ? 'Superseded by a newer commit or job.' : 'Review failed.'),
+        conclusion: presentation.conclusion,
+        title: presentation.title,
+        summary: job.error_msg ?? presentation.summary,
       });
       await markJobCheckRunCompleted(env, job.id);
     } catch (error) {

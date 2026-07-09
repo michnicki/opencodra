@@ -136,14 +136,30 @@ describe('runReviewJob subrequest-budget handling', () => {
     expect(failJobMock).not.toHaveBeenCalled();
   });
 
-  it('fails the job terminally once it exceeds the continuation ceiling without making progress', async () => {
+  it('degrades a wedged review phase to a partial review (finalize) once it exceeds the continuation ceiling', async () => {
     const env = createTestEnv();
-    // Post-increment count above MAX_JOB_CONTINUATIONS (20): the job is wedged, so it must stop
-    // churning and fail terminally instead of rescheduling yet again.
+    // Post-increment count above MAX_JOB_CONTINUATIONS (20): the review phase is wedged, so
+    // rather than discarding all completed file reviews it must hand off to finalize and post a
+    // partial review. It must NOT fail the job terminally, and must return (not throw) that
+    // transition -- enqueueJobPhase would throw NextPhaseError and escape the catch block.
     markJobContinuationQueuedMock.mockResolvedValue(21);
     getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
 
     const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
+
+    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+    expect(failJobMock).not.toHaveBeenCalled();
+    expect(releaseJobLeaseMock).toHaveBeenCalled();
+  });
+
+  it('fails a non-review phase terminally once it exceeds the continuation ceiling without making progress', async () => {
+    const env = createTestEnv();
+    // The graceful degrade-to-finalize path only applies to the review phase; a wedged prepare
+    // phase has no partial result to salvage, so it must still fail terminally instead of churning.
+    markJobContinuationQueuedMock.mockResolvedValue(21);
+    getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
+
+    const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'prepare' } as any);
 
     expect(result).toEqual({ action: 'ack' });
     expect(failJobMock).toHaveBeenCalledTimes(1);

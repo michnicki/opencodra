@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle } from 'lucide-react';
-import { Button } from '@client/components/ui/button';
+import { Button, type ButtonProps } from '@client/components/ui/button';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -9,6 +9,7 @@ interface ConfirmDialogProps {
   description: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  confirmVariant?: ButtonProps['variant'];
   onConfirm: () => void;
 }
 
@@ -19,6 +20,7 @@ export function ConfirmDialog({
   description,
   confirmLabel = 'Continue',
   cancelLabel = 'Cancel',
+  confirmVariant = 'default',
   onConfirm,
 }: ConfirmDialogProps) {
   return (
@@ -43,7 +45,7 @@ export function ConfirmDialog({
               <Button variant="outline">{cancelLabel}</Button>
             </Dialog.Close>
             <Button
-              variant="default"
+              variant={confirmVariant}
               onClick={() => {
                 onConfirm();
                 onOpenChange(false);

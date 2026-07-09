@@ -13,22 +13,37 @@
  *    call is a wasted subrequest.
  */
 
-/** Base wall-clock budget for a model call reviewing a small diff. Successful review calls in
- * production land in the ~10-50s range; anything slower on a small prompt is almost always a
- * stuck/overloaded model, so fail over to the next model quickly instead of stalling the chunk. */
-export const MODEL_TIMEOUT_BASE_MS = 45_000;
+/** Base wall-clock budget for a model call reviewing a small diff. A fast, suitable model
+ * (e.g. a Gemini flash model) answers in ~1-5s, so 20s is generous headroom; anything slower is a
+ * stuck/overloaded/queued model and we fail over quickly. */
+export const MODEL_TIMEOUT_BASE_MS = 20_000;
 /** Extra time granted per diff line beyond MODEL_TIMEOUT_FREE_LINES -- large diffs legitimately
  * need longer generations. */
 export const MODEL_TIMEOUT_PER_LINE_MS = 100;
 /** Diff lines included in the base budget before per-line scaling kicks in. */
 export const MODEL_TIMEOUT_FREE_LINES = 100;
-/** Ceiling regardless of diff size; keeps a single call well under the workflow's 15-minute
- * step timeout even with several fallbacks. */
-export const MODEL_TIMEOUT_MAX_MS = 120_000;
+/**
+ * Hard ceiling for a single model call. CRITICAL: this must stay well under the Cloudflare Worker
+ * *invocation* wall-clock limit (~120s). If one call is allowed to run near 120s (as the old
+ * 120_000 ceiling permitted for large diffs), a hung/queued call makes the whole workflow
+ * invocation get killed as `exceededCpu` -- losing all progress and looping -- instead of the call
+ * timing out gracefully and failing over. 40s leaves room for a couple of sequential fallback
+ * attempts within one invocation while never approaching the platform limit.
+ */
+export const MODEL_TIMEOUT_MAX_MS = 40_000;
+
+/**
+ * Wall-clock budget for a single file's entire fallback chain within one invocation. Even with a
+ * short per-call ceiling, a file that fails over through many configured models could otherwise
+ * run several calls back-to-back and push the invocation past the ~120s platform limit. Once a
+ * file's chain has spent this long, stop trying more models and defer it -- it resumes from the
+ * (fast) primary model in a fresh invocation. Keeps one file's chain safely under the invocation cap.
+ */
+export const MODEL_FALLBACK_CHAIN_BUDGET_MS = 55_000;
 
 /**
  * Wall-clock timeout for one model call, scaled by the size of the (already truncated) diff
- * the model has to review. Small diffs fail over fast; large diffs get up to 2 minutes.
+ * the model has to review. Small diffs fail over fast; large diffs get up to MODEL_TIMEOUT_MAX_MS.
  */
 export function adaptiveModelTimeoutMs(diffLineCount: number | null | undefined): number {
   const lines = typeof diffLineCount === 'number' && Number.isFinite(diffLineCount) ? Math.max(0, diffLineCount) : 0;

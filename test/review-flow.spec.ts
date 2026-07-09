@@ -3,8 +3,8 @@ import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from '.
 import { vi } from 'vitest';
 import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
-import { defaultRepoConfig } from '@shared/schema';
-import { runWithDb } from '@server/db/client';
+import { defaultRepoConfig, type ParsedReviewComment } from '@shared/schema';
+import { runWithDb, queryRows } from '@server/db/client';
 
 const sha = (char: string) => char.repeat(40);
 
@@ -44,6 +44,14 @@ vi.mock('@server/services/github', () => {
 
 vi.mock('@server/services/model', () => {
     class MockModelService {
+        // Return null so the review phase uses the synchronous reviewFile path these tests exercise.
+        // (A real request_id here would route through the async batch submit/poll flow instead.)
+        async submitReviewBatch() {
+            return null;
+        }
+        async pollReviewBatch() {
+            return { status: 'pending' as const };
+        }
         async reviewFile() {
             return {
                 parsed: {
@@ -102,6 +110,17 @@ dbDescribe('Review Flow Lifecycle', () => {
         if (result.action === 'next_phase') {
           currentMessage = { ...currentMessage, phase: result.phase };
           retries = 0;
+          // Phase/chunk transitions now yield long enough to hibernate into a fresh invocation,
+          // which schedules the next delivery into the future (last_queue_message_at). In-process
+          // we don't actually wait, so backdate it to simulate the delay elapsing -- otherwise the
+          // next claim would report 'busy'.
+          const jobId = (currentMessage as any).jobId;
+          const repo = (currentMessage as any).payload?.repository?.name;
+          if (jobId) {
+            await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [jobId]);
+          } else if (repo) {
+            await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE repository_id IN (SELECT id FROM repositories WHERE repo = $1)`, [repo]);
+          }
         } else if (result.action === 'retry') {
           if (++retries > MAX_RETRIES) throw new Error('Max retries exceeded');
           // In test environments, if we get throttled or told to retry, just break to prevent infinite loops.
@@ -330,6 +349,99 @@ dbDescribe('Review Flow Lifecycle', () => {
     reviewSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
 
+  it('inherits a parent review when the config model id is provider-prefixed but the stored model_used is bare', async () => {
+    // Regression: file reviews persist the bare model id (e.g. `gemini-3.1-flash-lite`) while the
+    // configured strategy stores the provider-qualified id (e.g. `google:gemini-3.1-flash-lite`).
+    // Inheritance must match on the bare name; otherwise every retry re-reviews every file.
+    const { ModelService } = await import('@server/services/model');
+    const reviewSpy = vi.spyOn(ModelService.prototype, 'reviewFile');
+    const repo = `test-repo-${Date.now()}-retry-prefix`;
+    const sourceHeadSha = sha('a');
+    const retryHeadSha = sha('b');
+    const baseSha = sha('0');
+
+    const prefixedConfig = {
+      ...defaultRepoConfig,
+      model: {
+        main: 'google:gemini-3.1-flash-lite',
+        fallbacks: ['google:gemini-2.5-flash-lite'],
+        size_overrides: [],
+      },
+    };
+
+    const source = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 7,
+      prTitle: 'Retry Prefix Match',
+      prAuthor: 'author',
+      commitSha: sourceHeadSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: prefixedConfig,
+    });
+
+    await upsertFileReview(env, source.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'gemini-3.1-flash-lite', // bare, as the model service actually stores it
+      modelProvider: 'google',
+      diffLineCount: 1,
+      diffInput: 'old diff',
+      rawAiOutput: '{}',
+      parsedComments: [{
+        path: 'src/app.ts',
+        line: 1,
+        position: 1,
+        severity: 'P2',
+        category: 'quality',
+        title: 'Inherited finding',
+        body: 'This comment must survive inheritance',
+      }],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'comment',
+      fileSummary: 'inherited-summary',
+      errorMessage: null,
+    });
+
+    const retry = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 7,
+      prTitle: 'Retry Prefix Match',
+      prAuthor: 'author',
+      commitSha: retryHeadSha,
+      baseSha,
+      trigger: 'retry',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: prefixedConfig,
+      retryOfJobId: source.id,
+    });
+
+    await runAndDrain({
+      jobId: retry.id,
+      deliveryId: 'delivery-retry-prefix-match',
+    });
+
+    // The file must be inherited verbatim (bare model id + parent summary preserved), not re-reviewed.
+    expect(reviewSpy).not.toHaveBeenCalled();
+    const reviews = await getFileReviewsForJobs(env, [retry.id]);
+    const inherited = reviews.find((review) => review.file_path === 'src/app.ts');
+    expect(inherited?.model_used).toBe('gemini-3.1-flash-lite');
+    expect(inherited?.file_summary).toBe('inherited-summary');
+    // The parent's comments must be carried over by the bulk-inherit copy, not lost.
+    expect(inherited?.parsed_comments).toHaveLength(1);
+    expect((inherited?.parsed_comments as ParsedReviewComment[])[0]?.title).toBe('Inherited finding');
+    reviewSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
   it('resumes an existing queued duplicate job instead of stranding it', async () => {
     const repo = `test-repo-${Date.now()}-duplicate`;
     const headSha = sha('4');
@@ -478,7 +590,10 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: 0 });
+      // Finalize always yields long enough to hibernate into a fresh invocation (fresh subrequest
+      // budget), so the delay is the hibernation yield, not 0.
+      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+      expect(result.action === 'next_phase' && result.delaySeconds).toBeGreaterThan(0);
       expect(maxActive).toBe(2);
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });

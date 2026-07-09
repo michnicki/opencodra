@@ -1,12 +1,16 @@
 import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
-import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
+import { ProviderRequestError, UnparseableModelResponseError, providerErrorMessage, type ModelResponse } from './types';
 
 /** Default max wall-clock time for a single Google AI Studio call when the caller doesn't
  * supply a diff-size-aware budget. */
 const GEMINI_TIMEOUT_MS = 45_000;
-const GEMINI_MAX_RETRIES = 1;
-const GEMINI_MAX_OUTPUT_TOKENS = 4096;
+// Retry transient upstream failures (Gemini's frequent 5xx "Internal error encountered.") a
+// couple of times with backoff so a momentary blip doesn't fail an otherwise-fine gemma review.
+const GEMINI_MAX_RETRIES = 2;
+// Headroom so reasoning/"thinking" models (the gemma-4 family) can spend tokens thinking and
+// still emit the JSON answer instead of getting truncated at the limit with an empty body.
+const GEMINI_MAX_OUTPUT_TOKENS = 8192;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function isRetryableGeminiStatus(status: number) {
@@ -14,7 +18,9 @@ function isRetryableGeminiStatus(status: number) {
 }
 
 function defaultRetryDelayMs(attempt: number) {
-  return Math.pow(2, attempt + 1) * 1000 + Math.random() * 1000;
+  // Snappy backoff: a transient Gemini 5xx usually clears within a second or two, and long sleeps
+  // just eat into the caller's wall-clock and subrequest budget. ~0.8s then ~1.6s for the retries.
+  return Math.pow(2, attempt) * 800 + Math.random() * 400;
 }
 
 function retryAfterDelayMs(value: string | null) {
@@ -34,7 +40,11 @@ function retryAfterDelayMs(value: string | null) {
 
 function isRetryableTransportError(error: unknown) {
   if (!(error instanceof Error)) return false;
-  if (error.name === 'TimeoutError' || error.message.toLowerCase().includes('timeout')) return true;
+  // Deliberately do NOT retry timeouts: the caller already grants a diff-size-aware budget (up to
+  // 2 minutes), so a call that blows it is a genuinely slow/stuck generation -- retrying just
+  // burns more wall-clock and subrequests into the same wall. Fail fast and let the fallback chain
+  // (or a fresh-budget continuation) take over. Only genuine transport blips are worth a retry.
+  if (error.name === 'TimeoutError' || error.message.toLowerCase().includes('timed out')) return false;
   if (error.message.includes('fetch failed')) return true;
   return error instanceof TypeError;
 }
@@ -158,15 +168,24 @@ export async function reviewWithGoogle(
     logger.info(`AI model ${model} responded in ${durationMs}ms`);
 
     const data = (await response.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
       usageMetadata?: {
         promptTokenCount?: number;
         candidatesTokenCount?: number;
       };
     };
 
-    const rawText = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('')?.trim();
+    const candidate = data.candidates?.[0];
+    const rawText = candidate?.content?.parts?.map((part) => part.text ?? '').join('')?.trim();
     if (!rawText) {
+      const finishReason = candidate?.finishReason;
+      // A reasoning/"thinking" model can consume its whole output budget before emitting any
+      // answer text, returning empty parts with finishReason MAX_TOKENS (or a safety/RECITATION
+      // block). That's deterministic, so fail the file permanently rather than deferring it for a
+      // retry that would hit the same wall. A truly empty STOP response is treated as transient.
+      if (finishReason && finishReason !== 'STOP') {
+        throw new UnparseableModelResponseError(model, `finishReason=${finishReason}`);
+      }
       throw new Error('Gemini returned an empty response.');
     }
 

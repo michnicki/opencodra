@@ -462,7 +462,7 @@ export class GitHubClient {
       title: string;
       summary: string;
       status?: 'in_progress' | 'completed';
-      conclusion?: 'success' | 'neutral' | 'failure';
+      conclusion?: 'success' | 'neutral' | 'failure' | 'cancelled';
     },
   ) {
     return withRetry(`updateCheckRun ${owner}/${repo} ${checkRunId}`, async () => {

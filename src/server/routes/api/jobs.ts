@@ -2,10 +2,30 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { defaultRepoConfig, jobsQuerySchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
-import { bytesToHex, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
+import { bytesToHex, cancelJob, deleteJob, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
 import { scheduleBestEffortJobMaintenance } from '@server/core/job-recovery';
 import { loadRepoConfig } from '@server/core/config';
+import { logger } from '@server/core/logger';
+import type { AppBindings } from '@server/env';
+
+/**
+ * Best-effort termination of a job's Cloudflare Workflow instance. The instance id is the one we
+ * stored (workflowInstanceId) or, as a fallback, the job id we passed to REVIEW_WORKFLOW.create().
+ * .get() throws if the instance doesn't exist and .terminate() throws if it's already terminal --
+ * both are non-fatal here (there's simply nothing left to stop).
+ */
+async function terminateJobWorkflow(env: AppBindings, job: { id: string; workflowInstanceId?: string | null }) {
+  const instanceId = job.workflowInstanceId ?? job.id;
+  try {
+    const instance = await env.REVIEW_WORKFLOW.get(instanceId);
+    await instance.terminate();
+  } catch (error) {
+    logger.info(`Could not terminate workflow for job ${job.id} (already finished or never started)`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 function jobEtag(input: { id: string; status: string; updatedAt: string; fileCount: number; commentCount: number }) {
   return `"job-${input.id}-${input.status}-${input.fileCount}-${input.commentCount}-${new Date(input.updatedAt).getTime()}"`;
@@ -59,11 +79,11 @@ export function createJobsRouter() {
     return response;
   });
 
-  app.post('/:id/retry', async (c) => {
-    const rawSource = await getJobForProcessing(c.env, c.req.param('id'));
-    if (!rawSource) {
-      return jsonError('Job not found.', 404);
-    }
+  // Shared logic for "re-run" (retry) and "rerun from start". Creates a fresh job for the same PR,
+  // supersedes any older queued/running jobs, and enqueues the prepare phase. When inherit=true the
+  // new job links to its parent (retryOfJobId) and reuses already-`done` file reviews; when false
+  // it starts from scratch (no inheritance) so every file is reviewed again.
+  async function startReplacementJob(c: Context<AppEnv>, rawSource: NonNullable<Awaited<ReturnType<typeof getJobForProcessing>>>, options: { inherit: boolean }) {
     const source = mapJob(rawSource);
     let configSnapshot;
     try {
@@ -90,7 +110,7 @@ export function createJobsRouter() {
       headRef: rawSource.head_ref,
       baseRef: rawSource.base_ref,
       configSnapshot,
-      retryOfJobId: source.id,
+      ...(options.inherit ? { retryOfJobId: source.id } : {}),
     });
 
     // Supersede any older pending/running jobs for this PR
@@ -110,7 +130,64 @@ export function createJobsRouter() {
       requestId: c.get('requestId'),
     });
 
+    return job;
+  }
+
+  // Re-run: reuse the parent's already-completed file reviews where the model strategy still matches.
+  app.post('/:id/retry', async (c) => {
+    const rawSource = await getJobForProcessing(c.env, c.req.param('id'));
+    if (!rawSource) {
+      return jsonError('Job not found.', 404);
+    }
+    const job = await startReplacementJob(c, rawSource, { inherit: true });
     return c.json({ job }, 202);
+  });
+
+  // Rerun from start: review every file again from scratch (no inheritance). Stops the current run
+  // first so two workflows don't race on the same PR.
+  app.post('/:id/rerun', async (c) => {
+    const rawSource = await getJobForProcessing(c.env, c.req.param('id'));
+    if (!rawSource) {
+      return jsonError('Job not found.', 404);
+    }
+    const source = mapJob(rawSource);
+    if (source.status === 'queued' || source.status === 'running') {
+      await terminateJobWorkflow(c.env, source);
+    }
+    const job = await startReplacementJob(c, rawSource, { inherit: false });
+    return c.json({ job }, 202);
+  });
+
+  // Stop an ongoing job: terminate its workflow and mark it 'cancelled'.
+  app.post('/:id/stop', async (c) => {
+    const id = c.req.param('id');
+    const raw = await getJobForProcessing(c.env, id);
+    if (!raw) {
+      return jsonError('Job not found.', 404);
+    }
+    const job = mapJob(raw);
+    if (job.status !== 'queued' && job.status !== 'running') {
+      return jsonError('Only a queued or running job can be stopped.', 409);
+    }
+    await terminateJobWorkflow(c.env, job);
+    await cancelJob(c.env, id);
+    const updated = await getJobForProcessing(c.env, id);
+    return c.json({ job: updated ? mapJob(updated) : job }, 200);
+  });
+
+  // Delete a job (cascades to its file reviews and comments). Stops the workflow first if running.
+  app.delete('/:id', async (c) => {
+    const id = c.req.param('id');
+    const raw = await getJobForProcessing(c.env, id);
+    if (!raw) {
+      return jsonError('Job not found.', 404);
+    }
+    const job = mapJob(raw);
+    if (job.status === 'queued' || job.status === 'running') {
+      await terminateJobWorkflow(c.env, job);
+    }
+    await deleteJob(c.env, id);
+    return c.body(null, 204);
   });
 
   return app;
