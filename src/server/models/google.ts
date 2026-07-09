@@ -11,6 +11,12 @@ const GEMINI_MAX_RETRIES = 2;
 // Headroom so reasoning/"thinking" models (the gemma-4 family) can spend tokens thinking and
 // still emit the JSON answer instead of getting truncated at the limit with an empty body.
 const GEMINI_MAX_OUTPUT_TOKENS = 8192;
+// Hard cap on any single in-call retry sleep. A 429 can carry a `retry-after` of 30-60s on the
+// Free tier; sleeping that long in-call would pin a model-call-gate slot and burn the chunk's
+// wall-clock budget for a retry that will just 429 again. Cap it low -- if the provider needs a
+// longer cool-off, the file is deferred and resumes in a fresh invocation (which is the real,
+// budget-resetting backoff), so a long in-call sleep buys nothing.
+const GEMINI_MAX_RETRY_DELAY_MS = 5_000;
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function isRetryableGeminiStatus(status: number) {
@@ -143,9 +149,12 @@ export async function reviewWithGoogle(
       const errorText = await response.text();
       const message = providerErrorMessage(errorText);
       const isRetryable = isRetryableGeminiStatus(response.status);
-      const retryDelayMs = response.status === 429
-        ? retryAfterDelayMs(response.headers.get('retry-after')) ?? defaultRetryDelayMs(attempt)
-        : defaultRetryDelayMs(attempt);
+      const retryDelayMs = Math.min(
+        GEMINI_MAX_RETRY_DELAY_MS,
+        response.status === 429
+          ? retryAfterDelayMs(response.headers.get('retry-after')) ?? defaultRetryDelayMs(attempt)
+          : defaultRetryDelayMs(attempt),
+      );
 
       const logData = {
         error: message,

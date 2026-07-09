@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@client/components/ui/card';
 import { Badge, StatusBadge } from '@client/components/ui/badge';
 import type { JobDetail, JobStep } from '@shared/schema';
+import { formatDuration } from '@client/lib/utils';
 
 interface JobMetaCardsProps {
   job: JobDetail;
@@ -13,8 +14,9 @@ function elapsedSec(step: JobStep): string | null {
     const start = new Date(step.startedAt).getTime();
     const end = new Date(step.finishedAt).getTime();
     if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-    const ms = end - start;
-    return `${(ms / 1000).toFixed(1)}s`;
+    // Reuse the shared formatter so long phases roll up into minutes/hours (e.g. "6m 24s")
+    // instead of an unwieldy "383.7s".
+    return formatDuration(end - start);
   }
   return null;
 }

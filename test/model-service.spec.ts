@@ -179,7 +179,10 @@ describe('ModelService', () => {
     expect(response.rawText).toContain('"findings"');
   });
 
-  it('honors Retry-After when retrying Google 429 responses', async () => {
+  it('caps the Retry-After sleep for Google 429 responses at the max in-call retry delay', async () => {
+    // A 429 carries retry-after: 7s, but the in-call sleep is capped at GEMINI_MAX_RETRY_DELAY_MS
+    // (5s) -- a longer cool-off is handled by deferring the file to a fresh invocation, not by
+    // pinning a gate slot in-call. So the retry must fire at 5s, not 7s.
     vi.useFakeTimers();
     try {
       const fetchMock = vi.spyOn(globalThis, 'fetch')
@@ -207,7 +210,7 @@ describe('ModelService', () => {
       promise.catch(() => {});
 
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-      await vi.advanceTimersByTimeAsync(6_999);
+      await vi.advanceTimersByTimeAsync(4_999);
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1);
@@ -361,6 +364,37 @@ describe('ModelService', () => {
     expect(String(fetchMock.mock.calls[3][0])).toContain('/models/gemma-4-26b-a4b-it:generateContent');
     expect(cloudflareCalls).toBe(0);
     expect(response.modelUsed).toBe('gemma-4-26b-a4b-it');
+  });
+
+  it('classifies an exhausted run of Google 5xx failures as retryable (not a permanent file failure)', async () => {
+    // A sustained upstream 5xx outage across every configured model must be deferred and retried on
+    // a fresh budget, not marked permanently failed. Regression guard for isTransientModelFailure
+    // dropping 5xx / "internal error" detection.
+    // Fresh Response per call -- a Response body can only be read once, so a shared instance would
+    // make the 2nd+ fetch fail on an already-consumed body instead of on the 500 under test.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 500, message: 'Internal error encountered.', status: 'INTERNAL' } }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    await expect(
+      service.reviewFile({
+        file: { path: 'src/app.ts', lineCount: 1, hunks: [], isDeleted: false, isBinary: false, isNew: false, previousPath: null },
+        prTitle: 'Test',
+        prDescription: null,
+        config: {
+          ...defaultRepoConfig,
+          model: { main: 'gemma-4-31b-it', fallbacks: ['gemma-4-26b-a4b-it'], size_overrides: [] },
+        },
+        totalLineCount: 1,
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it('still tries the primary model even when the shared job budget is already near the subrequest limit', async () => {

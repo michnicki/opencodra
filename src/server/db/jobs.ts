@@ -155,6 +155,28 @@ export async function setJobWorkflowInstance(env: Pick<AppBindings, 'HYPERDRIVE'
   );
 }
 
+/**
+ * Refresh a job's cached PR title/author from the live pull request. The values are snapshotted at
+ * job-creation time (and copied verbatim onto retries), so a title edited on GitHub afterwards would
+ * otherwise keep showing stale on the dashboard. Called during prepare once the PR is fetched.
+ */
+export async function setJobPullRequestMeta(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  meta: { prTitle: string | null; prAuthor: string | null },
+) {
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET pr_title = $2,
+          pr_author = COALESCE($3, pr_author)
+      WHERE id = $1
+    `,
+    [jobId, meta.prTitle, meta.prAuthor],
+  );
+}
+
 export async function markSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
   try {
     await env.APP_KV.put('system:active_jobs', '1', { expirationTtl: 20 * 60 });
@@ -430,33 +452,6 @@ export async function getJobDetail(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: 
     summaryModel: row.summary_model,
     files: parseJsonColumn(row.files_json, []),
   });
-}
-
-export async function startJobProcessing(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, stepName: string) {
-  const now = new Date().toISOString();
-  const rows = await queryRows<{ id: string }>(
-    env,
-    `
-      UPDATE jobs
-      SET status = 'running',
-          started_at = COALESCE(started_at, now()),
-          steps = COALESCE(steps, '[]'::jsonb) || jsonb_build_array(
-            jsonb_build_object(
-              'name', $2::text,
-              'status', 'running',
-              'startedAt', $3::text,
-              'finishedAt', NULL,
-              'error', NULL
-            )
-          )
-      WHERE id = $1
-        AND status = 'queued'
-      RETURNING id
-    `,
-    [jobId, stepName, now],
-  );
-
-  return rows.length > 0;
 }
 
 export async function claimJobLease(
@@ -868,8 +863,14 @@ export async function updateJobStep(
               WHEN s->>'name' = $2
               THEN s || jsonb_build_object(
                 'status', $3::text,
-                'startedAt', COALESCE($4::text, s->>'startedAt'),
-                'finishedAt', COALESCE($5::text, s->>'finishedAt'),
+                -- Preserve the FIRST start time. A phase (e.g. "Reviewing Files") re-enters
+                -- 'running' once per hibernated chunk; overwriting startedAt each time would make
+                -- the displayed duration reflect only the last chunk (~seconds) instead of the full
+                -- multi-minute wall-clock. Keep the existing start; only seed it when absent.
+                'startedAt', COALESCE(s->>'startedAt', $4::text),
+                -- Clear any stale finish when a step is (re-)entered as 'running' so its duration
+                -- isn't computed against an old finishedAt while it is back in progress.
+                'finishedAt', CASE WHEN $3::text = 'running' THEN NULL ELSE COALESCE($5::text, s->>'finishedAt') END,
                 'error', COALESCE($6::text, s->>'error')
               )
               ELSE s
@@ -890,23 +891,6 @@ export async function updateJobStep(
     `,
     [jobId, stepName, update.status, startedAt, finishedAt, error],
   );
-}
-
-export async function recoverStaleJobs(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
-  thresholdMinutes = 20,
-): Promise<number> {
-  const rows = await queryRows<{ id: string }>(env, `
-    UPDATE jobs
-    SET status     = 'failed',
-        finished_at = now(),
-        error_msg  = 'Job timed out: worker crashed or was evicted.'
-    WHERE status = 'running'
-      AND started_at < now() - ($1 || ' minutes')::interval
-    RETURNING id
-  `, [String(thresholdMinutes)]);
-
-  return rows.length;
 }
 
 export async function recoverExpiredJobLeases(

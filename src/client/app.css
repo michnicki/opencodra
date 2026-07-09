@@ -2,6 +2,10 @@
 
 @import "tailwindcss";
 
+/* Make `dark:` utilities follow the app's `.dark` class (theme toggle)
+   instead of the OS `prefers-color-scheme` default. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ─────────────────────────────────────────────────────
    Easing tokens
 ───────────────────────────────────────────────────── */

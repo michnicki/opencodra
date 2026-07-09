@@ -13,8 +13,12 @@ export function fmtNumber(n: number) {
 
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return '';
-  const totalSeconds = Math.floor(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
+  // Sub-minute: show one decimal second so sub-second work (e.g. a 724ms file review) reads as
+  // "0.7s" rather than flooring to a misleading "0s".
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+  const totalSeconds = Math.round(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   if (minutes < 60) {

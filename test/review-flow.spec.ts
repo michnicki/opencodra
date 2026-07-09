@@ -222,6 +222,40 @@ dbDescribe('Review Flow Lifecycle', () => {
       expect(finalJob?.verdict).toBeNull();
   }, REVIEW_FLOW_TIMEOUT_MS);
 
+  it('throttles a new (queued) job at the concurrency limit but never a running continuation', async () => {
+    const jobsMod = await import('@server/db/jobs');
+    const repo = `test-repo-${Date.now()}-admission`;
+    const baseSha = sha('0');
+    const base = {
+      installationId: '123', owner: 'test-owner', repo, prAuthor: 'author',
+      baseSha, trigger: 'auto' as const, headRef: 'feature', baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    };
+
+    const queued = await insertJob(env, { ...base, prNumber: 30, prTitle: 'Admission Queued', commitSha: sha('c') });
+    const running = await insertJob(env, { ...base, prNumber: 31, prTitle: 'Admission Running', commitSha: sha('d') });
+    // Report far over any concurrency limit for the whole test. (The running case never calls this --
+    // the gate is skipped by status -- so restore the module-mock default afterwards to avoid leaking.)
+    vi.mocked(jobsMod.getOtherRunningJobsCount).mockResolvedValue(99);
+    try {
+      // A brand-new (queued) job IS gated at the limit -> retry (admission control).
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: queued.id, deliveryId: 'delivery-adm-queued', phase: 'prepare' });
+        expect(res.action).toBe('retry');
+      });
+
+      // A job already 'running' must NOT be re-gated on its continuations, even far over the limit --
+      // that is the starvation bug (every in-flight job retries forever and gets lease-recovery-failed).
+      await runWithDb(env, async () => {
+        await queryRows(env, `UPDATE jobs SET status = 'running' WHERE id = $1`, [running.id]);
+        const res = await runReviewJob(env, { jobId: running.id, deliveryId: 'delivery-adm-running', phase: 'review' });
+        expect(res.action).not.toBe('retry');
+      });
+    } finally {
+      vi.mocked(jobsMod.getOtherRunningJobsCount).mockResolvedValue(0);
+    }
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
   it('processes a pre-created retry job from a queue message', async () => {
     const repo = `test-repo-${Date.now()}-retry`;
     const sourceHeadSha = sha('1');

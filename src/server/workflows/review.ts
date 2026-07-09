@@ -59,7 +59,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMes
           retries: { limit: 5, delay: '60 seconds', backoff: 'exponential' },
           timeout: '15 minutes'
         }, async () => {
-          return await runReviewJob(env, { ...params, phase: currentPhase });
+          return await runReviewJob(env, { ...params, phase: currentPhase, workflowInstanceId: event.instanceId });
         });
       } catch (error) {
         await step.do(`telemetry-failure-${currentPhase}-${attempt}`, async () => {

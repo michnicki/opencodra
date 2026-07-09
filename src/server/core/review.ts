@@ -1,6 +1,7 @@
 import { logger } from './logger';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHubWebhookPayload, type IssueCommentWebhookPayload, type PullRequestWebhookPayload } from '@shared/github';
 import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
+import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
 import { bulkInheritFileReviews, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
 import { getResolvedModelConfig } from '@server/db/model-configs';
@@ -19,6 +20,8 @@ import {
   markJobContinuationQueued,
   resetJobContinuationCount,
   releaseJobLease,
+  setJobPullRequestMeta,
+  setJobWorkflowInstance,
   supersedeOlderJobs,
   updateJobCheckRun,
   updateJobStep,
@@ -116,20 +119,16 @@ function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
 
   // Explicitly fail fast for timeouts so they don't loop endlessly, aligning with
   // isTransientModelFailure which prevents timeouts from being retried.
-  if (lower.includes('timed out') || lower.includes('timeout')) {
+  if (isTimeoutMessage(lower)) {
     return false;
   }
 
   return (
+    matchesAnyTransientSubstring(lower) ||
     lower.includes('all configured review models failed') ||
     lower.includes('retrying later') ||
     lower.includes('google request failed with 5') ||
-    lower.includes('unavailable') ||
-    lower.includes('high demand') ||
     lower.includes('temporary') ||
-    lower.includes('[redacted]') ||
-    lower.includes('returned no review content') ||
-    lower.includes('empty response') ||
     // Older jobs may have persisted subrequest-budget failures before budget exhaustion became
     // a pure chunk-level deferral. Keep retrying those rows instead of treating them as handled.
     lower.includes('subrequest')
@@ -316,12 +315,20 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     return { action: 'ack' };
   }
 
-  const { concurrencyLevel } = await getReviewSettings(env);
-  const maxConcurrentJobs = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
-  const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
-  if (runningCount >= maxConcurrentJobs) {
-    logger.info(`Throttling job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
-    return { action: 'retry', delaySeconds: 30 };
+  // Concurrency admission control: only throttle a job that has NOT started yet (status 'queued').
+  // A job that is already 'running' is mid-flight; re-gating its phase continuations would mean that
+  // lowering the concurrency limit (or any transient over-count from the check-then-claim race)
+  // makes every in-flight job retry forever -- that path returns before markJobContinuationQueued,
+  // so MAX_JOB_CONTINUATIONS never trips, the lease goes stale, and recovery force-fails the job.
+  // Gating only admission also avoids a second getReviewSettings fetch on review/finalize invocations.
+  if (resolved.job.status === 'queued') {
+    const { concurrencyLevel } = await getReviewSettings(env);
+    const maxConcurrentJobs = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
+    const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
+    if (runningCount >= maxConcurrentJobs) {
+      logger.info(`Throttling admission of job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
+      return { action: 'retry', delaySeconds: 30 };
+    }
   }
 
   const leaseOwner = crypto.randomUUID();
@@ -340,6 +347,19 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
   }
 
   const job = mapJob(claim.row);
+
+  // Bind this job row to the ACTUAL Workflow instance id so job control (stop/delete/rerun) can
+  // terminate the right instance. The bind-workflow-id step can't do this for webhook-triggered
+  // jobs -- their instance is keyed on deliveryId while the job row (created later, in prepare) has
+  // a different id -- so we (re)bind here now that the real job is resolved. Cheap and idempotent.
+  if (message.workflowInstanceId && job.workflowInstanceId !== message.workflowInstanceId) {
+    try {
+      await setJobWorkflowInstance(env, job.id, message.workflowInstanceId);
+    } catch (error) {
+      logger.warn(`Failed to bind workflow instance id for job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   const phase = resolved.phase;
   const tracker = new TokenTracker();
   const github = new GitHubService(env, job.installationId, tracker);
@@ -434,6 +454,19 @@ async function continueOrFailWedgedJob(
         continuationCount,
         reason,
       });
+      // Any file still awaiting an async batch result would otherwise be finalized as an empty
+      // "successful" review (its 'pending' row isn't 'failed', so finalize maps it to verdict
+      // 'comment'/'' with no findings). Mark them failed first -- mirrors the async-poll degrade path.
+      const stillPending = (await getFileReviewsForJobs(env, [job.id])).filter(isAwaitingAsyncReview);
+      for (const review of stillPending) {
+        await persistFailedFileReview(env, job.id, {
+          filePath: review.file_path,
+          modelUsed: review.async_model ?? review.model_used,
+          diffLineCount: review.diff_line_count,
+          errorMessage: 'Async batch review did not complete before the job wedged.',
+          clearAsync: true,
+        });
+      }
       await releaseJobLease(env, job.id, leaseOwner);
       // Finalize on a fresh invocation/budget -- this invocation is the one that hit the wall.
       return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS };
@@ -595,6 +628,17 @@ async function runPreparePhase(
   await updateJobStep(env, job.id, 'Preparation', { status: 'running' });
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+
+  // Refresh the cached PR title/author from the live PR: these are snapshotted at job creation and
+  // copied onto retries, so a title edited on GitHub afterwards would otherwise stay stale.
+  try {
+    await setJobPullRequestMeta(env, job.id, {
+      prTitle: pr.title ?? null,
+      prAuthor: pr.user?.login ?? null,
+    });
+  } catch (error) {
+    logger.warn(`Failed to refresh PR metadata for job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
+  }
 
   let checkRunId = job.checkRunId;
   if (!checkRunId) {
@@ -886,23 +930,12 @@ async function runReviewPhase(
     if (pollCount > MAX_JOB_CONTINUATIONS) {
       logger.error(`Async batch reviews did not complete after ${pollCount} polls; degrading to a partial review: ${job.owner}/${job.repo} PR #${job.prNumber}`);
       for (const review of latestReviews.filter(isAwaitingAsyncReview)) {
-        await upsertFileReview(env, job.id, {
+        await persistFailedFileReview(env, job.id, {
           filePath: review.file_path,
-          fileStatus: 'failed',
           modelUsed: review.async_model ?? review.model_used,
-          modelProvider: null,
           diffLineCount: review.diff_line_count,
-          diffInput: '',
-          rawAiOutput: null,
-          parsedComments: [],
-          inputTokens: null,
-          outputTokens: null,
-          durationMs: null,
-          verdict: null,
-          fileSummary: null,
           errorMessage: 'Async batch review did not complete in time.',
-          asyncRequestId: null,
-          asyncModel: null,
+          clearAsync: true,
         });
       }
       await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
@@ -973,6 +1006,44 @@ async function persistCompletedReview(
     errorMessage: null,
     asyncRequestId: null,
     asyncModel: null,
+  });
+}
+
+/**
+ * Persist a file review as terminally 'failed' with the shared "mostly-null" shape. Collapses the
+ * several near-identical failure upserts (transient-retry exhaustion, hard provider limit, async
+ * batch giving up, finalize backfilling missing files) into one place. `clearAsync` wipes the
+ * async batch bookkeeping columns for rows that had been submitted to the queue.
+ */
+async function persistFailedFileReview(
+  env: AppBindings,
+  jobId: string,
+  input: {
+    filePath: string;
+    modelUsed: string;
+    modelProvider?: string | null;
+    diffLineCount: number;
+    durationMs?: number | null;
+    errorMessage: string;
+    clearAsync?: boolean;
+  },
+) {
+  await upsertFileReview(env, jobId, {
+    filePath: input.filePath,
+    fileStatus: 'failed',
+    modelUsed: input.modelUsed,
+    modelProvider: input.modelProvider ?? null,
+    diffLineCount: input.diffLineCount,
+    diffInput: '',
+    rawAiOutput: null,
+    parsedComments: [],
+    inputTokens: null,
+    outputTokens: null,
+    durationMs: input.durationMs ?? null,
+    verdict: null,
+    fileSummary: null,
+    errorMessage: input.errorMessage,
+    ...(input.clearAsync ? { asyncRequestId: null, asyncModel: null } : {}),
   });
 }
 
@@ -1051,20 +1122,12 @@ async function reviewAndPersistFile(
 
       if (failureCount >= MAX_RETRYABLE_FILE_REVIEW_FAILURES) {
         const finalError = `Review skipped after ${failureCount} repeated model provider outages.`;
-        await upsertFileReview(env, job.id, {
+        await persistFailedFileReview(env, job.id, {
           filePath: file.path,
-          fileStatus: 'failed',
           modelUsed: modelId,
           modelProvider,
           diffLineCount: file.lineCount,
-          diffInput: '',
-          rawAiOutput: null,
-          parsedComments: [],
-          inputTokens: null,
-          outputTokens: null,
           durationMs: Date.now() - startedAt,
-          verdict: null,
-          fileSummary: null,
           errorMessage: finalError,
         });
         logger.error(`File review failed permanently for ${file.path} after transient retries`, {
@@ -1101,22 +1164,46 @@ async function reviewAndPersistFile(
       // so the PR review can continue and complete as a partial review.
     }
 
-    await upsertFileReview(env, job.id, {
+    await persistFailedFileReview(env, job.id, {
       filePath: file.path,
-      fileStatus: 'failed',
       modelUsed: modelId,
       modelProvider,
       diffLineCount: file.lineCount,
-      diffInput: '',
-      rawAiOutput: null,
-      parsedComments: [],
-      inputTokens: null,
-      outputTokens: null,
       durationMs: Date.now() - startedAt,
-      verdict: null,
-      fileSummary: null,
       errorMessage,
     });
+  }
+}
+
+/**
+ * Assemble and fire the anonymous per-review telemetry event. The shared aggregate fields
+ * (line/token counts, models, file extensions, duration) are computed once here; the three fields
+ * that differ between the success and all-failed paths are passed as `overrides`. Never throws.
+ */
+async function sendReviewTelemetry(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  files: Array<{ path: string; lineCount: number }>,
+  reviews: Array<{ input_tokens: number | null; output_tokens: number | null; model_used: string }>,
+  overrides: { findingsReported: number; verdict: string; severityDistribution: Record<string, number> },
+) {
+  try {
+    await sendTelemetryEvent(env, {
+      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+      inputTokens: reviews.reduce((sum, r) => sum + (r.input_tokens ?? 0), 0),
+      outputTokens: reviews.reduce((sum, r) => sum + (r.output_tokens ?? 0), 0),
+      modelsUsed: Array.from(new Set(reviews.map((r) => r.model_used).filter(Boolean))),
+      fileExtensions: Array.from(new Set(files.map((f) => {
+        const parts = f.path.split('.');
+        return parts.length > 1 ? parts.pop() || '' : '';
+      }).filter(Boolean))),
+      triggerType: job.trigger,
+      reviewDurationMs: Math.max(0, Date.now() - new Date(job.createdAt).getTime()),
+      filesReviewed: files.length,
+      ...overrides,
+    });
+  } catch (e) {
+    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
   }
 }
 
@@ -1141,20 +1228,11 @@ async function runFinalizePhase(
     if (missingFiles.length > 0) {
       logger.warn(`Job ${job.id} reached finalize phase with ${missingFiles.length} missing file reviews. Forcing them to failed state.`);
       for (const file of missingFiles) {
-        await upsertFileReview(env, job.id, {
+        await persistFailedFileReview(env, job.id, {
           filePath: file.path,
-          fileStatus: 'failed',
           modelUsed: config.model?.main ?? 'unconfigured',
-          modelProvider: null,
           diffLineCount: file.lineCount,
-          diffInput: '',
-          rawAiOutput: null,
-          parsedComments: [],
-          inputTokens: null,
-          outputTokens: null,
           durationMs: 0,
-          verdict: null,
-          fileSummary: null,
           errorMessage: 'Review could not be completed after repeated infrastructure limits',
         });
       }
@@ -1180,34 +1258,12 @@ async function runFinalizePhase(
 
   if (fileSummaries.length > 0 && fileSummaries.every((file) => file.verdict === 'failed')) {
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'failed', error: 'All files failed to review' });
-    
-    // Send anonymous telemetry for the failed job
-    const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
-    const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
-    const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
-    const fileExtensions = Array.from(new Set(files.map(f => {
-      const parts = f.path.split('.');
-      return parts.length > 1 ? parts.pop() || '' : '';
-    }).filter(Boolean)));
-    const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
-    
-    try {
-      await sendTelemetryEvent(env, {
-        linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-        findingsReported: 0,
-        inputTokens: fileInputTokens,
-        outputTokens: fileOutputTokens,
-        modelsUsed,
-        fileExtensions,
-        triggerType: job.trigger,
-        reviewDurationMs,
-        filesReviewed: files.length,
-        verdict: 'failed',
-        severityDistribution: {},
-      });
-    } catch (e) {
-      logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
-    }
+
+    await sendReviewTelemetry(env, job, files, reviews, {
+      findingsReported: 0,
+      verdict: 'failed',
+      severityDistribution: {},
+    });
 
     throw new Error('All files failed to review');
   }
@@ -1279,13 +1335,6 @@ async function runFinalizePhase(
 
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
-  
-  const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
-  const fileExtensions = Array.from(new Set(files.map(f => {
-    const parts = f.path.split('.');
-    return parts.length > 1 ? parts.pop() || '' : '';
-  }).filter(Boolean)));
-  const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
 
   const severityDistribution: Record<string, number> = {};
   for (const comment of finalComments) {
@@ -1309,24 +1358,11 @@ async function runFinalizePhase(
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
 
-  // Send anonymous telemetry
-  try {
-    await sendTelemetryEvent(env, {
-      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-      findingsReported: finalComments.length,
-      inputTokens: fileInputTokens,
-      outputTokens: fileOutputTokens,
-      modelsUsed,
-      fileExtensions,
-      triggerType: job.trigger,
-      reviewDurationMs,
-      filesReviewed: files.length,
-      verdict: verdictSummary.verdict,
-      severityDistribution,
-    });
-  } catch (e) {
-    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
-  }
+  await sendReviewTelemetry(env, job, files, reviews, {
+    findingsReported: finalComments.length,
+    verdict: verdictSummary.verdict,
+    severityDistribution,
+  });
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
