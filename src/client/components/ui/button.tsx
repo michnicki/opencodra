@@ -12,8 +12,12 @@ const buttonVariants = cva(
           'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 active:scale-[.98]',
         destructive:
           'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90',
+        'destructive-outline':
+          'border border-danger-border bg-danger-bg/40 text-danger shadow-sm hover:bg-destructive hover:text-destructive-foreground hover:border-destructive',
+        'warning-outline':
+          'border border-warning-border bg-warning-bg/40 text-warning shadow-sm hover:bg-warning-bg hover:border-warning',
         outline:
-          'border border-zinc-200 bg-white shadow-sm hover:bg-zinc-50 hover:text-zinc-900 dark:border-input dark:bg-card/60 dark:hover:bg-secondary dark:hover:text-secondary-foreground',
+          'border border-zinc-200 bg-white shadow-sm hover:bg-zinc-50 hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.06] dark:shadow-[0_1px_2px_oklch(0%_0_0/0.4),inset_0_1px_0_oklch(100%_0_0/0.06)] dark:hover:bg-white/[0.1] dark:hover:text-foreground',
         secondary:
           'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80',
         ghost: 'hover:bg-secondary hover:text-secondary-foreground',

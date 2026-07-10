@@ -1,7 +1,7 @@
 import type { ReviewJobMessage } from '@shared/schema';
 
 export interface WorkersAiBinding {
-  run(model: string, input: Record<string, unknown>): Promise<any>;
+  run(model: string, input: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<any>;
 }
 
 export interface QueueProducer<T> {

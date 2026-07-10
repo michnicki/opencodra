@@ -38,7 +38,7 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 - **Review with repository context**: Codra checks pull request diffs for correctness, security, performance, maintainability, and repo-specific patterns.
 - **Configure each repository**: Tune triggers, skipped paths, draft handling, mention reviews, labels, custom rules, and review budgets from the dashboard.
 - **Route models deliberately**: Use global defaults, per-repo model chains, fallbacks, and size-based overrides for larger pull requests.
-- **Operate the system**: Inspect job history, PR findings, webhook deliveries, queue failures, DLQ replay, model usage, and dashboard stats.
+- **Operate the system**: Inspect job history, PR findings, webhook deliveries, model usage, and dashboard stats.
 
 ## Features
 
@@ -46,7 +46,6 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 - Mention-triggered reviews for on-demand analysis
 - Inline GitHub review comments plus summary reviews and check run updates
 - Queue-backed processing through Cloudflare Queues
-- Dead letter queue inspection, replay, and purge workflows
 - GitHub OAuth dashboard authentication
 - External PostgreSQL storage through Cloudflare Hyperdrive
 - Dashboard-managed LLM providers for OpenAI, OpenRouter, Anthropic, Google, and Cloudflare models
@@ -59,14 +58,14 @@ Codra listens to GitHub pull request events, runs AI-powered review jobs, posts 
 3. A review job is stored in PostgreSQL and queued on Cloudflare Queues.
 4. The Worker consumes the job, fetches the PR diff, runs model review passes, and formats findings.
 5. Codra posts inline comments and a summary review back to GitHub.
-6. The dashboard keeps the job history, findings, logs, stats, and replay tools available for operators.
+6. The dashboard keeps the job history, findings, logs, and stats available for operators.
 
 ## Stack
 
 - **Worker**: Cloudflare Workers, Hono, Wrangler
 - **Dashboard**: React, Vite, Tailwind CSS, Radix UI, Recharts
 - **Data**: PostgreSQL, Cloudflare Hyperdrive, Cloudflare KV
-- **Queues**: Cloudflare Queues with DLQ workflows
+- **Queues**: Cloudflare Queues and Workflows
 - **Models**: OpenAI, OpenRouter, Anthropic, Google, and Cloudflare providers
 - **GitHub**: GitHub App webhooks, checks, reviews, and OAuth
 - **Quality**: TypeScript, Zod, Vitest, Playwright browser tests

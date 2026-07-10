@@ -58,9 +58,18 @@ export async function sendTelemetryEvent(
   },
 ): Promise<void> {
   try {
+    // Opt-out for self-hosters/forks: set TELEMETRY_DISABLED=true (or 1) to send nothing.
+    const disabled = String((env as any).TELEMETRY_DISABLED ?? '').toLowerCase();
+    if (disabled === 'true' || disabled === '1') {
+      return;
+    }
+
     const instanceId = await getInstanceId(env);
     // Use an environment variable if available, otherwise default to the hosted backend
     const telemetryUrl = (env as any).TELEMETRY_API_URL ?? 'https://codra.run/api/telemetry';
+    // Allow the ingestion secret to be overridden via env so it isn't pinned to the value committed
+    // in this (public) source tree.
+    const telemetrySecret = (env as any).TELEMETRY_SECRET ?? TELEMETRY_SECRET;
 
     // Fire and forget using standard fetch with a timeout
     const controller = new AbortController();
@@ -70,7 +79,7 @@ export async function sendTelemetryEvent(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${TELEMETRY_SECRET}`,
+        'Authorization': `Bearer ${telemetrySecret}`,
       },
       body: JSON.stringify({
         instanceId,

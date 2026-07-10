@@ -28,7 +28,6 @@ import { ProviderRequestError } from '@server/models/types';
 
 const apiFormatSchema = z.enum(llmApiFormats);
 const positiveIntegerSchema = z.number().int().positive().finite();
-const optionalLimitSchema = positiveIntegerSchema.nullable();
 const modelIdSchema = z.string().trim().min(1);
 const optionalUrlSchema = z.string().trim().url().nullable().optional();
 const providerIdSchema = z.string().uuid();
@@ -48,9 +47,6 @@ const providerUpdateSchema = providerCreateSchema.extend({
 const modelConfigUpdateSchema = z.object({
   providerId: providerIdSchema,
   modelName: z.string().trim().min(1),
-  rpm: optionalLimitSchema,
-  tpm: optionalLimitSchema,
-  rpd: optionalLimitSchema,
 }).strict();
 
 const globalModelConfigSchema = z.object({

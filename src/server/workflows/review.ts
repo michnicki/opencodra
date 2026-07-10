@@ -5,9 +5,18 @@ import { type ReviewJobMessage } from '@shared/schema';
 import { setJobWorkflowInstance } from '@server/db/jobs';
 import { logger } from '@server/core/logger';
 import { runBestEffortJobMaintenance } from '@server/core/job-recovery';
+import { runWithDb } from '@server/db/client';
 
 export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMessage> {
   async run(event: WorkflowEvent<ReviewJobMessage>, step: WorkflowStep) {
+    // Share one DB client/connection for this entire invocation instead of opening a
+    // new Hyperdrive connection per query (the default behavior of getDb() outside any
+    // runWithDb() context). On workflow replay after a step.sleep or a resumed retry,
+    // this simply runs again and creates a fresh client for that new invocation.
+    return runWithDb(this.env, () => this.execute(event, step));
+  }
+
+  private async execute(event: WorkflowEvent<ReviewJobMessage>, step: WorkflowStep) {
     const params = event.payload;
     const env = this.env;
 
@@ -50,7 +59,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMes
           retries: { limit: 5, delay: '60 seconds', backoff: 'exponential' },
           timeout: '15 minutes'
         }, async () => {
-          return await runReviewJob(env, { ...params, phase: currentPhase });
+          return await runReviewJob(env, { ...params, phase: currentPhase, workflowInstanceId: event.instanceId });
         });
       } catch (error) {
         await step.do(`telemetry-failure-${currentPhase}-${attempt}`, async () => {
@@ -85,6 +94,11 @@ export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMes
         break;
       }
     }
+
+    // Yield before maintenance so it runs in a fresh invocation with its own subrequest
+    // budget, rather than immediately after the final phase step (which may have just
+    // exhausted the current invocation's budget, guaranteeing this call would also fail).
+    await step.sleep('pre-post-maintenance-yield', '1 second');
 
     try {
       await step.do('post-maintenance', async () => {

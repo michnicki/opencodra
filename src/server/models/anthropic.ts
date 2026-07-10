@@ -2,7 +2,7 @@ import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
-const ANTHROPIC_TIMEOUT_MS = 180_000;
+const ANTHROPIC_TIMEOUT_MS = 80_000;
 const ANTHROPIC_MAX_OUTPUT_TOKENS = 4096;
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 
@@ -15,16 +15,17 @@ export interface AnthropicResponse {
 }
 
 export async function reviewWithAnthropic(
-  config: { apiKey: string; baseUrl?: string | null; providerName: string },
+  config: { apiKey: string; baseUrl?: string | null; providerName: string; timeoutMs?: number },
   model: string,
   input: { systemPrompt: string; userPrompt: string },
   tracker?: { incrementSubrequests(count?: number): void },
 ): Promise<ModelResponse> {
   logger.info(`Calling Anthropic model: ${model}`);
   const baseUrl = (config.baseUrl || DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+  const timeoutMs = config.timeoutMs ?? ANTHROPIC_TIMEOUT_MS;
 
   if (tracker) tracker.incrementSubrequests(1);
-  const response = await withTimeout('Anthropic API', ANTHROPIC_TIMEOUT_MS, (signal) =>
+  const response = await withTimeout('Anthropic API', timeoutMs, (signal) =>
     fetch(`${baseUrl}/messages`, {
       method: 'POST',
       signal,
