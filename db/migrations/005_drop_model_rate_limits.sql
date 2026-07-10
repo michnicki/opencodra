@@ -1,3 +1,0 @@
-ALTER TABLE model_configs DROP COLUMN IF EXISTS rpm;
-ALTER TABLE model_configs DROP COLUMN IF EXISTS tpm;
-ALTER TABLE model_configs DROP COLUMN IF EXISTS rpd;

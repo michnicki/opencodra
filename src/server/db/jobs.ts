@@ -15,7 +15,7 @@ export type JobRow = {
   commit_sha: ByteaValue;
   base_sha: ByteaValue;
   trigger: 'auto' | 'mention' | 'retry';
-  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded' | 'cancelled';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded' | 'cancelled' | 'stopped';
   config_snapshot: { review?: RepoConfig['review']; model?: RepoConfig['model'] } | string | null;
   check_run_id: number | null;
   check_run_completed_at: string | null;
@@ -872,9 +872,11 @@ export async function updateJobStep(
                 -- the displayed duration reflect only the last chunk (~seconds) instead of the full
                 -- multi-minute wall-clock. Keep the existing start; only seed it when absent.
                 'startedAt', COALESCE(s->>'startedAt', $4::text),
-                -- Clear any stale finish when a step is (re-)entered as 'running' so its duration
-                -- isn't computed against an old finishedAt while it is back in progress.
-                'finishedAt', CASE WHEN $3::text = 'running' THEN NULL ELSE COALESCE($5::text, s->>'finishedAt') END,
+                -- 'running' clears any stale finish (step is back in progress). Otherwise keep the
+                -- FIRST finish already recorded for this run -- so re-marking a step 'done' (e.g.
+                -- finalize defensively re-confirming "Reviewing Files") doesn't push the timestamp
+                -- later and inflate the displayed duration. A re-run resets it via the 'running' clear.
+                'finishedAt', CASE WHEN $3::text = 'running' THEN NULL ELSE COALESCE(s->>'finishedAt', $5::text) END,
                 'error', COALESCE($6::text, s->>'error')
               )
               ELSE s

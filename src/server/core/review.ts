@@ -1248,6 +1248,13 @@ async function runFinalizePhase(
     }
   }
 
+  // Finalize is now committed to finishing, so the review phase is over. Defensively mark
+  // "Reviewing Files" done: some paths into finalize (notably the continuation-ceiling degrade in
+  // continueOrFailWedgedJob) don't set it, which otherwise leaves the step stuck showing
+  // "In progress" on a job that's actually done. updateJobStep keeps the first finish time, so this
+  // no-ops the timestamp when the review phase already marked it done.
+  await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+
   const reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
   const fileSummaries = reviews.map((review) => ({
     path: review.file_path,
