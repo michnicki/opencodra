@@ -1,8 +1,9 @@
 import { logger } from './logger';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHubWebhookPayload, type IssueCommentWebhookPayload, type PullRequestWebhookPayload } from '@shared/github';
 import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
+import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
-import { getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
+import { bulkInheritFileReviews, bulkMarkFilesFailed, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
 import { getResolvedModelConfig } from '@server/db/model-configs';
 import {
   claimJobLease,
@@ -17,7 +18,10 @@ import {
   mapJob,
   markJobCheckRunCompleted,
   markJobContinuationQueued,
+  resetJobContinuationCount,
   releaseJobLease,
+  setJobPullRequestMeta,
+  setJobWorkflowInstance,
   supersedeOlderJobs,
   updateJobCheckRun,
   updateJobStep,
@@ -32,40 +36,117 @@ import { TokenTracker } from './token-tracker';
 import { loadRepoConfig } from './config';
 import { getWebhookDelivery } from '@server/db/webhook-deliveries';
 import { sendTelemetryEvent } from './telemetry';
+import { getReviewSettings } from '@server/db/app-settings';
+import { REVIEW_CONCURRENCY_LIMITS } from '@shared/schema';
 
 type PersistedReviewJob = ReturnType<typeof mapJob>;
 
-export type ReviewJobRunResult = 
-  | { action: 'ack' } 
+export type ReviewJobRunResult =
+  | { action: 'ack' }
   | { action: 'retry'; delaySeconds: number }
   | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number };
 
-const REVIEW_CHUNK_FILE_LIMIT = 3;
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
-const MAX_CONCURRENT_JOBS = 4;
 const JOB_LEASE_SECONDS = 15 * 60;
 const BUSY_RETRY_SECONDS = 60;
-const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [60, 5 * 60, 15 * 60];
+// Backoff between deferred retries of a file that hit a transient model/provider failure.
+// Kept short at first: most observed failures are momentary provider load (Gemini 500/503
+// "high demand") or self-inflicted connection queuing, both of which clear within seconds,
+// so a long first delay just makes reviews grind. Later attempts back off harder in case the
+// provider really is having an outage.
+const RETRYABLE_MODEL_FAILURE_RETRY_DELAYS_SECONDS = [30, 2 * 60, 5 * 60];
+// Yield used when a review chunk / phase transition MUST run in a fresh Worker invocation to get a
+// fresh per-invocation subrequest budget (Workers Free: 50/invocation). Cloudflare only hibernates
+// a Workflow -- running -> waiting -> resume in a NEW invocation -- when the step.sleep is long
+// enough; a "very short" sleep keeps the instance warm in the SAME invocation, so the real
+// subrequest budget accumulates across every chunk until it's exhausted and the whole review loops
+// in one invocation until "Too many subrequests" (the observed failure). This yield is deliberately
+// long enough to force hibernation so each continuation starts with a clean budget. It is only
+// applied when a fresh budget is actually needed (multi-chunk reviews, budget-pressured finalize),
+// so small PRs that fit in a single invocation stay fast.
+const FRESH_INVOCATION_YIELD_SECONDS = 60;
+// Delay between polls of an in-flight Workers AI async batch review. Batches typically complete
+// within a few minutes, so poll on a short cadence; a stuck batch is bounded by the shared
+// MAX_JOB_CONTINUATIONS ceiling (each poll reschedule counts as a no-progress continuation).
+const ASYNC_BATCH_POLL_DELAY_SECONDS = 20;
 const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
+// Belt-and-suspenders ceiling on how many times a job may reschedule the *same* phase without
+// completing a single file (see markJobContinuationQueued / resetJobContinuationCount). The
+// per-file cap above is the primary bound and resets this counter on any progress, so a healthy
+// job never approaches this; it only fires when a job is genuinely wedged (e.g. a provider is
+// down for the whole backoff window) and stops it from churning for hours before finalizing.
+const MAX_JOB_CONTINUATIONS = 20;
+// A job's commit (and therefore its diff) never changes, so the raw diff can be
+// cached for the job's entire lifetime instead of being re-fetched from GitHub on
+// every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
+// hits every retryable-failure backoff (up to 15 min each, several times over).
+const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
+// Estimated subrequest cost of reviewing one file, used only to size how many files can
+// safely be reviewed concurrently in a chunk given the job's remaining subrequest budget for
+// this invocation (see budgetAwareChunkFileLimit below). A file walks a fallback chain of up
+// to ~3 models, but the per-model model-config lookup is now cached per invocation
+// (ModelService.resolveModel), so the recurring cost per file is ~1 provider call per model
+// tried plus the persisted-review write -- roughly 5 in the worst case rather than 9. Lower
+// estimate => more files reviewed in parallel per chunk within the same 50-subrequest cap.
+//
+// Sized to the ~5 worst-case figure above (not padded higher): with the TokenTracker's
+// SAFE_MARGIN reserve of 25 the fresh-budget headroom is 25, and 25 / 5 == 5 keeps even the
+// highest configured concurrency level (max == 4) fully honored at a healthy budget. Padding
+// this to 8 would make floor(25 / 8) == 3 silently cap the "max" slider to 3 -- the exact
+// "concurrency slider is dead above medium" regression pinned by chunk-concurrency.spec.ts.
+const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
+
+/**
+ * How many files a single review chunk may process concurrently: the configured concurrency
+ * level, capped only by what the invocation's remaining subrequest budget can safely cover.
+ *
+ * The cap is deliberately sized so it does NOT silently override the user's chosen concurrency
+ * at a healthy budget -- that would make the concurrency setting a no-op above the cap. It
+ * only throttles once earlier failures in this invocation have actually eaten into the budget;
+ * if there is not enough safe budget for one more file, the chunk yields and resumes in a fresh
+ * invocation instead of gambling past the margin. Any files a throttled chunk can't reach roll
+ * into the next chunk. The
+ * chunk-file-limit-honors-configured-level invariant is pinned by a regression test.
+ */
+export function budgetAwareFileLimit(remainingSafeBudget: number, configuredChunkFileLimit: number) {
+  const budgetLimit = Math.floor(remainingSafeBudget / ESTIMATED_SUBREQUESTS_PER_FILE);
+  return Math.min(configuredChunkFileLimit, budgetLimit);
+}
 
 function isRetryableFileReviewErrorMessage(message: string | null | undefined) {
   if (!message) return false;
   const lower = message.toLowerCase();
+
+  // Explicitly fail fast for timeouts so they don't loop endlessly, aligning with
+  // isTransientModelFailure which prevents timeouts from being retried.
+  if (isTimeoutMessage(lower)) {
+    return false;
+  }
+
   return (
+    matchesAnyTransientSubstring(lower) ||
     lower.includes('all configured review models failed') ||
     lower.includes('retrying later') ||
     lower.includes('google request failed with 5') ||
-    lower.includes('cloudflare') ||
-    lower.includes('timeout') ||
-    lower.includes('timed out') ||
-    lower.includes('internal error') ||
-    lower.includes('unavailable') ||
-    lower.includes('high demand') ||
     lower.includes('temporary') ||
-    lower.includes('[redacted]') ||
-    lower.includes('returned no review content') ||
-    lower.includes('empty response')
+    // Older jobs may have persisted subrequest-budget failures before budget exhaustion became
+    // a pure chunk-level deferral. Keep retrying those rows instead of treating them as handled.
+    lower.includes('subrequest')
   );
+}
+
+/**
+ * Detects Cloudflare's per-invocation subrequest-limit error (Workers Free plan: 50
+ * subrequests/invocation). Unlike a provider outage, this clears completely on the next
+ * invocation, so the correct response is never to fail the whole job or permanently abandon
+ * a file -- it is to persist whatever progress was made and reschedule the same phase, which
+ * runs in a fresh invocation with a fresh budget. Because each review chunk reviews and
+ * persists only a few files (see reviewChunkFileLimit), rescheduling reliably makes forward
+ * progress and the review grinds to completion instead of dying mid-way.
+ */
+function isSubrequestBudgetError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.toLowerCase().includes('subrequest');
 }
 
 function retryableModelFailureDelaySeconds(failureCount: number | null | undefined) {
@@ -91,10 +172,31 @@ function countsAsHandledFileReview(review: { file_status: string; error_msg: str
   return !shouldRetryExistingFileReview(review);
 }
 
+/**
+ * A file whose review was submitted to the Workers AI async batch queue and is still
+ * queued/running. Such a row is persisted as 'pending' with the queue request_id; it is neither
+ * "handled" (it must be polled to completion) nor a failure to retry from scratch.
+ */
+function isAwaitingAsyncReview(review: { file_status: string; async_request_id?: string | null }) {
+  return review.file_status === 'pending' && !!review.async_request_id;
+}
+
+// Reduces a model identifier to its bare name, ignoring the optional `provider:` prefix.
+// A completed file review stores the bare model id (e.g. `gemini-3.1-flash-lite`), while the
+// configured strategy stores the provider-qualified id (e.g. `google:gemini-3.1-flash-lite`).
+// Comparing the bare form on both sides is what lets a retry recognise an already-reviewed file
+// as inheritable -- without it, no completed review ever matches the config and every retry
+// re-reviews every file from scratch.
+function bareModelId(model: string): string {
+  const normalized = normalizeModelId(model);
+  const colon = normalized.indexOf(':');
+  return colon === -1 ? normalized : normalized.slice(colon + 1);
+}
+
 function configuredModelSet(config: RepoConfig) {
   const models = new Set<string>();
   const addModel = (model: string | null | undefined) => {
-    if (model) models.add(normalizeModelId(model));
+    if (model) models.add(bareModelId(model));
   };
 
   addModel(config.model?.main);
@@ -112,7 +214,7 @@ function configuredModelSet(config: RepoConfig) {
 }
 
 function canInheritParentFileReview(config: RepoConfig, review: { model_used: string }) {
-  return configuredModelSet(config).has(normalizeModelId(review.model_used));
+  return configuredModelSet(config).has(bareModelId(review.model_used));
 }
 
 async function resolveModelProviderName(env: Pick<AppBindings, 'HYPERDRIVE'>, modelId: string | null | undefined) {
@@ -213,10 +315,20 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     return { action: 'ack' };
   }
 
-  const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
-  if (runningCount >= MAX_CONCURRENT_JOBS) {
-    logger.info(`Throttling job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
-    return { action: 'retry', delaySeconds: 30 };
+  // Concurrency admission control: only throttle a job that has NOT started yet (status 'queued').
+  // A job that is already 'running' is mid-flight; re-gating its phase continuations would mean that
+  // lowering the concurrency limit (or any transient over-count from the check-then-claim race)
+  // makes every in-flight job retry forever -- that path returns before markJobContinuationQueued,
+  // so MAX_JOB_CONTINUATIONS never trips, the lease goes stale, and recovery force-fails the job.
+  // Gating only admission also avoids a second getReviewSettings fetch on review/finalize invocations.
+  if (resolved.job.status === 'queued') {
+    const { concurrencyLevel } = await getReviewSettings(env);
+    const maxConcurrentJobs = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
+    const runningCount = await getOtherRunningJobsCount(env, resolved.job.id);
+    if (runningCount >= maxConcurrentJobs) {
+      logger.info(`Throttling admission of job ${resolved.job.id}: ${runningCount} other jobs are currently running.`);
+      return { action: 'retry', delaySeconds: 30 };
+    }
   }
 
   const leaseOwner = crypto.randomUUID();
@@ -235,6 +347,19 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
   }
 
   const job = mapJob(claim.row);
+
+  // Bind this job row to the ACTUAL Workflow instance id so job control (stop/delete/rerun) can
+  // terminate the right instance. The bind-workflow-id step can't do this for webhook-triggered
+  // jobs -- their instance is keyed on deliveryId while the job row (created later, in prepare) has
+  // a different id -- so we (re)bind here now that the real job is resolved. Cheap and idempotent.
+  if (message.workflowInstanceId && job.workflowInstanceId !== message.workflowInstanceId) {
+    try {
+      await setJobWorkflowInstance(env, job.id, message.workflowInstanceId);
+    } catch (error) {
+      logger.warn(`Failed to bind workflow instance id for job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   const phase = resolved.phase;
   const tracker = new TokenTracker();
   const github = new GitHubService(env, job.installationId, tracker);
@@ -247,7 +372,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     } else if (phase === 'finalize') {
       await runFinalizePhase(env, job, leaseOwner, github, formatter);
     } else {
-      await runReviewPhase(env, job, leaseOwner, github, model);
+      await runReviewPhase(env, job, leaseOwner, github, model, tracker);
     }
 
     await releaseJobLease(env, job.id, leaseOwner);
@@ -272,9 +397,27 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      await markJobContinuationQueued(env, job.id, delaySeconds);
-      await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'next_phase', phase, delaySeconds }; // Retry same phase
+      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'transient model/provider failures');
+    }
+
+    // Running out of this invocation's subrequest budget is not a job failure: the prepare and
+    // review phases are idempotent (already-reviewed files are persisted and skipped next time),
+    // so reschedule the same phase to resume on a fresh budget instead of terminally failing the
+    // whole review. Finalize is intentionally excluded -- it posts the GitHub review and isn't
+    // safe to re-run, and with no AI calls it does not realistically approach the cap anyway.
+    if (phase !== 'finalize' && isSubrequestBudgetError(error)) {
+      // A fresh Worker invocation is what fixes budget exhaustion -- but only a long-enough sleep
+      // actually hibernates the workflow into one. Yield long enough to force that hibernation.
+      const record = error && typeof error === 'object' ? error as { retryAfterSeconds?: unknown } : null;
+      const delaySeconds = typeof record?.retryAfterSeconds === 'number'
+        ? record.retryAfterSeconds
+        : FRESH_INVOCATION_YIELD_SECONDS;
+      logger.warn(`Review job hit the per-invocation subrequest limit; rescheduling ${phase} on a fresh budget: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        error: messageText,
+        phase,
+        delaySeconds,
+      });
+      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'per-invocation subrequest limits');
     }
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
@@ -282,6 +425,66 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
     await releaseJobLease(env, job.id, leaseOwner);
     return { action: 'ack' };
   }
+}
+
+// Records a same-phase continuation and enforces the MAX_JOB_CONTINUATIONS ceiling. As long as
+// the job keeps completing files, resetJobContinuationCount() keeps this counter near zero; once
+// it has rescheduled MAX_JOB_CONTINUATIONS times without a single file completing, the job is
+// genuinely wedged (e.g. a provider is down for the entire backoff window), so we fail it
+// terminally instead of letting it churn indefinitely.
+async function continueOrFailWedgedJob(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  github: GitHubService,
+  leaseOwner: string,
+  phase: 'prepare' | 'review' | 'finalize',
+  delaySeconds: number,
+  reason: string,
+): Promise<ReviewJobRunResult> {
+  const continuationCount = await markJobContinuationQueued(env, job.id, delaySeconds);
+
+  if (continuationCount > MAX_JOB_CONTINUATIONS) {
+    if (phase === 'review') {
+      // Degrade to a partial review rather than throwing away the work done so far. NOTE: we must
+      // RETURN the finalize transition here, not call enqueueJobPhase() -- that helper throws
+      // NextPhaseError, and because continueOrFailWedgedJob runs inside runReviewJob's catch
+      // block that throw would escape the function uncaught instead of being turned into a result.
+      logger.error(`Review job exceeded the continuation ceiling; degrading to a partial review: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        phase,
+        continuationCount,
+        reason,
+      });
+      // Any file still awaiting an async batch result would otherwise be finalized as an empty
+      // "successful" review (its 'pending' row isn't 'failed', so finalize maps it to verdict
+      // 'comment'/'' with no findings). Mark them failed first -- mirrors the async-poll degrade path.
+      const stillPending = (await getFileReviewsForJobs(env, [job.id])).filter(isAwaitingAsyncReview);
+      for (const review of stillPending) {
+        await persistFailedFileReview(env, job.id, {
+          filePath: review.file_path,
+          modelUsed: review.async_model ?? review.model_used,
+          diffLineCount: review.diff_line_count,
+          errorMessage: 'Async batch review did not complete before the job wedged.',
+          clearAsync: true,
+        });
+      }
+      await releaseJobLease(env, job.id, leaseOwner);
+      // Finalize on a fresh invocation/budget -- this invocation is the one that hit the wall.
+      return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS };
+    } else {
+      const message = `Review could not make progress after ${continuationCount} continuation attempts (${reason}). Failing the job to avoid an endless retry loop; re-run it once the underlying provider issue clears.`;
+      logger.error(`Review job exceeded the continuation ceiling; failing terminally: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        phase,
+        continuationCount,
+        reason,
+      });
+      await failJobAndCheckRun(env, job, github, message);
+      await releaseJobLease(env, job.id, leaseOwner);
+      return { action: 'ack' };
+    }
+  }
+
+  await releaseJobLease(env, job.id, leaseOwner);
+  return { action: 'next_phase', phase, delaySeconds }; // Resume same phase
 }
 
 async function resolveQueuedJob(
@@ -426,6 +629,17 @@ async function runPreparePhase(
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
 
+  // Refresh the cached PR title/author from the live PR: these are snapshotted at job creation and
+  // copied onto retries, so a title edited on GitHub afterwards would otherwise stay stale.
+  try {
+    await setJobPullRequestMeta(env, job.id, {
+      prTitle: pr.title ?? null,
+      prAuthor: pr.user?.login ?? null,
+    });
+  } catch (error) {
+    logger.warn(`Failed to refresh PR metadata for job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
+  }
+
   let checkRunId = job.checkRunId;
   if (!checkRunId) {
     const checkRun = await github.createCheckRun(job.owner, job.repo, {
@@ -437,8 +651,7 @@ async function runPreparePhase(
     await updateJobCheckRun(env, job.id, checkRun.id);
   }
 
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
+  const files = await getDiffFiles(env, job, github, config);
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -449,10 +662,16 @@ async function runPreparePhase(
   }
 
   if (checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, checkRunId, {
-      title: `Reviewing (0/${files.length})`,
-      summary: 'Codra is analyzing changed files.',
-    });
+    // Best-effort progress cosmetics only (see runReviewPhase): don't let a failed check-run
+    // update block enqueuing the review phase that does the actual work.
+    try {
+      await github.updateCheckRun(job.owner, job.repo, checkRunId, {
+        title: `Reviewing (0/${files.length})`,
+        summary: 'Codra is analyzing changed files.',
+      });
+    } catch (error) {
+      logger.warn(`Failed to update initial progress check run for job ${job.id}; continuing to the review phase anyway`, error instanceof Error ? error : new Error(String(error)));
+    }
   }
   await enqueueJobPhase(env, job.id, 'review');
 }
@@ -463,6 +682,7 @@ async function runReviewPhase(
   leaseOwner: string,
   github: GitHubService,
   model: ModelService,
+  tracker: TokenTracker,
 ) {
   if (!hasCompletedStep(job, 'Preparation')) {
     await runPreparePhase(env, job, leaseOwner, github);
@@ -479,9 +699,18 @@ async function runReviewPhase(
     failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
     return failureModelProviderPromise;
   };
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
+  const files = await getDiffFiles(env, job, github, config);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
+  const { concurrencyLevel } = await getReviewSettings(env);
+  const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
+  // Cap this chunk's concurrency by the invocation's remaining subrequest budget so a run of
+  // model/provider failures can't push it over Cloudflare's per-invocation cap (Workers Free
+  // plan: 50) -- but sized (see budgetAwareFileLimit) so the configured concurrency level is
+  // honored in full at a healthy budget and only throttled once the budget is actually spent.
+  const reviewChunkFileLimit = budgetAwareFileLimit(tracker.remainingSafeBudget(), configuredChunkFileLimit);
+  if (reviewChunkFileLimit <= 0) {
+    throw new Error('Subrequest budget for this invocation was exhausted before starting the next review chunk.');
+  }
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
@@ -492,23 +721,122 @@ async function runReviewPhase(
   const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [review.file_path, review]));
 
   const reviewTasks: Array<Promise<void>> = [];
+  // Counters shared across the concurrent review tasks below (single-threaded JS, so ++ is safe):
+  // `terminalProgress` counts files that reached a terminal state this chunk (reviewed, inherited,
+  // or permanently failed); `awaitingAsync` counts files still queued/running on the async batch.
+  let terminalProgress = 0;
+  let awaitingAsync = 0;
+
+  // Fast path for retries: bulk-copy every reusable parent review in one cheap DB pass instead of
+  // re-persisting them one-per-budget-slot through the throttled loop below. Only files with no row
+  // yet in this job are bulk-inherited; anything with an existing row falls through to the loop
+  // (which handles its own inherit/re-review decision). This lets a fully-inheritable retry finish
+  // the whole review phase in a single invocation rather than crawling through ~12 hibernated chunks.
+  if (job.retryOfJobId && parentReviews.size > 0) {
+    const inheritablePaths = files
+      .filter((file) => {
+        if (currentReviews.has(file.path)) return false;
+        const parent = parentReviews.get(file.path);
+        return Boolean(parent && canInheritParentFileReview(config, parent));
+      })
+      .map((file) => file.path);
+
+    if (inheritablePaths.length > 0) {
+      const inheritedPaths = await bulkInheritFileReviews(env, {
+        jobId: job.id,
+        parentJobId: job.retryOfJobId,
+        filePaths: inheritablePaths,
+      });
+      // Mark the just-copied files handled so the loop below skips them (no per-file re-work).
+      for (const path of inheritedPaths) {
+        const parent = parentReviews.get(path);
+        if (parent) currentReviews.set(path, parent);
+      }
+      terminalProgress += inheritedPaths.length;
+      if (inheritedPaths.length > 0) {
+        logger.info(`Bulk-inherited ${inheritedPaths.length} parent file reviews for job ${job.id} in one pass`);
+      }
+    }
+  }
 
   for (const file of files) {
     const existingReview = currentReviews.get(file.path);
-    if (existingReview && countsAsHandledFileReview(existingReview)) {
+    // An in-flight async submission must be polled (not skipped as "handled" and not resubmitted).
+    const awaitingReview = existingReview && isAwaitingAsyncReview(existingReview) ? existingReview : null;
+    if (existingReview && countsAsHandledFileReview(existingReview) && !awaitingReview) {
       continue;
     }
 
     const inherited = parentReviews.get(file.path);
     const reviewTask = async () => {
+      // (0) Poll an already-submitted async batch review.
+      if (awaitingReview) {
+        const poll = await model.pollReviewBatch({
+          model: awaitingReview.async_model ?? awaitingReview.model_used,
+          requestId: awaitingReview.async_request_id!,
+          file,
+        });
+        if (poll.status === 'pending') {
+          awaitingAsync += 1;
+          return;
+        }
+        if (poll.status === 'failed') {
+          // The batch errored/expired -- fall back to a synchronous review so the file still gets done.
+          logger.warn(`Async batch poll failed for ${file.path}; falling back to synchronous review`, {
+            error: poll.error instanceof Error ? poll.error.message : String(poll.error),
+          });
+          await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+          terminalProgress += 1;
+          return;
+        }
+        await persistCompletedReview(env, job, file, poll.response);
+        terminalProgress += 1;
+        return;
+      }
+
       if (!inherited) {
+        // (1) Try the async batch queue first; on any unavailability fall back to sync review.
+        const submitted = await model.submitReviewBatch({
+          file,
+          prTitle: pr.title ?? null,
+          prDescription: pr.body ?? null,
+          config,
+          totalLineCount,
+          compactPrompt: (existingReview?.transient_error_count ?? 0) > 0,
+        });
+        if (submitted) {
+          await upsertFileReview(env, job.id, {
+            filePath: file.path,
+            fileStatus: 'pending',
+            modelUsed: submitted.model,
+            modelProvider: null,
+            diffLineCount: file.lineCount,
+            diffInput: null,
+            rawAiOutput: null,
+            parsedComments: [],
+            inputTokens: null,
+            outputTokens: null,
+            durationMs: null,
+            verdict: null,
+            fileSummary: null,
+            overallCorrectness: null,
+            confidenceScore: null,
+            errorMessage: null,
+            asyncRequestId: submitted.requestId,
+            asyncModel: submitted.model,
+          });
+          awaitingAsync += 1;
+          return;
+        }
         await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        terminalProgress += 1;
         return;
       }
 
       if (!canInheritParentFileReview(config, inherited)) {
         logger.info(`Ignoring inherited review for ${file.path}; parent model ${inherited.model_used} is not in the current model strategy`);
         await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        terminalProgress += 1;
       } else {
         await upsertFileReview(env, job.id, {
           filePath: file.path,
@@ -529,13 +857,14 @@ async function runReviewPhase(
           errorMessage: null,
         });
         currentReviews.set(file.path, inherited);
+        terminalProgress += 1;
       }
     };
 
     reviewTasks.push(reviewTask());
     processedThisChunk += 1;
 
-    if (processedThisChunk >= REVIEW_CHUNK_FILE_LIMIT || Date.now() - startedAt >= REVIEW_CHUNK_WALL_CLOCK_MS) {
+    if (processedThisChunk >= reviewChunkFileLimit || Date.now() - startedAt >= REVIEW_CHUNK_WALL_CLOCK_MS) {
       break;
     }
   }
@@ -543,17 +872,27 @@ async function runReviewPhase(
   const results = await Promise.allSettled(reviewTasks);
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
+  // Terminal progress means a file reached a terminal state this chunk (reviewed, inherited, or
+  // marked permanently failed). Clear the no-progress continuation counter so a slow-but-advancing
+  // job never trips the MAX_JOB_CONTINUATIONS safety net. A chunk that only *submitted* or *polled*
+  // still-pending async batches made no terminal progress, so it must NOT reset the counter --
+  // that's what bounds polling of a batch that never completes.
+  if (terminalProgress > 0) {
+    await resetJobContinuationCount(env, job.id);
+  }
+
   const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (rejected.length > 0) {
     rejected.forEach((result, index) => {
       logger.error(`Review chunk task ${index + 1}/${rejected.length} failed`, result.reason);
     });
     
-    // If any of the rejected tasks were transient model errors, we must throw a RetryableModelError
-    // so that the job orchestrator retries the chunk, instead of failing the job with an AggregateError.
-    const retryableError = rejected.map(r => r.reason).find(isRetryableModelError);
-    if (retryableError) {
-      throw retryableError;
+    // If any rejected task was a transient model error or a per-invocation subrequest-budget
+    // hit, surface that single error so the job orchestrator reschedules the chunk on a fresh
+    // budget, instead of failing the job with an AggregateError.
+    const deferrableError = rejected.map(r => r.reason).find(r => isRetryableModelError(r) || isSubrequestBudgetError(r));
+    if (deferrableError) {
+      throw deferrableError;
     }
 
     throw rejected.length === 1
@@ -562,22 +901,150 @@ async function runReviewPhase(
   }
 
   const latestReviews = await getFileReviewsForJobs(env, [job.id]);
-  const reviewedPaths = new Set(latestReviews.filter(countsAsHandledFileReview).map((review) => review.file_path));
+  // A file still awaiting its async batch result is NOT complete yet -- exclude it so the job
+  // doesn't finalize with pending reviews.
+  const reviewedPaths = new Set(
+    latestReviews.filter((review) => countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => review.file_path),
+  );
   const completedCount = files.filter((file) => reviewedPaths.has(file.path)).length;
 
   if (completedCount >= files.length) {
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
-    await enqueueJobPhase(env, job.id, 'finalize');
+    // Finalize (post the GitHub review, labels, check run) needs its OWN fresh subrequest budget.
+    // Always hibernate into a new invocation first: the review phase that just finished spent this
+    // invocation's budget, and TokenTracker under-reports real usage (it doesn't see Hyperdrive/
+    // GitHub subrequests), so a conditional yield let finalize run in the exhausted invocation and
+    // die with "Too many subrequests". Unconditional yield trades a one-time delay for reliability.
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
     return;
   }
 
-  if (job.checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
-      title: `Reviewing (${completedCount}/${files.length})`,
-      summary: 'Codra is continuing this review in the next queue chunk.',
-    });
+  // If the only thing left is in-flight async batches (no synchronous work remains to advance),
+  // poll again after a short delay rather than immediately re-running. Bound the polling with the
+  // shared continuation ceiling: markJobContinuationQueued returns the post-increment count, and
+  // because a pending-only chunk never reset it (terminalProgress === 0), a batch that never
+  // completes will eventually cross MAX_JOB_CONTINUATIONS and degrade to a partial review instead
+  // of polling forever.
+  if (awaitingAsync > 0 && terminalProgress === 0) {
+    const pollCount = await markJobContinuationQueued(env, job.id, ASYNC_BATCH_POLL_DELAY_SECONDS);
+    if (pollCount > MAX_JOB_CONTINUATIONS) {
+      logger.error(`Async batch reviews did not complete after ${pollCount} polls; degrading to a partial review: ${job.owner}/${job.repo} PR #${job.prNumber}`);
+      for (const review of latestReviews.filter(isAwaitingAsyncReview)) {
+        await persistFailedFileReview(env, job.id, {
+          filePath: review.file_path,
+          modelUsed: review.async_model ?? review.model_used,
+          diffLineCount: review.diff_line_count,
+          errorMessage: 'Async batch review did not complete in time.',
+          clearAsync: true,
+        });
+      }
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+      throw new NextPhaseError('finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    }
+    throw new NextPhaseError('review', ASYNC_BATCH_POLL_DELAY_SECONDS);
   }
-  await enqueueJobPhase(env, job.id, 'review');
+
+  if (job.checkRunId) {
+    // Best-effort progress cosmetics only: the file reviews for this chunk are already
+    // persisted, so a failure here (e.g. this invocation's subrequest budget is spent) must
+    // not stop us from enqueuing the next chunk that finishes the job.
+    try {
+      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+        title: `Reviewing (${completedCount}/${files.length})`,
+        summary: 'Codra is continuing this review in the next queue chunk.',
+      });
+    } catch (error) {
+      logger.warn(`Failed to update progress check run for job ${job.id}; continuing to the next chunk anyway`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  // More files remain -- the next chunk needs a fresh subrequest budget, so yield long enough to
+  // force the workflow to hibernate into a new invocation rather than looping in this one (which
+  // would accumulate subrequests across chunks until the cap is hit).
+  await enqueueJobPhase(env, job.id, 'review', FRESH_INVOCATION_YIELD_SECONDS);
+}
+
+/**
+ * Persist a completed review produced by the async batch poll path. Mirrors the success branch of
+ * reviewAndPersistFile and clears the async bookkeeping columns so the row is terminal ('done').
+ */
+async function persistCompletedReview(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  file: ReturnType<typeof parseUnifiedDiff>[number],
+  response: {
+    modelUsed: string;
+    provider: string;
+    inputTokens: number;
+    outputTokens: number;
+    rawText: string;
+    userPrompt: string;
+    parsed: {
+      comments: ParsedReviewComment[];
+      verdict: 'approve' | 'comment';
+      fileSummary: string;
+      overallCorrectness?: string;
+      confidenceScore?: number;
+    };
+  },
+) {
+  await upsertFileReview(env, job.id, {
+    filePath: file.path,
+    fileStatus: 'done',
+    modelUsed: response.modelUsed,
+    modelProvider: response.provider,
+    diffLineCount: file.lineCount,
+    diffInput: response.userPrompt,
+    rawAiOutput: response.rawText,
+    parsedComments: response.parsed.comments,
+    inputTokens: response.inputTokens,
+    outputTokens: response.outputTokens,
+    durationMs: null,
+    verdict: response.parsed.verdict,
+    fileSummary: response.parsed.fileSummary,
+    overallCorrectness: response.parsed.overallCorrectness,
+    confidenceScore: response.parsed.confidenceScore,
+    errorMessage: null,
+    asyncRequestId: null,
+    asyncModel: null,
+  });
+}
+
+/**
+ * Persist a file review as terminally 'failed' with the shared "mostly-null" shape. Collapses the
+ * several near-identical failure upserts (transient-retry exhaustion, hard provider limit, async
+ * batch giving up, finalize backfilling missing files) into one place. `clearAsync` wipes the
+ * async batch bookkeeping columns for rows that had been submitted to the queue.
+ */
+async function persistFailedFileReview(
+  env: AppBindings,
+  jobId: string,
+  input: {
+    filePath: string;
+    modelUsed: string;
+    modelProvider?: string | null;
+    diffLineCount: number;
+    durationMs?: number | null;
+    errorMessage: string;
+    clearAsync?: boolean;
+  },
+) {
+  await upsertFileReview(env, jobId, {
+    filePath: input.filePath,
+    fileStatus: 'failed',
+    modelUsed: input.modelUsed,
+    modelProvider: input.modelProvider ?? null,
+    diffLineCount: input.diffLineCount,
+    diffInput: '',
+    rawAiOutput: null,
+    parsedComments: [],
+    inputTokens: null,
+    outputTokens: null,
+    durationMs: input.durationMs ?? null,
+    verdict: null,
+    fileSummary: null,
+    errorMessage: input.errorMessage,
+    ...(input.clearAsync ? { asyncRequestId: null, asyncModel: null } : {}),
+  });
 }
 
 async function reviewAndPersistFile(
@@ -626,6 +1093,22 @@ async function reviewAndPersistFile(
     const modelId = config.model?.main ?? 'unconfigured';
     const modelProvider = await resolveFailureModelProvider();
 
+    // Per-invocation subrequest pressure clears on the next Worker invocation, so do not count
+    // it as a per-file provider outage. Let the job-level no-progress continuation ceiling bound
+    // a genuinely wedged job while this file remains pending for the fresh-budget retry.
+    if (isSubrequestBudgetError(error)) {
+      logger.warn(`File review deferred for ${file.path}; subrequest budget will retry in a fresh invocation`, {
+        error: errorMessage,
+      });
+      Object.defineProperty(error, 'retryAfterSeconds', {
+        value: FRESH_INVOCATION_YIELD_SECONDS,
+        configurable: true,
+      });
+      throw error;
+    }
+
+    // Transient model/provider outages count against the file so a single unrecoverable file
+    // eventually becomes a partial-review failure instead of blocking the entire job forever.
     if (isRetryableModelError(error)) {
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
@@ -639,20 +1122,12 @@ async function reviewAndPersistFile(
 
       if (failureCount >= MAX_RETRYABLE_FILE_REVIEW_FAILURES) {
         const finalError = `Review skipped after ${failureCount} repeated model provider outages.`;
-        await upsertFileReview(env, job.id, {
+        await persistFailedFileReview(env, job.id, {
           filePath: file.path,
-          fileStatus: 'failed',
           modelUsed: modelId,
           modelProvider,
           diffLineCount: file.lineCount,
-          diffInput: '',
-          rawAiOutput: null,
-          parsedComments: [],
-          inputTokens: null,
-          outputTokens: null,
           durationMs: Date.now() - startedAt,
-          verdict: null,
-          fileSummary: null,
           errorMessage: finalError,
         });
         logger.error(`File review failed permanently for ${file.path} after transient retries`, {
@@ -675,33 +1150,60 @@ async function reviewAndPersistFile(
 
     logger.error(`File review failed for ${file.path}`, { error });
 
+    // A genuine provider allocation exhaustion (e.g. Cloudflare Workers AI daily free
+    // allocation, error 4006) won't clear by retrying within this job, so mark the file failed
+    // and let the PR review complete as a partial review. (Per-invocation subrequest limits are
+    // NOT hard limits -- they're handled as deferrals above and retried on a fresh budget.)
     const isHardLimit =
-      errorMessage.toLowerCase().includes('subrequest') ||
       errorMessage.includes('4006') ||
       errorMessage.toLowerCase().includes('allocation');
 
     if (isHardLimit) {
-      logger.warn(`File review hit hard limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
+      logger.warn(`File review hit hard provider allocation limit for ${file.path}, marking as failed to allow partial PR review.`, { error: errorMessage });
       // We don't throw here; we just fall through and let it be marked as failed
       // so the PR review can continue and complete as a partial review.
     }
 
-    await upsertFileReview(env, job.id, {
+    await persistFailedFileReview(env, job.id, {
       filePath: file.path,
-      fileStatus: 'failed',
       modelUsed: modelId,
       modelProvider,
       diffLineCount: file.lineCount,
-      diffInput: '',
-      rawAiOutput: null,
-      parsedComments: [],
-      inputTokens: null,
-      outputTokens: null,
       durationMs: Date.now() - startedAt,
-      verdict: null,
-      fileSummary: null,
       errorMessage,
     });
+  }
+}
+
+/**
+ * Assemble and fire the anonymous per-review telemetry event. The shared aggregate fields
+ * (line/token counts, models, file extensions, duration) are computed once here; the three fields
+ * that differ between the success and all-failed paths are passed as `overrides`. Never throws.
+ */
+async function sendReviewTelemetry(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  files: Array<{ path: string; lineCount: number }>,
+  reviews: Array<{ input_tokens: number | null; output_tokens: number | null; model_used: string }>,
+  overrides: { findingsReported: number; verdict: string; severityDistribution: Record<string, number> },
+) {
+  try {
+    await sendTelemetryEvent(env, {
+      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
+      inputTokens: reviews.reduce((sum, r) => sum + (r.input_tokens ?? 0), 0),
+      outputTokens: reviews.reduce((sum, r) => sum + (r.output_tokens ?? 0), 0),
+      modelsUsed: Array.from(new Set(reviews.map((r) => r.model_used).filter(Boolean))),
+      fileExtensions: Array.from(new Set(files.map((f) => {
+        const parts = f.path.split('.');
+        return parts.length > 1 ? parts.pop() || '' : '';
+      }).filter(Boolean))),
+      triggerType: job.trigger,
+      reviewDurationMs: Math.max(0, Date.now() - new Date(job.createdAt).getTime()),
+      filesReviewed: files.length,
+      ...overrides,
+    });
+  } catch (e) {
+    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
   }
 }
 
@@ -716,14 +1218,34 @@ async function runFinalizePhase(
 
   const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
-  const rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
-  const files = filterReviewableFiles(parseUnifiedDiff(rawDiff), config.review);
-  const reviews = await getFileReviewsForJobs(env, [job.id]);
+  const files = await getDiffFiles(env, job, github, config);
+  let reviews = await getFileReviewsForJobs(env, [job.id]);
 
   if (reviews.length < files.length) {
-    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'running' });
-    await enqueueJobPhase(env, job.id, 'review');
-    return;
+    const reviewedPaths = new Set(reviews.map((r) => r.file_path));
+    const missingFiles = files.filter((f) => !reviewedPaths.has(f.path));
+    
+    if (missingFiles.length > 0) {
+      logger.warn(`Job ${job.id} reached finalize phase with ${missingFiles.length} missing file reviews. Forcing them to failed state.`);
+      // Batch the backfill into one INSERT. Doing it per-file (a transaction each) scales the
+      // subrequest cost with the number of missing files and, on a large/growing PR, exhausts the
+      // per-invocation budget right before the review is posted (finalize can't safely hibernate --
+      // it posts the GitHub review -- so it must stay within one invocation's budget).
+      await bulkMarkFilesFailed(
+        env,
+        job.id,
+        missingFiles.map((file) => ({ filePath: file.path, diffLineCount: file.lineCount })),
+        { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'Review could not be completed after repeated infrastructure limits' },
+      );
+
+      // Refresh reviews list after inserting the missing ones
+      reviews = await getFileReviewsForJobs(env, [job.id]);
+    } else {
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'running' });
+      // Bounce back to review on a fresh invocation/budget (finalize already spent this one).
+      await enqueueJobPhase(env, job.id, 'review', FRESH_INVOCATION_YIELD_SECONDS);
+      return;
+    }
   }
 
   const reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
@@ -737,34 +1259,12 @@ async function runFinalizePhase(
 
   if (fileSummaries.length > 0 && fileSummaries.every((file) => file.verdict === 'failed')) {
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'failed', error: 'All files failed to review' });
-    
-    // Send anonymous telemetry for the failed job
-    const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
-    const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
-    const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
-    const fileExtensions = Array.from(new Set(files.map(f => {
-      const parts = f.path.split('.');
-      return parts.length > 1 ? parts.pop() || '' : '';
-    }).filter(Boolean)));
-    const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
-    
-    try {
-      await sendTelemetryEvent(env, {
-        linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-        findingsReported: 0,
-        inputTokens: fileInputTokens,
-        outputTokens: fileOutputTokens,
-        modelsUsed,
-        fileExtensions,
-        triggerType: job.trigger,
-        reviewDurationMs,
-        filesReviewed: files.length,
-        verdict: 'failed',
-        severityDistribution: {},
-      });
-    } catch (e) {
-      logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
-    }
+
+    await sendReviewTelemetry(env, job, files, reviews, {
+      findingsReported: 0,
+      verdict: 'failed',
+      severityDistribution: {},
+    });
 
     throw new Error('All files failed to review');
   }
@@ -773,13 +1273,15 @@ async function runFinalizePhase(
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
   const severityRanks: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
   const minRank = severityRanks[config.review.min_severity] ?? 4;
-  
+  const { maxComments: globalMaxComments } = await getReviewSettings(env);
+  const effectiveMaxComments = Math.min(config.review.max_comments, globalMaxComments);
+
   let finalComments = reviewedComments.filter(c => (severityRanks[c.severity] ?? 4) <= minRank);
   finalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
-  
-  const omittedCount = reviewedComments.length - Math.min(finalComments.length, config.review.max_comments);
-  if (finalComments.length > config.review.max_comments) {
-    finalComments = finalComments.slice(0, config.review.max_comments);
+
+  const omittedCount = reviewedComments.length - Math.min(finalComments.length, effectiveMaxComments);
+  if (finalComments.length > effectiveMaxComments) {
+    finalComments = finalComments.slice(0, effectiveMaxComments);
   }
 
   const verdictSummary = formatter.summarizeVerdict(finalComments, hasFailures);
@@ -787,9 +1289,9 @@ async function runFinalizePhase(
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
   let formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
-  
+
   if (omittedCount > 0) {
-    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${config.review.max_comments}). Showing the most critical issues.`;
+    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${effectiveMaxComments}). Showing the most critical issues.`;
   }
 
   await updateJobStep(env, job.id, 'Completing', { status: 'running' });
@@ -804,43 +1306,8 @@ async function runFinalizePhase(
     })),
   });
 
-  if (config.review.labels !== false) {
-    const labels = config.review.labels;
-    const labelMap = {
-      comment: { name: labels.p1, color: 'f79009' },
-      approve: { name: labels.p2, color: '027a48' },
-    } as const;
-    const label = labelMap[verdictSummary.verdict];
-
-    await github.removeIssueLabelsIfPresent(
-      job.owner,
-      job.repo,
-      job.prNumber,
-      [labels.p1, labels.p2, labels.p3].filter(possibleLabel => possibleLabel !== label.name),
-    );
-
-    await github.ensureLabel(job.owner, job.repo, label.name, label.color);
-    await github.addIssueLabels(job.owner, job.repo, job.prNumber, [label.name]);
-  }
-
-  if (job.checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
-      status: 'completed',
-      conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
-      title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
-      summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
-    });
-  }
-
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
-  
-  const modelsUsed = Array.from(new Set(reviews.map(r => r.model_used).filter(Boolean)));
-  const fileExtensions = Array.from(new Set(files.map(f => {
-    const parts = f.path.split('.');
-    return parts.length > 1 ? parts.pop() || '' : '';
-  }).filter(Boolean)));
-  const reviewDurationMs = Math.max(0, Date.now() - new Date(job.createdAt).getTime());
 
   const severityDistribution: Record<string, number> = {};
   for (const comment of finalComments) {
@@ -851,6 +1318,10 @@ async function runFinalizePhase(
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed after repeated model/provider outages.`
     : null;
+  // Record the posted review and mark the job done IMMEDIATELY after createReview -- before the
+  // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
+  // label/check-run calls exhaust this invocation's subrequest budget (large PR), we must not leave
+  // the job stranded as 'failed' with review_id null. This is the critical, must-not-lose write.
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
@@ -864,24 +1335,52 @@ async function runFinalizePhase(
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
 
-  // Send anonymous telemetry
+  // Cosmetics: labels and the check-run conclusion. Best-effort -- the review is posted and the job
+  // is already 'done', so a failure here (e.g. subrequest budget spent, GitHub blip) must not fail
+  // the job. completeTerminalCheckRuns / a re-run can reconcile a check run left un-updated.
   try {
-    await sendTelemetryEvent(env, {
-      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-      findingsReported: finalComments.length,
-      inputTokens: fileInputTokens,
-      outputTokens: fileOutputTokens,
-      modelsUsed,
-      fileExtensions,
-      triggerType: job.trigger,
-      reviewDurationMs,
-      filesReviewed: files.length,
-      verdict: verdictSummary.verdict,
-      severityDistribution,
-    });
-  } catch (e) {
-    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
+    // Check-run conclusion first: it drives the PR's status badge, so it matters more than labels
+    // if the budget only allows one of them.
+    if (job.checkRunId) {
+      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+        status: 'completed',
+        conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
+        title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
+        summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
+      });
+      // Only now is the check run genuinely completed -- record it so the maintenance sweep doesn't
+      // redo it. If the update above threw, this line is skipped and completeTerminalCheckRuns will
+      // finish the check run on a later invocation with a fresh budget.
+      await markJobCheckRunCompleted(env, job.id);
+    }
+
+    if (config.review.labels !== false) {
+      const labels = config.review.labels;
+      const labelMap = {
+        comment: { name: labels.p1, color: 'f79009' },
+        approve: { name: labels.p2, color: '027a48' },
+      } as const;
+      const label = labelMap[verdictSummary.verdict];
+
+      await github.removeIssueLabelsIfPresent(
+        job.owner,
+        job.repo,
+        job.prNumber,
+        [labels.p1, labels.p2, labels.p3].filter(possibleLabel => possibleLabel !== label.name),
+      );
+
+      await github.ensureLabel(job.owner, job.repo, label.name, label.color);
+      await github.addIssueLabels(job.owner, job.repo, job.prNumber, [label.name]);
+    }
+  } catch (error) {
+    logger.warn(`Post-review labels/check-run update failed for job ${job.id}; review is posted and job is completed, so leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
   }
+
+  await sendReviewTelemetry(env, job, files, reviews, {
+    findingsReported: finalComments.length,
+    verdict: verdictSummary.verdict,
+    severityDistribution,
+  });
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
@@ -912,14 +1411,56 @@ function hasCompletedStep(job: PersistedReviewJob, stepName: string) {
   return job.steps.some((step) => step.name === stepName && step.status === 'done');
 }
 
-async function failJobAndCheckRun(
+function diffCacheKey(jobId: string) {
+  return `diff:${jobId}`;
+}
+
+/**
+ * Returns the job's reviewable files, fetching and parsing the PR diff from
+ * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ */
+export async function getDiffFiles(
   env: AppBindings,
-  job: PersistedReviewJob,
-  github: GitHubService,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
+  github: Pick<GitHubService, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  const cacheKey = diffCacheKey(job.id);
+  let rawDiff = await env.APP_KV.get(cacheKey);
+
+  if (!rawDiff) {
+    rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
+    try {
+      await env.APP_KV.put(cacheKey, rawDiff, { expirationTtl: DIFF_CACHE_TTL_SECONDS });
+    } catch (error) {
+      logger.warn(`Failed to cache PR diff for job ${job.id}; it will be re-fetched on the next phase`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  return filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+}
+
+export async function failJobAndCheckRun(
+  env: AppBindings,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'checkRunId'>,
+  github: Pick<GitHubService, 'updateCheckRun'>,
   message: string,
 ) {
+  // Marking the job failed in the DB is the critical, must-not-lose write: it's what
+  // makes the job terminal so it stops being retried, and it's what makes it eligible
+  // for completeTerminalCheckRuns() to pick up later if the GitHub call below fails.
   try {
     await failJob(env, job.id, message);
+  } catch (dbError) {
+    logger.error(`Critical: failed to mark job ${job.id} as failed in the DB; it may remain stuck until lease-expiry recovery reclaims it`, dbError);
+    return;
+  }
+
+  // Updating the GitHub check run is best-effort here. If it fails (e.g. the Worker's
+  // subrequest budget for this invocation is already exhausted from the review itself),
+  // the job is still durably marked failed above, and the opportunistic maintenance sweep
+  // (completeTerminalCheckRuns) will retry this update on a later invocation with a fresh budget.
+  try {
     const latest = await getJobForProcessing(env, job.id);
     const checkRunId = latest?.check_run_id ?? job.checkRunId;
     if (checkRunId) {
@@ -931,7 +1472,7 @@ async function failJobAndCheckRun(
       });
       await markJobCheckRunCompleted(env, job.id);
     }
-  } catch (innerError) {
-    logger.error('Failed to record job failure in DB/GitHub', innerError);
+  } catch (checkRunError) {
+    logger.warn(`Failed to update GitHub check run for failed job ${job.id}; opportunistic maintenance will retry it`, checkRunError);
   }
 }

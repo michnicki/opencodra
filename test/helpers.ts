@@ -58,9 +58,18 @@ export class MockQueue {
 
 export class MockWorkflow {
   public readonly created: any[] = [];
+  public readonly terminated: string[] = [];
 
   async create(opts: any) {
     this.created.push(opts);
+  }
+
+  async get(id: string) {
+    return {
+      terminate: async () => {
+        this.terminated.push(id);
+      },
+    };
   }
 }
 
@@ -116,7 +125,6 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     get ENVIRONMENT() { return unusedEnv('ENVIRONMENT'); },
     get CF_API_TOKEN() { return unusedEnv('CF_API_TOKEN'); },
     get CF_ACCOUNT_ID() { return unusedEnv('CF_ACCOUNT_ID'); },
-    get CF_DLQ_ID() { return unusedEnv('CF_DLQ_ID'); },
     ...overrides,
   };
 }

@@ -15,7 +15,7 @@ export type JobRow = {
   commit_sha: ByteaValue;
   base_sha: ByteaValue;
   trigger: 'auto' | 'mention' | 'retry';
-  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'superseded' | 'cancelled';
   config_snapshot: { review?: RepoConfig['review']; model?: RepoConfig['model'] } | string | null;
   check_run_id: number | null;
   check_run_completed_at: string | null;
@@ -26,6 +26,7 @@ export type JobRow = {
   lease_expires_at: string | null;
   heartbeat_at: string | null;
   recovery_count: number | null;
+  continuation_count: number | null;
   last_queue_message_at: string | null;
   total_input_tokens: number | null;
   total_output_tokens: number | null;
@@ -154,8 +155,66 @@ export async function setJobWorkflowInstance(env: Pick<AppBindings, 'HYPERDRIVE'
   );
 }
 
-export async function insertJob(
+/**
+ * Refresh a job's cached PR title/author from the live pull request. The values are snapshotted at
+ * job-creation time (and copied verbatim onto retries), so a title edited on GitHub afterwards would
+ * otherwise keep showing stale on the dashboard. Called during prepare once the PR is fetched.
+ */
+export async function setJobPullRequestMeta(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  meta: { prTitle: string | null; prAuthor: string | null },
+) {
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET pr_title = $2,
+          pr_author = COALESCE($3, pr_author)
+      WHERE id = $1
+    `,
+    [jobId, meta.prTitle, meta.prAuthor],
+  );
+}
+
+export async function markSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
+  try {
+    await env.APP_KV.put('system:active_jobs', '1', { expirationTtl: 20 * 60 });
+  } catch (error) {
+    // Ignore KV errors to avoid failing the DB transaction
+  }
+}
+
+export async function clearSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
+  try {
+    await env.APP_KV.delete('system:active_jobs');
+  } catch (error) {
+    // Best-effort: the 20-minute TTL on the flag is the backstop if this delete fails.
+  }
+}
+
+/**
+ * Whether the scheduled maintenance loop still has anything to do: any job that could still be
+ * running/recoverable (queued/running) or any terminal job whose GitHub check run hasn't been
+ * completed yet. When this is false the cron can clear the `system:active_jobs` flag so subsequent
+ * ticks skip the DB entirely and the serverless Postgres is allowed to suspend.
+ */
+export async function hasPendingMaintenanceWork(env: Pick<AppBindings, 'HYPERDRIVE'>): Promise<boolean> {
+  const rows = await queryRows<{ has_work: boolean }>(
+    env,
+    `
+      SELECT EXISTS (
+        SELECT 1 FROM jobs
+        WHERE status IN ('queued', 'running')
+           OR (status IN ('done', 'failed', 'superseded', 'cancelled') AND check_run_id IS NOT NULL AND check_run_completed_at IS NULL)
+      ) AS has_work
+    `,
+  );
+  return rows[0]?.has_work === true;
+}
+
+export async function insertJob(
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   input: {
     installationId: string;
     owner: string;
@@ -218,6 +277,7 @@ export async function insertJob(
     ],
   );
 
+  await markSystemActive(env);
   return mapJob(row);
 }
 
@@ -394,35 +454,8 @@ export async function getJobDetail(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: 
   });
 }
 
-export async function startJobProcessing(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, stepName: string) {
-  const now = new Date().toISOString();
-  const rows = await queryRows<{ id: string }>(
-    env,
-    `
-      UPDATE jobs
-      SET status = 'running',
-          started_at = COALESCE(started_at, now()),
-          steps = COALESCE(steps, '[]'::jsonb) || jsonb_build_array(
-            jsonb_build_object(
-              'name', $2::text,
-              'status', 'running',
-              'startedAt', $3::text,
-              'finishedAt', NULL,
-              'error', NULL
-            )
-          )
-      WHERE id = $1
-        AND status = 'queued'
-      RETURNING id
-    `,
-    [jobId, stepName, now],
-  );
-
-  return rows.length > 0;
-}
-
 export async function claimJobLease(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   jobId: string,
   leaseOwner: string,
   leaseSeconds: number,
@@ -461,6 +494,7 @@ export async function claimJobLease(
   );
 
   if (claimed) {
+    await markSystemActive(env);
     return { status: 'claimed', row: claimed };
   }
 
@@ -485,7 +519,7 @@ export async function claimJobLease(
 }
 
 export async function heartbeatJobLease(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   jobId: string,
   leaseOwner: string,
   leaseSeconds: number,
@@ -502,6 +536,7 @@ export async function heartbeatJobLease(
     `,
     [jobId, leaseOwner, String(leaseSeconds)],
   );
+  await markSystemActive(env);
 }
 
 export async function releaseJobLease(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, leaseOwner: string) {
@@ -518,20 +553,44 @@ export async function releaseJobLease(env: Pick<AppBindings, 'HYPERDRIVE'>, jobI
   );
 }
 
+// Records that a job is rescheduling the same phase (a continuation) and returns the resulting
+// no-progress continuation count. The counter is bumped here and cleared by
+// resetJobContinuationCount() whenever a chunk actually completes a file, so a healthy job that
+// keeps making headway stays near zero while a job that can never progress climbs toward the
+// MAX_JOB_CONTINUATIONS ceiling and is failed terminally.
 export async function markJobContinuationQueued(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, delaySeconds = 0) {
-  await queryRows(
+  const rows = await queryRows<{ continuation_count: number }>(
     env,
     `
       UPDATE jobs
       SET heartbeat_at = now(),
+          continuation_count = continuation_count + 1,
           last_queue_message_at = CASE
             WHEN $2::int > 0 THEN now() + ($2::text || ' seconds')::interval
             ELSE now()
           END
       WHERE id = $1
         AND status = 'running'
+      RETURNING continuation_count
     `,
     [jobId, delaySeconds],
+  );
+  return rows[0]?.continuation_count ?? 0;
+}
+
+// Clears the no-progress continuation counter after a chunk completes at least one file review,
+// so slow-but-progressing jobs never trip the MAX_JOB_CONTINUATIONS safety net.
+export async function resetJobContinuationCount(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string) {
+  await queryRows(
+    env,
+    `
+      UPDATE jobs
+      SET continuation_count = 0
+      WHERE id = $1
+        AND status = 'running'
+        AND continuation_count <> 0
+    `,
+    [jobId],
   );
 }
 
@@ -570,7 +629,11 @@ export async function completeJob(
       UPDATE jobs
       SET status = 'done',
           finished_at = now(),
-          check_run_completed_at = now(),
+          -- NOTE: check_run_completed_at is intentionally NOT set here. It's set only once the
+          -- GitHub check run has actually been updated (markJobCheckRunCompleted, called after the
+          -- best-effort updateCheckRun in finalize). That way, if finalize couldn't update the
+          -- check run (e.g. subrequest budget spent on a huge PR), it stays NULL and the maintenance
+          -- sweep (completeTerminalCheckRuns) reconciles it -- the check run always ends 'completed'.
           lease_owner = NULL,
           lease_expires_at = NULL,
           verdict = $2,
@@ -623,7 +686,7 @@ export async function completeJob(
   );
 }
 
-export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string, errorMessage: string) {
+export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>, jobId: string, errorMessage: string) {
   await queryRows(
     env,
     `
@@ -649,6 +712,59 @@ export async function failJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: strin
     `,
     [jobId, errorMessage],
   );
+  await markSystemActive(env);
+}
+
+/**
+ * Stop an ongoing (queued/running) job at the user's request: mark it terminal as 'cancelled',
+ * clear the lease (so lease-recovery won't requeue it) and mark any running steps failed. Returns
+ * true if a job was actually transitioned (false if it was already terminal). The caller is
+ * responsible for terminating the Cloudflare Workflow instance.
+ */
+export async function cancelJob(env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>, jobId: string): Promise<boolean> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `
+      UPDATE jobs
+      SET status = 'cancelled',
+          finished_at = now(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          error_msg = COALESCE(error_msg, 'Stopped by user.'),
+          steps = CASE
+            WHEN steps IS NOT NULL THEN (
+              SELECT jsonb_agg(
+                CASE
+                  WHEN s->>'status' = 'running'
+                  THEN s || jsonb_build_object('status', 'failed', 'finishedAt', now(), 'error', 'Stopped by user.')
+                  ELSE s
+                END
+              ) FROM jsonb_array_elements(steps) s
+            )
+            ELSE steps
+          END
+      WHERE id = $1 AND status IN ('queued', 'running')
+      RETURNING id
+    `,
+    [jobId],
+  );
+  // Keep the maintenance flag set so the cron completes the GitHub check run for the cancelled job.
+  if (rows.length > 0) await markSystemActive(env);
+  return rows.length > 0;
+}
+
+/**
+ * Permanently delete a job. file_reviews and review_comments cascade automatically (ON DELETE
+ * CASCADE); child retry jobs have their retry_of_job_id nulled (ON DELETE SET NULL). Returns true
+ * if a row was deleted.
+ */
+export async function deleteJob(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string): Promise<boolean> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `DELETE FROM jobs WHERE id = $1 RETURNING id`,
+    [jobId],
+  );
+  return rows.length > 0;
 }
 
 export async function markJobCheckRunCompleted(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string) {
@@ -751,8 +867,14 @@ export async function updateJobStep(
               WHEN s->>'name' = $2
               THEN s || jsonb_build_object(
                 'status', $3::text,
-                'startedAt', COALESCE($4::text, s->>'startedAt'),
-                'finishedAt', COALESCE($5::text, s->>'finishedAt'),
+                -- Preserve the FIRST start time. A phase (e.g. "Reviewing Files") re-enters
+                -- 'running' once per hibernated chunk; overwriting startedAt each time would make
+                -- the displayed duration reflect only the last chunk (~seconds) instead of the full
+                -- multi-minute wall-clock. Keep the existing start; only seed it when absent.
+                'startedAt', COALESCE(s->>'startedAt', $4::text),
+                -- Clear any stale finish when a step is (re-)entered as 'running' so its duration
+                -- isn't computed against an old finishedAt while it is back in progress.
+                'finishedAt', CASE WHEN $3::text = 'running' THEN NULL ELSE COALESCE($5::text, s->>'finishedAt') END,
                 'error', COALESCE($6::text, s->>'error')
               )
               ELSE s
@@ -773,23 +895,6 @@ export async function updateJobStep(
     `,
     [jobId, stepName, update.status, startedAt, finishedAt, error],
   );
-}
-
-export async function recoverStaleJobs(
-  env: Pick<AppBindings, 'HYPERDRIVE'>,
-  thresholdMinutes = 20,
-): Promise<number> {
-  const rows = await queryRows<{ id: string }>(env, `
-    UPDATE jobs
-    SET status     = 'failed',
-        finished_at = now(),
-        error_msg  = 'Job timed out: worker crashed or was evicted.'
-    WHERE status = 'running'
-      AND started_at < now() - ($1 || ' minutes')::interval
-    RETURNING id
-  `, [String(thresholdMinutes)]);
-
-  return rows.length;
 }
 
 export async function recoverExpiredJobLeases(
@@ -902,7 +1007,7 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
       SELECT j.*, r.owner, r.repo, r.installation_id
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
-      WHERE j.status IN ('failed', 'superseded')
+      WHERE j.status IN ('done', 'failed', 'superseded', 'cancelled')
         AND j.check_run_id IS NOT NULL
         AND j.check_run_completed_at IS NULL
       ORDER BY COALESCE(j.finished_at, j.started_at, j.created_at) ASC

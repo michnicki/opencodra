@@ -23,7 +23,7 @@ export function FileFinding({ file }: FileFindingProps) {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <StatusBadge label={file.fileStatus} />
-          <StatusBadge label={file.verdict ?? 'comment'} />
+          {file.fileStatus === 'done' && <StatusBadge label={file.verdict ?? 'comment'} />}
           {file.parsedComments.length > 0 && (
             <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-bold text-primary-foreground">
               {file.parsedComments.length}
