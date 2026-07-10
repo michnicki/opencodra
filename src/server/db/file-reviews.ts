@@ -335,6 +335,33 @@ export async function bulkInheritFileReviews(
   });
 }
 
+/**
+ * Mark many files 'failed' in a single INSERT. Finalize backfills reviews for files that never got
+ * one (e.g. files that appeared mid-review, or unrecoverable ones); doing that one-by-one through
+ * upsertFileReview runs a transaction per file (several Hyperdrive round-trips each), which for a
+ * large/growing PR can blow the per-invocation subrequest budget right before the review is posted.
+ * This collapses the whole backfill into one statement (one subrequest). Skips files that already
+ * have a row (ON CONFLICT DO NOTHING) so it never clobbers a real review.
+ */
+export async function bulkMarkFilesFailed(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  files: Array<{ filePath: string; diffLineCount: number }>,
+  opts: { modelUsed: string; errorMessage: string },
+): Promise<void> {
+  if (files.length === 0) return;
+  await queryRows(
+    env,
+    `
+      INSERT INTO file_reviews (job_id, file_path, file_status, model_used, diff_line_count, diff_input, error_msg, duration_ms)
+      SELECT $1::uuid, u.file_path, 'failed', $2, u.diff_line_count, '', $3, 0
+      FROM UNNEST($4::text[], $5::int[]) AS u(file_path, diff_line_count)
+      ON CONFLICT (job_id, file_path) DO NOTHING
+    `,
+    [jobId, opts.modelUsed, opts.errorMessage, files.map((f) => f.filePath), files.map((f) => f.diffLineCount)],
+  );
+}
+
 export async function getModelUsageStats(env: Pick<AppBindings, 'HYPERDRIVE'>) {
   return queryRows<{
     model_used: string;

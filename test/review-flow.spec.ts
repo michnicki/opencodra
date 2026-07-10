@@ -1,7 +1,7 @@
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, getTerminalJobsNeedingCheckRunCompletion, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
 import { defaultRepoConfig, type ParsedReviewComment } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
@@ -254,6 +254,78 @@ dbDescribe('Review Flow Lifecycle', () => {
     } finally {
       vi.mocked(jobsMod.getOtherRunningJobsCount).mockResolvedValue(0);
     }
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('bulk-marks missing files failed in a single pass without clobbering existing rows', async () => {
+    const { bulkMarkFilesFailed } = await import('@server/db/file-reviews');
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'test-owner', repo: `test-repo-${Date.now()}-bulk-failed`,
+      prNumber: 40, prTitle: 'Bulk failed', prAuthor: 'author', commitSha: sha('e'), baseSha: sha('0'),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+    });
+
+    await bulkMarkFilesFailed(env, job.id, [
+      { filePath: 'src/a.ts', diffLineCount: 10 },
+      { filePath: 'src/b.ts', diffLineCount: 20 },
+    ], { modelUsed: 'gemini-3.1-flash-lite', errorMessage: 'infra limit' });
+
+    // Second call including an existing path must not duplicate or overwrite it (ON CONFLICT DO NOTHING).
+    await bulkMarkFilesFailed(env, job.id, [
+      { filePath: 'src/a.ts', diffLineCount: 10 },
+      { filePath: 'src/c.ts', diffLineCount: 5 },
+    ], { modelUsed: 'other-model', errorMessage: 'second call' });
+
+    const reviews = await getFileReviewsForJobs(env, [job.id]);
+    expect(reviews).toHaveLength(3);
+    expect(reviews.every((r) => r.file_status === 'failed')).toBe(true);
+    // a.ts keeps its first values (not clobbered by the second call).
+    expect(reviews.find((r) => r.file_path === 'src/a.ts')?.error_msg).toBe('infra limit');
+    expect(reviews.find((r) => r.file_path === 'src/c.ts')?.error_msg).toBe('second call');
+  });
+
+  it('completes the job with the review recorded even if post-review check-run/label updates fail', async () => {
+    // Regression: the GitHub review is posted mid-finalize; if the subsequent (cosmetic) check-run
+    // or label calls throw -- e.g. a large PR exhausting the invocation's subrequest budget -- the
+    // job must still finish 'done' with review_id set, not be stranded 'failed' with the review
+    // already live on the PR.
+    const { GitHubService } = await import('@server/services/github');
+    const checkRunSpy = vi.spyOn(GitHubService.prototype, 'updateCheckRun' as any)
+      .mockRejectedValue(new Error('Too many subrequests by single Worker invocation'));
+
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'test-owner', repo: `test-repo-${Date.now()}-besteffort`,
+      prNumber: 41, prTitle: 'Best effort', prAuthor: 'author', commitSha: sha('f'), baseSha: sha('0'),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+    });
+
+    await runAndDrain({ jobId: job.id, deliveryId: 'delivery-besteffort' });
+
+    const final = await getJobForProcessing(env, job.id);
+    expect(final?.status).toBe('done');
+    expect(final?.review_id).not.toBeNull();
+    // The check-run update failed, so it must NOT be marked completed -- it stays pending so the
+    // maintenance sweep can finish it (the check run always ends up 'completed', never stuck).
+    expect(final?.check_run_completed_at).toBeNull();
+    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
+    expect(pending.some((j) => j.id === job.id)).toBe(true);
+    checkRunSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('marks the check-run completed on a successful finalize (no maintenance needed)', async () => {
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'test-owner', repo: `test-repo-${Date.now()}-checkrun-ok`,
+      prNumber: 42, prTitle: 'Check run ok', prAuthor: 'author', commitSha: sha('a'), baseSha: sha('0'),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+    });
+
+    await runAndDrain({ jobId: job.id, deliveryId: 'delivery-checkrun-ok' });
+
+    const final = await getJobForProcessing(env, job.id);
+    expect(final?.status).toBe('done');
+    // The inline check-run update succeeded, so it's marked complete and won't be re-done by maintenance.
+    expect(final?.check_run_completed_at).not.toBeNull();
+    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
+    expect(pending.some((j) => j.id === job.id)).toBe(false);
   }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('processes a pre-created retry job from a queue message', async () => {

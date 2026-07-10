@@ -41,17 +41,34 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
 
     try {
       const github = new GitHubService(env, job.installation_id);
-      const checkRunPresentation = {
-        superseded: { conclusion: 'neutral' as const, title: 'Review superseded', summary: 'Superseded by a newer commit or job.' },
-        cancelled: { conclusion: 'cancelled' as const, title: 'Review stopped', summary: 'Stopped by user.' },
-        failed: { conclusion: 'failure' as const, title: 'Review failed', summary: 'Review failed.' },
-      };
-      const presentation = checkRunPresentation[job.status as keyof typeof checkRunPresentation] ?? checkRunPresentation.failed;
+
+      let conclusion: 'success' | 'neutral' | 'failure' | 'cancelled';
+      let title: string;
+      let summary: string;
+      if (job.status === 'done') {
+        // A completed review whose inline check-run update didn't land (e.g. finalize ran out of
+        // subrequest budget). Reconstruct the same conclusion finalize would have posted.
+        const partial = (job.error_msg ?? '').startsWith('Partial review');
+        conclusion = partial ? 'failure' : (job.verdict === 'approve' ? 'success' : 'neutral');
+        title = partial ? 'Review partially failed' : (job.verdict === 'approve' ? 'LGTM' : 'Comments posted');
+        summary = job.error_msg ?? `${job.comment_count ?? 0} inline comments across ${job.file_count ?? 0} files.`;
+      } else {
+        const checkRunPresentation = {
+          superseded: { conclusion: 'neutral' as const, title: 'Review superseded', summary: 'Superseded by a newer commit or job.' },
+          cancelled: { conclusion: 'cancelled' as const, title: 'Review stopped', summary: 'Stopped by user.' },
+          failed: { conclusion: 'failure' as const, title: 'Review failed', summary: 'Review failed.' },
+        };
+        const presentation = checkRunPresentation[job.status as keyof typeof checkRunPresentation] ?? checkRunPresentation.failed;
+        conclusion = presentation.conclusion;
+        title = presentation.title;
+        summary = job.error_msg ?? presentation.summary;
+      }
+
       await github.updateCheckRun(job.owner, job.repo, job.check_run_id, {
         status: 'completed',
-        conclusion: presentation.conclusion,
-        title: presentation.title,
-        summary: job.error_msg ?? presentation.summary,
+        conclusion,
+        title,
+        summary,
       });
       await markJobCheckRunCompleted(env, job.id);
     } catch (error) {

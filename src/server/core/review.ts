@@ -3,7 +3,7 @@ import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHub
 import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
 import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
-import { bulkInheritFileReviews, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
+import { bulkInheritFileReviews, bulkMarkFilesFailed, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
 import { getResolvedModelConfig } from '@server/db/model-configs';
 import {
   claimJobLease,
@@ -1227,16 +1227,17 @@ async function runFinalizePhase(
     
     if (missingFiles.length > 0) {
       logger.warn(`Job ${job.id} reached finalize phase with ${missingFiles.length} missing file reviews. Forcing them to failed state.`);
-      for (const file of missingFiles) {
-        await persistFailedFileReview(env, job.id, {
-          filePath: file.path,
-          modelUsed: config.model?.main ?? 'unconfigured',
-          diffLineCount: file.lineCount,
-          durationMs: 0,
-          errorMessage: 'Review could not be completed after repeated infrastructure limits',
-        });
-      }
-      
+      // Batch the backfill into one INSERT. Doing it per-file (a transaction each) scales the
+      // subrequest cost with the number of missing files and, on a large/growing PR, exhausts the
+      // per-invocation budget right before the review is posted (finalize can't safely hibernate --
+      // it posts the GitHub review -- so it must stay within one invocation's budget).
+      await bulkMarkFilesFailed(
+        env,
+        job.id,
+        missingFiles.map((file) => ({ filePath: file.path, diffLineCount: file.lineCount })),
+        { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'Review could not be completed after repeated infrastructure limits' },
+      );
+
       // Refresh reviews list after inserting the missing ones
       reviews = await getFileReviewsForJobs(env, [job.id]);
     } else {
@@ -1305,34 +1306,6 @@ async function runFinalizePhase(
     })),
   });
 
-  if (config.review.labels !== false) {
-    const labels = config.review.labels;
-    const labelMap = {
-      comment: { name: labels.p1, color: 'f79009' },
-      approve: { name: labels.p2, color: '027a48' },
-    } as const;
-    const label = labelMap[verdictSummary.verdict];
-
-    await github.removeIssueLabelsIfPresent(
-      job.owner,
-      job.repo,
-      job.prNumber,
-      [labels.p1, labels.p2, labels.p3].filter(possibleLabel => possibleLabel !== label.name),
-    );
-
-    await github.ensureLabel(job.owner, job.repo, label.name, label.color);
-    await github.addIssueLabels(job.owner, job.repo, job.prNumber, [label.name]);
-  }
-
-  if (job.checkRunId) {
-    await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
-      status: 'completed',
-      conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
-      title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
-      summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
-    });
-  }
-
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
 
@@ -1345,6 +1318,10 @@ async function runFinalizePhase(
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed after repeated model/provider outages.`
     : null;
+  // Record the posted review and mark the job done IMMEDIATELY after createReview -- before the
+  // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
+  // label/check-run calls exhaust this invocation's subrequest budget (large PR), we must not leave
+  // the job stranded as 'failed' with review_id null. This is the critical, must-not-lose write.
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
@@ -1357,6 +1334,47 @@ async function runFinalizePhase(
     errorMessage: partialErrorMessage,
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
+
+  // Cosmetics: labels and the check-run conclusion. Best-effort -- the review is posted and the job
+  // is already 'done', so a failure here (e.g. subrequest budget spent, GitHub blip) must not fail
+  // the job. completeTerminalCheckRuns / a re-run can reconcile a check run left un-updated.
+  try {
+    // Check-run conclusion first: it drives the PR's status badge, so it matters more than labels
+    // if the budget only allows one of them.
+    if (job.checkRunId) {
+      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+        status: 'completed',
+        conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
+        title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
+        summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
+      });
+      // Only now is the check run genuinely completed -- record it so the maintenance sweep doesn't
+      // redo it. If the update above threw, this line is skipped and completeTerminalCheckRuns will
+      // finish the check run on a later invocation with a fresh budget.
+      await markJobCheckRunCompleted(env, job.id);
+    }
+
+    if (config.review.labels !== false) {
+      const labels = config.review.labels;
+      const labelMap = {
+        comment: { name: labels.p1, color: 'f79009' },
+        approve: { name: labels.p2, color: '027a48' },
+      } as const;
+      const label = labelMap[verdictSummary.verdict];
+
+      await github.removeIssueLabelsIfPresent(
+        job.owner,
+        job.repo,
+        job.prNumber,
+        [labels.p1, labels.p2, labels.p3].filter(possibleLabel => possibleLabel !== label.name),
+      );
+
+      await github.ensureLabel(job.owner, job.repo, label.name, label.color);
+      await github.addIssueLabels(job.owner, job.repo, job.prNumber, [label.name]);
+    }
+  } catch (error) {
+    logger.warn(`Post-review labels/check-run update failed for job ${job.id}; review is posted and job is completed, so leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
+  }
 
   await sendReviewTelemetry(env, job, files, reviews, {
     findingsReported: finalComments.length,
