@@ -328,6 +328,35 @@ dbDescribe('Review Flow Lifecycle', () => {
     expect(pending.some((j) => j.id === job.id)).toBe(false);
   }, REVIEW_FLOW_TIMEOUT_MS);
 
+  it('marks "Reviewing Files" done at finalize even when a degrade path left it running', async () => {
+    // Regression: continueOrFailWedgedJob's review->finalize degrade doesn't mark "Reviewing Files"
+    // done, so a job that reached finalize that way stayed 'done' overall but showed the step stuck
+    // "In progress". Finalize now defensively marks it done.
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'test-owner', repo: `test-repo-${Date.now()}-revstuck`,
+      prNumber: 43, prTitle: 'Reviewing stuck', prAuthor: 'author', commitSha: sha('b'), baseSha: sha('0'),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+    });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts', fileStatus: 'done', modelUsed: 'test-model', modelProvider: 'test',
+      diffLineCount: 1, diffInput: 'x', rawAiOutput: '{}', parsedComments: [], inputTokens: 1,
+      outputTokens: 1, durationMs: 1, verdict: 'comment', fileSummary: 'ok', errorMessage: null,
+    });
+
+    await runWithDb(env, async () => {
+      // Reach finalize with "Reviewing Files" left 'running', as the continuation-ceiling degrade does.
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'running' });
+      await queryRows(env, `UPDATE jobs SET status = 'running', file_count = 1, lease_owner = NULL, lease_expires_at = NULL WHERE id = $1`, [job.id]);
+      await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-revstuck', phase: 'finalize' });
+    });
+
+    const final = await getJobForProcessing(env, job.id);
+    expect(final?.status).toBe('done');
+    const reviewingStep = (final?.steps as Array<{ name: string; status: string }>).find((s) => s.name === 'Reviewing Files');
+    expect(reviewingStep?.status).toBe('done');
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
   it('processes a pre-created retry job from a queue message', async () => {
     const repo = `test-repo-${Date.now()}-retry`;
     const sourceHeadSha = sha('1');

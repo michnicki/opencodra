@@ -112,7 +112,7 @@ const router = createBrowserRouter([
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
-      <SmoothScroll root lerp={0.1} duration={1.2}>
+      <SmoothScroll root lerp={0.16} duration={0.9}>
         <RouterProvider router={router} />
         <ToasterWrapper />
       </SmoothScroll>

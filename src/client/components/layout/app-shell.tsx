@@ -270,7 +270,7 @@ export function AppShell() {
           sidebarCollapsed && 'dashboard-sidebar-collapsed',
           'fixed bottom-3 left-3 top-3 z-40 flex flex-col',
           'rounded-xl border border-border/60',
-          'bg-white dark:bg-black backdrop-blur-2xl',
+          'bg-white dark:bg-black',
           'text-black dark:text-white',
           'shadow-[0_6px_20px_-8px_oklch(0%_0_0/0.14),0_0_0_1px_color-mix(in_oklch,var(--primary)_6%,transparent)]',
           'dark:shadow-[0_8px_24px_-10px_oklch(0%_0_0/0.42),0_0_0_1px_color-mix(in_oklch,var(--primary)_9%,transparent)]',

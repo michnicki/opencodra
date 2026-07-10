@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ChevronRight,
-  CircleStop,
   ExternalLink,
   Loader2,
   RotateCcw,
@@ -13,6 +12,27 @@ import { Button } from '@client/components/ui/button';
 import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
 import { UpdatesEmailPrompt } from '@client/components/features/dashboard/updates-email-prompt';
 import type { JobDetail } from '@shared/schema';
+
+/* Stop icon: outlined circle with a solid square inside. Lucide's CircleStop strokes the inner
+   square too, which at 14px reads as a blob — filling it keeps the stop symbol legible. */
+function StopIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <rect x="8.5" y="8.5" width="7" height="7" rx="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
 
 interface JobHeaderProps {
   job: JobDetail;
@@ -78,27 +98,28 @@ export function JobHeader({
           </Link>
         </Button>
 
-        {/* A single re-run control. It always restarts the review from the beginning (a fresh
-            review of every file) and works whether the job is finished, failed, or still running. */}
         <Button
-          variant="default"
-          disabled={isRerunning}
-          onClick={onRerun}
-          className="gap-2 shrink-0"
-        >
-          {isRerunning ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
-          {isRerunning ? 'Starting…' : job.status === 'failed' ? 'Retry job' : 'Re-run job'}
-        </Button>
-
-        <Button
-          variant="warning-outline"
+          variant="outline"
           size="icon"
           disabled={!canStop || isStopping}
           onClick={() => setStopOpen(true)}
           title="Stop review"
           aria-label="Stop review"
         >
-          {isStopping ? <Loader2 size={14} className="animate-spin" /> : <CircleStop size={14} />}
+          {isStopping ? <Loader2 size={14} className="animate-spin" /> : <StopIcon size={14} />}
+        </Button>
+
+        {/* A single re-run control. It always restarts the review from the beginning (a fresh
+            review of every file) and works whether the job is finished, failed, or still running. */}
+        <Button
+          variant="outline"
+          size="icon"
+          disabled={isRerunning}
+          onClick={onRerun}
+          title={job.status === 'failed' ? 'Retry job' : 'Re-run job'}
+          aria-label={job.status === 'failed' ? 'Retry job' : 'Re-run job'}
+        >
+          {isRerunning ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
         </Button>
 
         <Button
