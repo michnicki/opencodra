@@ -196,9 +196,22 @@ export class GitHubClient {
     private readonly tracker?: { incrementSubrequests(count?: number): void },
   ) {}
 
+  // In-memory token cache scoped to this client instance (i.e. one Worker invocation). Without it,
+  // every GitHub request re-read the token from KV -- a wasted subrequest per call. A finalize or
+  // review invocation makes many GitHub calls, so that repeated KV read pushed the invocation toward
+  // the Workers-Free 50-subrequest cap (finalize could tip over it right before posting the review).
+  private memoToken: InstallationTokenCacheRecord | null = null;
+
   async getInstallationToken(): Promise<string> {
+    // Reuse the in-memory token while it's comfortably unexpired (invocations are < ~120s; tokens
+    // last ~1h, so this holds for the whole invocation) -- no KV read, no network call.
+    if (this.memoToken?.token && new Date(this.memoToken.expiresAt).getTime() > Date.now() + 60_000) {
+      return this.memoToken.token;
+    }
+
     const cached = await readCachedInstallationToken(this.env, this.installationId, this.tracker);
     if (cached?.token) {
+      this.memoToken = cached;
       return cached.token;
     }
 
@@ -229,10 +242,12 @@ export class GitHubClient {
       }
 
       const data = (await response.json()) as { token: string; expires_at: string };
-      await writeCachedInstallationToken(this.env, this.installationId, {
+      const record: InstallationTokenCacheRecord = {
         token: data.token,
         expiresAt: data.expires_at,
-      }, this.tracker);
+      };
+      await writeCachedInstallationToken(this.env, this.installationId, record, this.tracker);
+      this.memoToken = record;
 
       return data.token;
     });

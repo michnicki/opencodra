@@ -206,7 +206,7 @@ export async function hasPendingMaintenanceWork(env: Pick<AppBindings, 'HYPERDRI
       SELECT EXISTS (
         SELECT 1 FROM jobs
         WHERE status IN ('queued', 'running')
-           OR (status IN ('failed', 'superseded', 'cancelled') AND check_run_id IS NOT NULL AND check_run_completed_at IS NULL)
+           OR (status IN ('done', 'failed', 'superseded', 'cancelled') AND check_run_id IS NOT NULL AND check_run_completed_at IS NULL)
       ) AS has_work
     `,
   );
@@ -629,7 +629,11 @@ export async function completeJob(
       UPDATE jobs
       SET status = 'done',
           finished_at = now(),
-          check_run_completed_at = now(),
+          -- NOTE: check_run_completed_at is intentionally NOT set here. It's set only once the
+          -- GitHub check run has actually been updated (markJobCheckRunCompleted, called after the
+          -- best-effort updateCheckRun in finalize). That way, if finalize couldn't update the
+          -- check run (e.g. subrequest budget spent on a huge PR), it stays NULL and the maintenance
+          -- sweep (completeTerminalCheckRuns) reconciles it -- the check run always ends 'completed'.
           lease_owner = NULL,
           lease_expires_at = NULL,
           verdict = $2,
@@ -1003,7 +1007,7 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
       SELECT j.*, r.owner, r.repo, r.installation_id
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
-      WHERE j.status IN ('failed', 'superseded', 'cancelled')
+      WHERE j.status IN ('done', 'failed', 'superseded', 'cancelled')
         AND j.check_run_id IS NOT NULL
         AND j.check_run_completed_at IS NULL
       ORDER BY COALESCE(j.finished_at, j.started_at, j.created_at) ASC
