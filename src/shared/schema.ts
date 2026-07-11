@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const reviewTriggers = ['auto', 'mention', 'retry'] as const;
-export const jobStatuses = ['queued', 'running', 'done', 'failed', 'superseded'] as const;
+export const jobStatuses = ['queued', 'running', 'done', 'failed', 'superseded', 'cancelled', 'stopped'] as const;
 export const fileStatuses = ['pending', 'done', 'skipped', 'failed'] as const;
 export const reviewVerdicts = ['approve', 'comment'] as const;
 export const reviewSeverities = ['P0', 'P1', 'P2', 'P3', 'nit'] as const;
@@ -74,7 +74,7 @@ export const reviewConfigSchema = z.object({
   skip_files: z
     .array(z.string().min(1))
     .default(['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**']),
-  max_files: z.number().int().min(1).max(100).default(100),
+  max_files: z.number().int().min(1).max(150).default(150),
   large_file_threshold_lines: z.number().int().min(1).max(5_000).default(200),
   max_diff_lines_per_file: z.number().int().min(1).max(5_000).default(800),
   max_total_diff_chars: z.number().int().min(1).max(500_000).default(150_000),
@@ -106,7 +106,7 @@ export const repoConfigSchema = z.object({
     ignore_drafts: true,
     mention_trigger: '@codra-app',
     skip_files: ['**/*.lock', 'dist/**', 'build/**', '.next/**', '*.generated.*', 'coverage/**'],
-    max_files: 100,
+    max_files: 150,
     large_file_threshold_lines: 200,
     max_diff_lines_per_file: 800,
     max_total_diff_chars: 150_000,
@@ -160,6 +160,12 @@ export const reviewJobMessageSchema = z.object({
   commitSha: z.string().min(1).optional(),
   trigger: z.enum(reviewTriggers).optional(),
   requestId: z.string().optional(),
+  // The actual Cloudflare Workflow instance id, injected by the workflow so runReviewJob can bind
+  // it to the resolved job row (webhook jobs can't be bound at instance-create time).
+  workflowInstanceId: z.string().optional(),
+  // Set by lease recovery so the queue consumer creates a FRESH instance (keyed on deliveryId)
+  // instead of colliding with the dead instance that is still keyed on jobId.
+  forceFreshInstance: z.boolean().optional(),
 }).superRefine((message, ctx) => {
   if (message.jobId || message.eventName) {
     return;
@@ -174,6 +180,7 @@ export const reviewJobMessageSchema = z.object({
 
 export const jobSummarySchema = z.object({
   id: z.string().uuid(),
+  workflowInstanceId: z.string().nullable().optional(),
   owner: z.string(),
   repo: z.string(),
   installationId: z.string(),
@@ -301,6 +308,35 @@ export const statsSchema = z.object({
       jobs: z.number().int(),
     }),
   ),
+  statuses: z.array(
+    z.object({
+      status: z.enum(jobStatuses),
+      count: z.number().int(),
+    }),
+  ),
+  triggers: z.array(
+    z.object({
+      trigger: z.enum(reviewTriggers),
+      count: z.number().int(),
+    }),
+  ),
+  severities: z.array(
+    z.object({
+      severity: z.enum(reviewSeverities),
+      count: z.number().int(),
+    }),
+  ),
+  categories: z.array(
+    z.object({
+      category: z.enum(reviewCategories),
+      count: z.number().int(),
+    }),
+  ),
+  performance: z.object({
+    avgDurationMs: z.number().nullable(),
+    p95DurationMs: z.number().nullable(),
+    avgConfidence: z.number().nullable(),
+  }),
 });
 
 export type ParsedReviewComment = z.infer<typeof parsedReviewCommentSchema>;
@@ -364,9 +400,6 @@ export const modelConfigSchema = z.object({
   providerName: z.string(),
   apiFormat: z.enum(llmApiFormats),
   modelName: z.string(),
-  rpm: z.number().int().nullable(),
-  tpm: z.number().int().nullable(),
-  rpd: z.number().int().nullable(),
   updatedAt: dateStringSchema,
 });
 
@@ -376,3 +409,20 @@ export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type StatsPayload = z.infer<typeof statsSchema>;
 
 export const defaultRepoConfig = repoConfigSchema.parse({});
+
+export const reviewConcurrencyLevels = ['low', 'medium', 'high', 'max'] as const;
+export type ReviewConcurrencyLevel = typeof reviewConcurrencyLevels[number];
+export const REVIEW_CONCURRENCY_LIMITS: Record<ReviewConcurrencyLevel, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+  max: 4,
+};
+
+export const reviewMaxCommentsOptions = [5, 10, 15, 20] as const;
+
+export const reviewSettingsSchema = z.object({
+  concurrencyLevel: z.enum(reviewConcurrencyLevels).default('medium'),
+  maxComments: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(20)]).default(10),
+});
+export type ReviewSettings = z.infer<typeof reviewSettingsSchema>;

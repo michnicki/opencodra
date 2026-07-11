@@ -1,6 +1,10 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
 
 @import "tailwindcss";
+
+/* Make `dark:` utilities follow the app's `.dark` class (theme toggle)
+   instead of the OS `prefers-color-scheme` default. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ─────────────────────────────────────────────────────
    Easing tokens
@@ -134,7 +138,7 @@
    Tailwind v4 theme tokens  (@theme inline = dynamic)
 ───────────────────────────────────────────────────── */
 @theme inline {
-  --font-sans: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
   --color-background:            var(--background);
@@ -723,19 +727,21 @@
   will-change: transform;
 }
 
-.dashboard-sidebar-action:hover,
-.dashboard-sidebar-action:focus-visible {
-  background-color: color-mix(in oklch, oklch(100% 0 0) 10%, transparent) !important;
-  transform: translate3d(0, -2px, 0) !important;
+/* Collapsed sidebar only: SharedLayoutBg pill handles background */
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:hover,
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
 }
 
-.dark .dashboard-sidebar-action:hover,
-.dark .dashboard-sidebar-action:focus-visible {
-  background-color: color-mix(in oklch, oklch(100% 0 0) 10%, transparent) !important;
+/* Collapsed active button hovered: deep green */
+.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:hover,
+.dashboard-sidebar-collapsed .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
-.dashboard-sidebar-action:active {
-  transform: translate3d(0, 0, 0) !important;
+.dashboard-sidebar-collapsed .dashboard-sidebar-action:active {
+  transform: none !important;
 }
 
 .dashboard-sidebar-action-icon,
@@ -756,11 +762,29 @@
   transition-timing-function: var(--ease-out-quart);
 }
 
+/* Expanded sidebar: SharedLayoutBg pill is the sole hover affordance.
+   No transform, no background — the pill handles everything. */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible {
+  background-color: transparent !important;
+  transform: none !important;
+}
+
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:active {
+  transform: none !important;
+}
+
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-icon,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:hover .dashboard-sidebar-action-label,
 .dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-label {
-  transform: translate3d(4px, 0, 0) !important;
+  transform: none !important;
+}
+
+/* Active button hovered: show a slightly stronger lime tint instead of the zinc pill */
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:hover,
+.dashboard-sidebar:not(.dashboard-sidebar-collapsed) .dashboard-sidebar-action[aria-current="page"]:focus-visible {
+  background-color: oklch(30% 0.35 115 / 0.35) !important;
 }
 
 .dashboard-sidebar-tooltip:not(.dashboard-sidebar-action-label) {
@@ -768,10 +792,6 @@
 }
 
 @media (min-width: 1024px) {
-  .dashboard-sidebar-collapsed .dashboard-sidebar-action:hover .dashboard-sidebar-action-icon,
-  .dashboard-sidebar-collapsed .dashboard-sidebar-action:focus-visible .dashboard-sidebar-action-icon {
-    transform: scale(1.12) !important;
-  }
 
   .dashboard-sidebar-collapsed .dashboard-sidebar-tooltip {
     position: absolute !important;
@@ -887,8 +907,7 @@
   gap:             0.625rem !important;
   padding:         0.75rem 0.875rem !important;
   border-radius:   0.625rem !important;
-  border-width:    1px !important;
-  border-style:    solid !important;
+  border:          none !important;
   font-family:     var(--font-sans) !important;
   font-size:       0.8125rem !important;
   line-height:     1.45 !important;
@@ -899,7 +918,6 @@
 
   /* light defaults (overridden per-variant below) */
   background: oklch(99.5% 0.004 115) !important;
-  border-color: oklch(88% 0.008 115) !important;
   color: oklch(15% 0.02 115) !important;
 
   /* smooth entrance */
@@ -908,7 +926,6 @@
 
 .dark .codra-toast {
   background:   oklch(13% 0.018 115) !important;
-  border-color: oklch(22% 0.022 115) !important;
   color:        oklch(94% 0.006 115) !important;
   box-shadow:
     0 6px 24px oklch(0% 0 0 / 0.5),
@@ -967,64 +984,9 @@
   background: oklch(28% 0.022 115) !important;
 }
 
-/* ── SUCCESS ─────────────────────────────────────── */
-.codra-toast-success {
-  background:   oklch(98.5% 0.045 115) !important;
-  border-color: oklch(82% 0.16 115)   !important;
-  color:        oklch(28% 0.10 115)   !important;
-}
-
-.dark .codra-toast-success {
-  background:   oklch(16%  0.08 115)  !important;
-  border-color: oklch(32%  0.14 115)  !important;
-  color:        oklch(90%  0.18 115)  !important;
-}
-
-.codra-toast-success .codra-toast-description {
-  color: oklch(38% 0.10 115) !important;
-  opacity: 0.85 !important;
-}
-
-.dark .codra-toast-success .codra-toast-description {
-  color: oklch(72% 0.12 115) !important;
-  opacity: 0.9 !important;
-}
-
-/* ── ERROR ───────────────────────────────────────── */
-.codra-toast-error {
-  background:   oklch(98.5% 0.03 25) !important;
-  border-color: oklch(80%   0.14 25) !important;
-  color:        oklch(32%   0.14 25) !important;
-}
-
-.dark .codra-toast-error {
-  background:   oklch(15%  0.07 25) !important;
-  border-color: oklch(35%  0.14 25) !important;
-  color:        oklch(85%  0.08 25) !important;
-}
-
-.codra-toast-error .codra-toast-description {
-  color:   oklch(42% 0.12 25) !important;
-  opacity: 0.85 !important;
-}
-
-.dark .codra-toast-error .codra-toast-description {
-  color:   oklch(68% 0.10 25) !important;
-  opacity: 0.9 !important;
-}
-
-/* ── LOADING ─────────────────────────────────────── */
-.codra-toast-loading {
-  background:   oklch(98% 0.004 115) !important;
-  border-color: oklch(86% 0.010 115) !important;
-  color:        oklch(20% 0.020 115) !important;
-}
-
-.dark .codra-toast-loading {
-  background:   oklch(14%  0.020 115) !important;
-  border-color: oklch(24%  0.025 115) !important;
-  color:        oklch(88%  0.008 115) !important;
-}
+/* ── SUCCESS / ERROR / LOADING ─────────────────────
+   Use the default toast text color instead of a
+   status tint (icon color already conveys status). */
 
 /* spinner inherits accent color */
 .codra-toast-loader svg {
@@ -1033,26 +995,18 @@
 
 /* ── WARNING ─────────────────────────────────────── */
 .codra-toast-warning {
-  background:   oklch(98.5% 0.04  65) !important;
-  border-color: oklch(82%   0.13  65) !important;
-  color:        oklch(35%   0.12  65) !important;
+  color: oklch(35%   0.12  65) !important;
 }
 
 .dark .codra-toast-warning {
-  background:   oklch(16%  0.08  65) !important;
-  border-color: oklch(35%  0.14  65) !important;
-  color:        oklch(82%  0.14  65) !important;
+  color: oklch(82%  0.14  65) !important;
 }
 
 /* ── INFO ────────────────────────────────────────── */
 .codra-toast-info {
-  background:   oklch(98.5% 0.03 250) !important;
-  border-color: oklch(80%   0.12 250) !important;
-  color:        oklch(30%   0.12 250) !important;
+  color: oklch(30%   0.12 250) !important;
 }
 
 .dark .codra-toast-info {
-  background:   oklch(15%  0.07 250) !important;
-  border-color: oklch(33%  0.12 250) !important;
-  color:        oklch(80%  0.12 250) !important;
+  color: oklch(80%  0.12 250) !important;
 }

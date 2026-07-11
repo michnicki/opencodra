@@ -20,12 +20,16 @@ export class GitHubService {
     return this.client.createCheckRun(owner, repo, params);
   }
 
-  async updateCheckRun(owner: string, repo: string, checkRunId: number, params: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' }) {
+  async updateCheckRun(owner: string, repo: string, checkRunId: number, params: { title: string; summary: string; status?: 'in_progress' | 'completed'; conclusion?: 'success' | 'neutral' | 'failure' | 'cancelled' }) {
     return this.client.updateCheckRun(owner, repo, checkRunId, params);
   }
 
   async createReview(owner: string, repo: string, prNumber: number, params: { commitSha: string; event: 'APPROVE' | 'COMMENT'; body: string; comments: GitHubReviewComment[] }) {
     return this.client.createReview(owner, repo, prNumber, params);
+  }
+
+  async findBotReviewForCommit(owner: string, repo: string, prNumber: number, commitSha: string, botLogin: string) {
+    return this.client.findBotReviewForCommit(owner, repo, prNumber, commitSha, botLogin);
   }
 
   async ensureLabel(owner: string, repo: string, name: string, color: string) {

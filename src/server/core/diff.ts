@@ -32,15 +32,22 @@ const defaultSkipMatchers = ['**/*.lock', '**/package-lock.json', '**/pnpm-lock.
   picomatch(pattern, { dot: true }),
 );
 
-export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
-  const lines = rawDiff.replace(/\r\n/g, '\n').split('\n');
+export function isReviewableFile(path: string, customMatchers: ReturnType<typeof picomatch>[]) {
+  if (defaultSkipMatchers.some((matcher) => matcher(path))) return false;
+  if (customMatchers.some((matcher) => matcher(path))) return false;
+  return true;
+}
+
+export function parseUnifiedDiff(rawDiff: string, reviewConfig?: RepoConfig['review']): FileDiff[] {
   const files: FileDiff[] = [];
+  const customMatchers = reviewConfig?.skip_files?.map((pattern) => picomatch(pattern, { dot: true })) ?? [];
 
   let currentFile: FileDiff | null = null;
   let currentHunk: DiffHunk | null = null;
   let oldLine = 0;
   let newLine = 0;
   let position = 0;
+  let isIgnored = false;
 
   const pushCurrentFile = () => {
     if (currentFile) {
@@ -51,13 +58,29 @@ export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
     oldLine = 0;
     newLine = 0;
     position = 0;
+    isIgnored = false;
   };
 
-  for (const line of lines) {
+  let startIndex = 0;
+  const length = rawDiff.length;
+
+  while (startIndex < length) {
+    let endIndex = rawDiff.indexOf('\n', startIndex);
+    if (endIndex === -1) {
+      endIndex = length;
+    }
+
+    let line = rawDiff.substring(startIndex, endIndex);
+    if (line.charCodeAt(line.length - 1) === 13) {
+      line = line.slice(0, -1);
+    }
+
+    startIndex = endIndex + 1;
+
     if (line.startsWith('diff --git ')) {
       pushCurrentFile();
-      const parts = line.split(' ');
-      const bPath = parts[parts.length - 1];
+      const lastSpace = line.lastIndexOf(' ');
+      const bPath = line.substring(lastSpace + 1);
       const path = bPath.startsWith('b/') ? bPath.slice(2) : bPath;
 
       currentFile = {
@@ -69,6 +92,10 @@ export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
         lineCount: 0,
         hunks: [],
       };
+
+      if (reviewConfig) {
+        isIgnored = !isReviewableFile(path, customMatchers);
+      }
       continue;
     }
 
@@ -77,12 +104,16 @@ export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
     }
 
     if (line.startsWith('rename from ')) {
-      currentFile.previousPath = line.slice('rename from '.length);
+      currentFile.previousPath = line.slice(12);
       continue;
     }
 
     if (line.startsWith('rename to ')) {
-      currentFile.path = line.slice('rename to '.length);
+      const nextPath = line.slice(10);
+      currentFile.path = nextPath.startsWith('b/') ? nextPath.slice(2) : nextPath;
+      if (reviewConfig) {
+        isIgnored = !isReviewableFile(currentFile.path, customMatchers);
+      }
       continue;
     }
 
@@ -93,21 +124,30 @@ export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
 
     if (line.startsWith('deleted file mode ')) {
       currentFile.isDeleted = true;
+      isIgnored = true;
       continue;
     }
 
     if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) {
       currentFile.isBinary = true;
-      continue;
-    }
-
-    if (line.startsWith('--- ')) {
+      isIgnored = true;
       continue;
     }
 
     if (line.startsWith('+++ ')) {
       const nextPath = line.slice(4);
       currentFile.path = nextPath.startsWith('b/') ? nextPath.slice(2) : nextPath;
+      if (reviewConfig) {
+        isIgnored = !isReviewableFile(currentFile.path, customMatchers);
+      }
+      continue;
+    }
+
+    if (isIgnored) {
+      continue;
+    }
+
+    if (line.startsWith('--- ')) {
       continue;
     }
 
@@ -132,7 +172,7 @@ export function parseUnifiedDiff(rawDiff: string): FileDiff[] {
     }
 
     const prefix = line[0];
-    if (![' ', '+', '-'].includes(prefix)) {
+    if (prefix !== ' ' && prefix !== '+' && prefix !== '-') {
       continue;
     }
 
@@ -281,4 +321,63 @@ export function truncateFileDiff(file: FileDiff, maxLines: number): FileDiff {
     isTruncated: true,
     originalLineCount: file.lineCount,
   };
+}
+
+export function chunkFileDiff(file: FileDiff, maxLinesPerChunk: number): FileDiff[] {
+  if (file.lineCount <= maxLinesPerChunk) {
+    return [file];
+  }
+
+  const chunks: FileDiff[] = [];
+  let currentHunks: DiffHunk[] = [];
+  let currentLines = 0;
+
+  for (const hunk of file.hunks) {
+    let linesRemainingInHunk = hunk.lines;
+
+    while (linesRemainingInHunk.length > 0) {
+      const roomInChunk = maxLinesPerChunk - currentLines;
+
+      if (roomInChunk <= 0) {
+        chunks.push({
+          ...file,
+          hunks: currentHunks,
+          lineCount: currentLines,
+          isTruncated: true,
+          originalLineCount: file.lineCount,
+        });
+        currentHunks = [];
+        currentLines = 0;
+        continue;
+      }
+
+      if (linesRemainingInHunk.length <= roomInChunk) {
+        currentHunks.push({
+          ...hunk,
+          lines: linesRemainingInHunk,
+        });
+        currentLines += linesRemainingInHunk.length;
+        linesRemainingInHunk = [];
+      } else {
+        currentHunks.push({
+          ...hunk,
+          lines: linesRemainingInHunk.slice(0, roomInChunk),
+        });
+        currentLines += roomInChunk;
+        linesRemainingInHunk = linesRemainingInHunk.slice(roomInChunk);
+      }
+    }
+  }
+
+  if (currentHunks.length > 0) {
+    chunks.push({
+      ...file,
+      hunks: currentHunks,
+      lineCount: currentLines,
+      isTruncated: true,
+      originalLineCount: file.lineCount,
+    });
+  }
+
+  return chunks;
 }

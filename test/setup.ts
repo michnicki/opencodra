@@ -22,6 +22,12 @@ vi.stubGlobal('QUEUE', {
   },
 });
 
+vi.mock('cloudflare:workers', () => {
+  return {
+    WorkflowEntrypoint: class {},
+  };
+});
+
 function parseEnvValue(value: string) {
   let trimmed = value.trim();
   if (
@@ -95,6 +101,14 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
       dispatchEvent: vi.fn(),
     }),
   });
+}
+
+if (typeof window !== 'undefined' && !window.ResizeObserver) {
+  window.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
 }
 
 const originalConsoleWarn = console.warn;

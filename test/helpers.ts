@@ -56,6 +56,23 @@ export class MockQueue {
   }
 }
 
+export class MockWorkflow {
+  public readonly created: any[] = [];
+  public readonly terminated: string[] = [];
+
+  async create(opts: any) {
+    this.created.push(opts);
+  }
+
+  async get(id: string) {
+    return {
+      terminate: async () => {
+        this.terminated.push(id);
+      },
+    };
+  }
+}
+
 function usableEnvValue(value: string | undefined) {
   return value && value !== 'undefined' && value !== 'null' ? value : null;
 }
@@ -89,6 +106,7 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     },
     APP_KV: new MemoryKV() as unknown as KVNamespace,
     REVIEW_QUEUE: new MockQueue() as any,
+    REVIEW_WORKFLOW: new MockWorkflow() as any,
     ASSETS: new MockAssets() as any,
     HYPERDRIVE: {
       connectionString: getTestDatabaseUrl(),
@@ -107,10 +125,16 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     get ENVIRONMENT() { return unusedEnv('ENVIRONMENT'); },
     get CF_API_TOKEN() { return unusedEnv('CF_API_TOKEN'); },
     get CF_ACCOUNT_ID() { return unusedEnv('CF_ACCOUNT_ID'); },
-    get CF_DLQ_ID() { return unusedEnv('CF_DLQ_ID'); },
     ...overrides,
   };
 }
+
+// The Gemini test fixtures reviewers reach for (`gemma-4-31b-it`, `gemma-4-26b-a4b-it`) are NOT real
+// catalog entries, so migrations/ensureModelCatalog never seed them -- only Cloudflare models are
+// seeded. Tests must therefore create these Google model_configs themselves; relying on them being
+// left over in a dev DB makes the suite pass locally but fail on a fresh CI database ("Model ... is
+// not configured"). Seeding them alongside enabling the Google provider keeps the setup in one place.
+const GOOGLE_TEST_MODEL_IDS = ['gemma-4-31b-it', 'gemma-4-26b-a4b-it'];
 
 export async function saveTestProviderApiKey(env: AppBindings, providerName = 'Google', apiKey = 'test-key') {
   const encrypted = await encryptLlmApiKey(env, apiKey);
@@ -123,6 +147,26 @@ export async function saveTestProviderApiKey(env: AppBindings, providerName = 'G
     `,
     [encrypted, providerName],
   );
+
+  if (providerName === 'Google') {
+    for (const modelId of GOOGLE_TEST_MODEL_IDS) {
+      await queryRows(
+        env,
+        `
+        INSERT INTO model_configs (model_id, provider, provider_id, model_name, updated_at)
+        SELECT $1, 'gemini', p.id, $1, now()
+        FROM llm_providers p
+        WHERE p.name = 'Google'
+        ON CONFLICT (model_id) DO UPDATE SET
+          provider = EXCLUDED.provider,
+          provider_id = EXCLUDED.provider_id,
+          model_name = EXCLUDED.model_name,
+          updated_at = now()
+        `,
+        [modelId],
+      );
+    }
+  }
 }
 
 /**

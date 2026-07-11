@@ -5,24 +5,11 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import {
-  Activity,
-  BarChart3,
-  Bot,
-  Gauge,
-  GitBranch,
-  RefreshCw,
-  Server,
-  TrendingUp,
-} from 'lucide-react';
-
 import { TimeRangeSelect } from '@client/components/features/stats/time-range-select';
 import { PageHeaderActions } from '@client/components/shared/page-header-actions';
 import { PageHeader } from '@client/components/layout/page-header';
@@ -36,21 +23,16 @@ import { fmtNumber } from '@client/lib/utils';
 import type { StatsPayload } from '@shared/schema';
 
 const CHART = {
-  primary: '#84cc16',
+  primary: '#65a30d',
   primaryDark: '#e0fe56',
   comments: '#0ea5e9',
-  warning: '#f59e0b',
-  danger: '#ef4444',
-  quiet: '#64748b',
-  violet: '#8b5cf6',
-};
-
-const axisProps = {
-  fontSize: 11,
-  tickLine: false,
-  tickMargin: 10,
-  axisLine: false,
-  tick: { fontFamily: 'var(--font-sans)', fill: 'var(--muted-foreground)' } as const,
+  commentsDark: '#38bdf8',
+  warning: '#d97706',
+  warningDark: '#fbbf24',
+  danger: '#dc2626',
+  dangerDark: '#f87171',
+  quiet: '#94a3b8',
+  quietDark: '#64748b',
 };
 
 function formatDay(value: string) {
@@ -61,11 +43,6 @@ function formatDay(value: string) {
 
 function formatCompact(value: number) {
   return value >= 1000 ? fmtNumber(value) : value.toLocaleString();
-}
-
-function ratio(numerator: number, denominator: number, decimals = 1) {
-  if (!denominator) return '0';
-  return (numerator / denominator).toFixed(decimals);
 }
 
 function percent(numerator: number, denominator: number) {
@@ -111,242 +88,87 @@ function GraphSectionTitle() {
 
 function GraphShell({
   title,
-  eyebrow,
-  icon: Icon,
   children,
   className = '',
 }: {
   title: string;
-  eyebrow: string;
-  icon: typeof Activity;
   children: ReactNode;
   className?: string;
 }) {
   return (
-    <article className={`overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
-      <div className="flex items-start justify-between gap-4 px-5 pt-5">
-        <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">{eyebrow}</p>
-          <h3 className="mt-1 text-sm font-bold text-foreground">{title}</h3>
-        </div>
-        <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
-          <Icon size={15} strokeWidth={2.2} />
-        </span>
+    <article className={`flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
+      <div className="px-4 pt-4 sm:px-5 sm:pt-5">
+        <h3 className="text-sm font-bold text-foreground sm:text-base">{title}</h3>
       </div>
-      {children}
+      <div className="flex flex-1 flex-col">{children}</div>
     </article>
   );
 }
 
-function GraphCardGallery({ stats, days, isDark }: { stats: StatsPayload; days: number; isDark: boolean }) {
+function MetricsGrid({ stats, isDark }: { stats: StatsPayload; isDark: boolean }) {
   const color = isDark ? CHART.primaryDark : CHART.primary;
-  const tokenTrend = stats.trend.map((day) => ({
-    ...day,
-    tokens: day.inputTokens + day.outputTokens,
-    tokenDensity: Math.round((day.inputTokens + day.outputTokens) / Math.max(day.jobs, 1)),
-    commentRate: Number(ratio(day.comments, Math.max(day.jobs, 1), 1)),
-  }));
-  const cumulativeTrend = stats.trend.reduce<{ day: string; reviews: number; comments: number }[]>((acc, day) => {
-    const prev = acc[acc.length - 1];
-    acc.push({
-      day: day.day,
-      reviews: (prev?.reviews ?? 0) + day.jobs,
-      comments: (prev?.comments ?? 0) + day.comments,
-    });
-    return acc;
-  }, []);
+  const commentsColor = isDark ? CHART.commentsDark : CHART.comments;
+  const inputColor = isDark ? CHART.commentsDark : CHART.comments;
+  const outputColor = isDark ? CHART.warningDark : CHART.warning;
+  const dangerColor = isDark ? CHART.dangerDark : CHART.danger;
+  const quietColor = isDark ? CHART.quietDark : CHART.quiet;
   const repoMax = Math.max(...stats.topRepos.map((repo) => repo.jobs), 1);
   const modelMax = Math.max(...stats.models.map((model) => model.calls), 1);
 
+  // Theme-aware chart chrome. CSS variables don't reliably resolve inside
+  // Recharts SVG text, so use explicit colors keyed off the active theme.
+  const axisColor = isDark ? 'rgba(228,228,231,0.62)' : 'rgba(63,63,70,0.78)';
+  const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
+  const cursorColor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
+  const axisProps = {
+    fontSize: 11,
+    tickLine: false,
+    tickMargin: 8,
+    axisLine: false,
+    tick: { fontFamily: 'var(--font-sans)', fill: axisColor },
+  } as const;
+  // Let Recharts thin the labels by available space (respecting minTickGap)
+  // rather than a fixed stride keyed off the range — the trend array can have
+  // far fewer points than `days`, which would hide every label but the first.
+  const xAxisProps = {
+    dataKey: 'day',
+    tickFormatter: formatDay,
+    interval: 'preserveStartEnd' as const,
+    minTickGap: 24,
+  };
+
+  const STATUS_COLOR: Record<string, string> = {
+    done: color,
+    running: commentsColor,
+    queued: quietColor,
+    failed: dangerColor,
+    superseded: quietColor,
+    cancelled: quietColor,
+  };
+  const statusTotal = Math.max(stats.statuses.reduce((sum, s) => sum + s.count, 0), 1);
+
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-5 sm:gap-6">
       <GraphSectionTitle />
 
-      <div className="grid gap-5 lg:grid-cols-12">
-        <GraphShell title="Cumulative reviews" eyebrow="Line" icon={TrendingUp} className="lg:col-span-7">
-          <div className="h-64 px-2 pb-4 pt-4">
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
+        <GraphShell title="Review flow">
+          <div className="h-64 px-2 pb-4 pt-4 sm:h-80 sm:px-3 sm:pb-5">
             <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <LineChart data={cumulativeTrend} margin={{ left: -18, right: 18, top: 10, bottom: 0 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="day" {...axisProps} tickFormatter={formatDay} interval={Math.max(Math.floor(days / 8), 0)} />
-                <YAxis {...axisProps} />
-                <Tooltip content={<ChartTooltip />} />
-                <Line type="monotone" dataKey="reviews" name="reviews" stroke={color} strokeWidth={2.5} dot={false} />
-                <Line type="monotone" dataKey="comments" name="comments" stroke={CHART.comments} strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </GraphShell>
-
-        <GraphShell title="Token load" eyebrow="Area" icon={Server} className="lg:col-span-5">
-          <div className="h-64 px-2 pb-4 pt-4">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <AreaChart data={tokenTrend} margin={{ left: -18, right: 18, top: 10, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="tokenLoadFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={CHART.violet} stopOpacity={0.28} />
-                    <stop offset="100%" stopColor={CHART.violet} stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="day" {...axisProps} tickFormatter={formatDay} interval={Math.max(Math.floor(days / 5), 0)} />
-                <YAxis {...axisProps} tickFormatter={formatCompact} />
-                <Tooltip content={<ChartTooltip />} />
-                <Area type="monotone" dataKey="tokens" name="tokens" stroke={CHART.violet} strokeWidth={2.25} fill="url(#tokenLoadFill)" dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </GraphShell>
-      </div>
-
-      <div className="grid gap-5 lg:grid-cols-12">
-        <GraphShell title="Reviews vs comments" eyebrow="Dual bars" icon={BarChart3} className="lg:col-span-6">
-          <div className="h-64 px-2 pb-4 pt-4">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <BarChart data={stats.trend} margin={{ left: -18, right: 18, top: 10, bottom: 0 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="day" {...axisProps} tickFormatter={formatDay} interval={Math.max(Math.floor(days / 6), 0)} />
-                <YAxis {...axisProps} />
-                <Tooltip content={<ChartTooltip />} />
-                <Bar dataKey="jobs" name="reviews" fill={color} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="comments" name="comments" fill={CHART.comments} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </GraphShell>
-
-        <GraphShell title="Token density" eyebrow="Line" icon={Gauge} className="lg:col-span-6">
-          <div className="h-64 px-2 pb-4 pt-4">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <LineChart data={tokenTrend} margin={{ left: -18, right: 18, top: 10, bottom: 0 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="day" {...axisProps} tickFormatter={formatDay} interval={Math.max(Math.floor(days / 6), 0)} />
-                <YAxis {...axisProps} tickFormatter={formatCompact} />
-                <Tooltip content={<ChartTooltip />} />
-                <Line type="monotone" dataKey="tokenDensity" name="tokens/review" stroke={CHART.warning} strokeWidth={2.5} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </GraphShell>
-      </div>
-
-      <div className="grid gap-5 lg:grid-cols-12">
-        <GraphShell title="Repository bars" eyebrow="Horizontal" icon={GitBranch} className="lg:col-span-6">
-          <div className="space-y-3 px-5 pb-5 pt-5">
-            {stats.topRepos.slice(0, 7).map((repo) => (
-              <div key={`${repo.owner}/${repo.repo}`} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center justify-between gap-3 text-xs">
-                    <span className="truncate font-semibold text-foreground">{repo.owner}/{repo.repo}</span>
-                  </div>
-                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${percent(repo.jobs, repoMax)}%` }} />
-                  </div>
-                </div>
-                <span className="text-right text-xs font-bold tabular-nums text-foreground">{repo.jobs}</span>
-              </div>
-            ))}
-          </div>
-        </GraphShell>
-
-        <GraphShell title="Model calls" eyebrow="Horizontal" icon={Bot} className="lg:col-span-6">
-          <div className="space-y-3 px-5 pb-5 pt-5">
-            {stats.models.slice(0, 7).map((model) => (
-              <div key={model.modelUsed} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center justify-between gap-3 text-xs">
-                    <span className="truncate font-semibold text-foreground">{modelName(model.modelUsed)}</span>
-                  </div>
-                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full rounded-full bg-[oklch(54%_0.17_295)]" style={{ width: `${percent(model.calls, modelMax)}%` }} />
-                  </div>
-                </div>
-                <span className="text-right text-xs font-bold tabular-nums text-foreground">{model.calls}</span>
-              </div>
-            ))}
-          </div>
-        </GraphShell>
-      </div>
-
-    </div>
-  );
-}
-
-function PanelHeader({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value?: string;
-  detail?: string;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4 px-5 pt-5">
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
-          <TrendingUp size={15} strokeWidth={2.2} />
-        </span>
-        <div>
-          <h2 className="text-sm font-bold text-foreground">{label}</h2>
-          {detail && <p className="text-xs text-muted-foreground">{detail}</p>}
-        </div>
-      </div>
-      {value && (
-        <span className="rounded-md border border-border bg-background px-2.5 py-1 text-xs font-bold tabular-nums text-foreground">
-          {value}
-        </span>
-      )}
-    </div>
-  );
-}
-
-function ReviewFlowCard({
-  stats,
-  days,
-  isDark,
-}: {
-  stats: StatsPayload;
-  days: number;
-  isDark: boolean;
-}) {
-  const color = isDark ? CHART.primaryDark : CHART.primary;
-  const totalReviews = stats.trend.reduce((sum, day) => sum + day.jobs, 0);
-  const maxDay = stats.trend.reduce(
-    (best, day) => (day.jobs > best.jobs ? day : best),
-    stats.trend[0] ?? { day: '', jobs: 0 },
-  );
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)]">
-      <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_15rem]">
-        <div>
-          <PanelHeader
-            label="Review flow"
-            detail={`Daily review and comment activity across the last ${days} days`}
-            value={`${fmtNumber(totalReviews)} total`}
-          />
-          <div className="h-[21rem] px-2 pb-4 pt-4 sm:px-4">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <AreaChart data={stats.trend} margin={{ left: -18, right: 18, top: 12, bottom: 0 }}>
+              <AreaChart data={stats.trend} margin={{ left: 4, right: 8, top: 8, bottom: 4 }}>
                 <defs>
                   <linearGradient id="reviewFill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={color} stopOpacity={0.28} />
                     <stop offset="100%" stopColor={color} stopOpacity={0.02} />
                   </linearGradient>
                   <linearGradient id="commentFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={CHART.comments} stopOpacity={0.2} />
-                    <stop offset="100%" stopColor={CHART.comments} stopOpacity={0.01} />
+                    <stop offset="0%" stopColor={commentsColor} stopOpacity={0.2} />
+                    <stop offset="100%" stopColor={commentsColor} stopOpacity={0.01} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis
-                  dataKey="day"
-                  {...axisProps}
-                  interval={Math.max(Math.floor(days / 8), 0)}
-                  tickFormatter={formatDay}
-                />
-                <YAxis {...axisProps} />
+                <CartesianGrid stroke={gridColor} strokeDasharray="3 3" vertical={false} />
+                <XAxis {...axisProps} {...xAxisProps} />
+                <YAxis {...axisProps} width={34} allowDecimals={false} />
                 <Tooltip content={<ChartTooltip />} cursor={{ stroke: color, strokeDasharray: '4 4' }} />
                 <Area
                   type="monotone"
@@ -362,80 +184,144 @@ function ReviewFlowCard({
                   type="monotone"
                   dataKey="comments"
                   name="comments"
-                  stroke={CHART.comments}
+                  stroke={commentsColor}
                   strokeWidth={2}
                   fill="url(#commentFill)"
                   dot={false}
-                  activeDot={{ r: 4, fill: CHART.comments, stroke: 'var(--card)', strokeWidth: 2 }}
+                  activeDot={{ r: 4, fill: commentsColor, stroke: 'var(--card)', strokeWidth: 2 }}
                 />
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </GraphShell>
 
-        <aside className="border-t border-border bg-secondary/25 p-5 lg:border-l lg:border-t-0">
-          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">
-            Peak day
-          </p>
-          <p className="mt-2 text-2xl font-bold tracking-normal text-foreground tabular-nums">
-            {maxDay.jobs}
-          </p>
-          <p className="text-xs text-muted-foreground">{maxDay.day ? formatDay(maxDay.day) : 'No activity'}</p>
+        <GraphShell title="Input vs output tokens">
+          <div className="h-64 px-2 pb-4 pt-4 sm:h-80 sm:px-3 sm:pb-5">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+              <BarChart data={stats.trend} margin={{ left: 4, right: 8, top: 8, bottom: 4 }}>
+                <CartesianGrid stroke={gridColor} strokeDasharray="3 3" vertical={false} />
+                <XAxis {...axisProps} {...xAxisProps} />
+                <YAxis {...axisProps} width={46} tickFormatter={formatCompact} />
+                <Tooltip content={<ChartTooltip />} cursor={{ fill: cursorColor }} />
+                <Bar dataKey="inputTokens" name="input" fill={inputColor} radius={[3, 3, 0, 0]} />
+                <Bar dataKey="outputTokens" name="output" fill={outputColor} radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </GraphShell>
+      </div>
 
-          <div className="my-5 h-px bg-border" />
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-medium text-muted-foreground">Daily average</span>
-              <span className="text-sm font-bold tabular-nums text-foreground">
-                {ratio(totalReviews, days)}
-              </span>
+      <div className="grid gap-4 sm:gap-5 sm:grid-cols-2 xl:grid-cols-3">
+        <GraphShell title="Job health">
+          <div className="flex flex-col space-y-5 px-4 pb-5 pt-4 sm:px-5 sm:pb-6 sm:pt-5">
+            <div className="flex h-3.5 overflow-hidden rounded-full bg-secondary">
+              {stats.statuses.map((s) => (
+                <div
+                  key={s.status}
+                  style={{ width: `${(s.count / statusTotal) * 100}%`, backgroundColor: STATUS_COLOR[s.status] ?? CHART.quiet }}
+                />
+              ))}
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-medium text-muted-foreground">Comment rate</span>
-              <span className="text-sm font-bold tabular-nums text-foreground">
-                {ratio(stats.totals.comments, Math.max(totalReviews, 1))}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-medium text-muted-foreground">Active repos</span>
-              <span className="text-sm font-bold tabular-nums text-foreground">
-                {stats.topRepos.length}
-              </span>
+            <div className="space-y-3.5">
+              {stats.statuses.map((s) => (
+                <div key={s.status} className="flex items-center justify-between gap-3 text-sm">
+                  <div className="flex items-center gap-2.5">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: STATUS_COLOR[s.status] ?? CHART.quiet }} />
+                    <span className="capitalize font-medium text-muted-foreground">{s.status}</span>
+                  </div>
+                  <span className="font-bold tabular-nums text-foreground">{s.count}</span>
+                </div>
+              ))}
             </div>
           </div>
-        </aside>
+        </GraphShell>
+
+        <GraphShell title="Repository bars">
+          <div className="space-y-4 px-4 pb-5 pt-4 sm:px-5 sm:pb-6 sm:pt-5">
+            {stats.topRepos.slice(0, 8).map((repo) => (
+              <div key={`${repo.owner}/${repo.repo}`} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="truncate font-semibold text-foreground">{repo.owner}/{repo.repo}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${percent(repo.jobs, repoMax)}%` }} />
+                  </div>
+                </div>
+                <span className="text-right text-xs font-bold tabular-nums text-foreground">{repo.jobs}</span>
+              </div>
+            ))}
+          </div>
+        </GraphShell>
+
+        <GraphShell title="Model calls">
+          <div className="space-y-4 px-4 pb-5 pt-4 sm:px-5 sm:pb-6 sm:pt-5">
+            {stats.models.slice(0, 8).map((model) => (
+              <div key={model.modelUsed} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="truncate font-semibold text-foreground">{modelName(model.modelUsed)}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
+                    <div className="h-full rounded-full bg-info" style={{ width: `${percent(model.calls, modelMax)}%` }} />
+                  </div>
+                </div>
+                <span className="text-right text-xs font-bold tabular-nums text-foreground">{model.calls}</span>
+              </div>
+            ))}
+          </div>
+        </GraphShell>
       </div>
-    </section>
+    </div>
   );
 }
 
-function ReviewFlowSkeleton() {
+function GraphCardSkeleton({ className = '' }: { className?: string }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)]">
-      <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_15rem]">
-        <div className="p-5">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary ring-1 ring-primary/15">
-              <Activity size={15} strokeWidth={2.2} />
-            </span>
+    <article className={`overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
+      <div className="px-4 pt-4 sm:px-5 sm:pt-5">
+        <Skeleton height={16} width={140} />
+      </div>
+      <div className="h-64 px-4 pb-4 pt-4 sm:h-80 sm:px-5 sm:pb-5">
+        <Skeleton height="100%" width="100%" borderRadius={6} />
+      </div>
+    </article>
+  );
+}
+
+function GraphBarCardSkeleton({ className = '' }: { className?: string }) {
+  return (
+    <article className={`overflow-hidden rounded-lg border border-border bg-card shadow-[var(--shadow-md)] ${className}`}>
+      <div className="px-4 pt-4 sm:px-5 sm:pt-5">
+        <Skeleton height={16} width={140} />
+      </div>
+      <div className="space-y-4 px-4 pb-5 pt-4 sm:px-5 sm:pb-6 sm:pt-5">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
             <div className="space-y-2">
-              <Skeleton height={16} width={108} />
-              <Skeleton height={12} width={240} />
+              <Skeleton height={10} width={`${70 + (i % 3) * 10}%`} />
+              <Skeleton height={8} width={`${40 + ((i * 17) % 50)}%`} />
             </div>
+            <Skeleton height={12} width={28} />
           </div>
-          <div className="mt-8 h-72 rounded-md bg-muted/70 skeleton" />
-        </div>
-        <div className="border-t border-border bg-secondary/25 p-5 lg:border-l lg:border-t-0">
-          <Skeleton height={12} width={72} />
-          <Skeleton className="mt-3" height={32} width={48} />
-          <div className="my-5 h-px bg-border" />
-          <div className="space-y-4">
-            <Skeleton height={14} width="100%" />
-            <Skeleton height={14} width="88%" />
-            <Skeleton height={14} width="92%" />
-          </div>
-        </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function MetricsGridSkeleton() {
+  return (
+    <div className="flex flex-col gap-5 sm:gap-6">
+      <div className="pt-2" aria-hidden="true" />
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
+        <GraphCardSkeleton />
+        <GraphCardSkeleton />
+      </div>
+      <div className="grid gap-4 sm:gap-5 sm:grid-cols-2 xl:grid-cols-3">
+        <GraphBarCardSkeleton />
+        <GraphBarCardSkeleton />
+        <GraphBarCardSkeleton />
       </div>
     </div>
   );
@@ -484,12 +370,9 @@ export function StatsPage() {
       {error && <Alert variant="destructive">{error}</Alert>}
 
       {stats ? (
-        <>
-          <ReviewFlowCard stats={stats} days={days} isDark={isDark} />
-          <GraphCardGallery stats={stats} days={days} isDark={isDark} />
-        </>
+        <MetricsGrid stats={stats} isDark={isDark} />
       ) : (
-        loading && <ReviewFlowSkeleton />
+        <MetricsGridSkeleton />
       )}
     </section>
   );

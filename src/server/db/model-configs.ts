@@ -26,9 +26,6 @@ type ModelConfigRow = {
   provider_name: string;
   api_format: LlmApiFormat;
   model_name: string;
-  rpm: number | null;
-  tpm: number | null;
-  rpd: number | null;
   updated_at: string;
 };
 
@@ -69,9 +66,6 @@ function mapModelConfig(row: ModelConfigRow): ModelConfig {
     providerName: row.provider_name,
     apiFormat: row.api_format,
     modelName: row.model_name,
-    rpm: row.rpm,
-    tpm: row.tpm,
-    rpd: row.rpd,
     updatedAt: row.updated_at,
   });
 }
@@ -83,9 +77,6 @@ const MODEL_SELECT = `
     p.name AS provider_name,
     p.api_format,
     mc.model_name,
-    mc.rpm,
-    mc.tpm,
-    mc.rpd,
     mc.updated_at
   FROM model_configs mc
   JOIN llm_providers p ON p.id = mc.provider_id
@@ -248,9 +239,6 @@ export async function getResolvedModelConfig(
       p.name AS provider_name,
       p.api_format,
       mc.model_name,
-      mc.rpm,
-      mc.tpm,
-      mc.rpd,
       mc.updated_at,
       p.enabled AS provider_enabled,
       p.base_url,
@@ -279,20 +267,17 @@ export async function updateModelConfig(
     env,
     `
     WITH upserted AS (
-      INSERT INTO model_configs (model_id, provider_id, model_name, rpm, tpm, rpd, provider, updated_at)
-      SELECT $1, p.id, $3, $4, $5, $6, p.api_format, now()
+      INSERT INTO model_configs (model_id, provider_id, model_name, provider, updated_at)
+      SELECT $1, p.id, $3, p.api_format, now()
       FROM llm_providers p
       WHERE p.id = $2
       ON CONFLICT (model_id)
       DO UPDATE SET
         provider_id = EXCLUDED.provider_id,
         model_name = EXCLUDED.model_name,
-        rpm = EXCLUDED.rpm,
-        tpm = EXCLUDED.tpm,
-        rpd = EXCLUDED.rpd,
         provider = EXCLUDED.provider,
         updated_at = now()
-      RETURNING model_id, provider_id, model_name, rpm, tpm, rpd, updated_at
+      RETURNING model_id, provider_id, model_name, updated_at
     )
     SELECT
       u.model_id,
@@ -300,14 +285,11 @@ export async function updateModelConfig(
       p.name AS provider_name,
       p.api_format,
       u.model_name,
-      u.rpm,
-      u.tpm,
-      u.rpd,
       u.updated_at
     FROM upserted u
     JOIN llm_providers p ON p.id = u.provider_id
     `,
-    [config.modelId, config.providerId, config.modelName, config.rpm, config.tpm, config.rpd],
+    [config.modelId, config.providerId, config.modelName],
   );
   return row ? mapModelConfig(row) : null;
 }
@@ -352,9 +334,6 @@ export async function upsertDiscoveredModelConfigs(
     model_id: string;
     provider_id: string;
     model_name: string;
-    rpm: number | null;
-    tpm: number | null;
-    rpd: number | null;
     provider: LlmApiFormat;
   }> = [];
 
@@ -374,9 +353,6 @@ export async function upsertDiscoveredModelConfigs(
       model_id: candidate,
       provider_id: input.providerId,
       model_name: modelName,
-      rpm: null,
-      tpm: null,
-      rpd: null,
       provider: input.apiFormat,
     });
   }
@@ -386,9 +362,6 @@ export async function upsertDiscoveredModelConfigs(
   const modelIds = rowsToInsert.map(row => row.model_id);
   const providerIds = rowsToInsert.map(row => row.provider_id);
   const modelNames = rowsToInsert.map(row => row.model_name);
-  const rpms = rowsToInsert.map(row => row.rpm);
-  const tpms = rowsToInsert.map(row => row.tpm);
-  const rpds = rowsToInsert.map(row => row.rpd);
   const providers = rowsToInsert.map(row => row.provider);
 
   const rows = await queryRows<ModelConfigRow>(
@@ -400,18 +373,15 @@ export async function upsertDiscoveredModelConfigs(
         $1::text[],
         $2::uuid[],
         $3::text[],
-        $4::integer[],
-        $5::integer[],
-        $6::integer[],
-        $7::text[]
-      ) AS item(model_id, provider_id, model_name, rpm, tpm, rpd, provider)
+        $4::text[]
+      ) AS item(model_id, provider_id, model_name, provider)
     ),
     inserted AS (
-      INSERT INTO model_configs (model_id, provider_id, model_name, rpm, tpm, rpd, provider, updated_at)
-      SELECT model_id, provider_id, model_name, rpm, tpm, rpd, provider, now()
+      INSERT INTO model_configs (model_id, provider_id, model_name, provider, updated_at)
+      SELECT model_id, provider_id, model_name, provider, now()
       FROM incoming
       ON CONFLICT (model_id) DO NOTHING
-      RETURNING model_id, provider_id, model_name, rpm, tpm, rpd, updated_at
+      RETURNING model_id, provider_id, model_name, updated_at
     )
     SELECT
       i.model_id,
@@ -419,15 +389,12 @@ export async function upsertDiscoveredModelConfigs(
       p.name AS provider_name,
       p.api_format,
       i.model_name,
-      i.rpm,
-      i.tpm,
-      i.rpd,
       i.updated_at
     FROM inserted i
     JOIN llm_providers p ON p.id = i.provider_id
     ORDER BY i.model_id ASC
     `,
-    [modelIds, providerIds, modelNames, rpms, tpms, rpds, providers],
+    [modelIds, providerIds, modelNames, providers],
   );
 
   return rows.map(mapModelConfig);

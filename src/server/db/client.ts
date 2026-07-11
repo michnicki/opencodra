@@ -62,8 +62,29 @@ export function runWithDb<T>(env: DbEnv, fn: () => T): T {
   return dbStorage.run(createDbClient(env), fn);
 }
 
+// Reused clients for the no-runWithDb() fallback path below. Keyed by connection string so a caller
+// that queries outside a runWithDb() scope shares one bounded pool instead of leaking a fresh pool
+// (up to `max` connections) on every single query.
+const fallbackClients = new Map<string, DbClient>();
+
 export function getDb(env: DbEnv) {
-  return dbStorage.getStore() ?? createDbClient(env);
+  const store = dbStorage.getStore();
+  if (store) return store;
+
+  // Outside a runWithDb() scope. In production this never happens -- fetch, queue, scheduled, and
+  // the workflow all wrap their work in runWithDb() -- so this branch is effectively test-only (the
+  // Hono test client calls app.fetch() directly, and tests call db helpers directly). Creating a new
+  // pool per query there leaked connections across the whole test process and exhausted CI's Postgres
+  // (masked locally by Neon's pooler). Reuse one client per connection string instead. Keeping this
+  // strictly to the store-less path preserves the per-request client production relies on to satisfy
+  // Cloudflare's "no I/O across request contexts" rule.
+  const connectionString = env.HYPERDRIVE.connectionString;
+  let client = fallbackClients.get(connectionString);
+  if (!client) {
+    client = createDbClient(env);
+    fallbackClients.set(connectionString, client);
+  }
+  return client;
 }
 
 export async function queryRows<T>(env: DbEnv, sqlText: string, params: unknown[] = []) {

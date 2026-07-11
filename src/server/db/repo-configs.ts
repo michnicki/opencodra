@@ -105,6 +105,39 @@ export async function syncRepoConfig(
   );
 }
 
+export async function deleteStaleRepoConfigs(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  installationId: string,
+  activeRepoFullNames: string[]
+) {
+  if (activeRepoFullNames.length === 0) {
+    await queryRows(
+      env,
+      `
+        DELETE FROM repo_configs
+        WHERE repository_id IN (
+          SELECT id FROM repositories WHERE installation_id = $1
+        )
+      `,
+      [installationId]
+    );
+    return;
+  }
+
+  await queryRows(
+    env,
+    `
+      DELETE FROM repo_configs
+      WHERE repository_id IN (
+        SELECT id FROM repositories 
+        WHERE installation_id = $1 
+          AND owner || '/' || repo != ALL($2::text[])
+      )
+    `,
+    [installationId, activeRepoFullNames]
+  );
+}
+
 export async function updateRepoConfigEnabled(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   input: {
