@@ -34,6 +34,7 @@ vi.mock('@server/services/github', () => {
         async createCheckRun() { return { id: 123 }; }
         async updateCheckRun() { return {}; }
         async createReview() { return { id: 456 }; }
+        async findBotReviewForCommit() { return null; }
         async ensureLabel() { return {}; }
         async addIssueLabels() { return {}; }
         async removeIssueLabelsIfPresent() { return {}; }
@@ -823,6 +824,128 @@ dbDescribe('Review Flow Lifecycle', () => {
     expect(finalJob?.summary_model).toBeNull();
     expect(summarySpy).not.toHaveBeenCalled();
     summarySpy.mockRestore();
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('reuses an already-posted review instead of double-posting when finalize re-runs past the posting stage', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const repo = `test-repo-${Date.now()}-doublepost`;
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+    );
+    // A prior finalize attempt already posted this review (id 999) but died before recording it, so
+    // the GitHub lookup finds it. Finalize must reuse it, not post a second review.
+    const findSpy = vi.spyOn(GitHubService.prototype, 'findBotReviewForCommit').mockResolvedValue({ id: 999 });
+    const createSpy = vi.spyOn(GitHubService.prototype, 'createReview');
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 8,
+      prTitle: 'Double Post Test',
+      prAuthor: 'author',
+      commitSha: sha('a1'),
+      baseSha: sha('b1'),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 1);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+    // A prior finalize attempt reached the posting stage -- this is the marker the guard keys on.
+    await updateJobStep(env, job.id, 'Completing', { status: 'running' });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok',
+      errorMessage: null,
+    });
+
+    await runWithDb(env, async () => {
+      const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-doublepost', phase: 'finalize' });
+      expect(result).toEqual({ action: 'ack' });
+    });
+
+    expect(findSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy).not.toHaveBeenCalled();
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('done');
+    expect(Number(finalJob?.review_id)).toBe(999);
+
+    findSpy.mockRestore();
+    createSpy.mockRestore();
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('does not pay the existing-review lookup on a first-pass finalize', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const repo = `test-repo-${Date.now()}-firstpass`;
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+    );
+    const findSpy = vi.spyOn(GitHubService.prototype, 'findBotReviewForCommit');
+    const createSpy = vi.spyOn(GitHubService.prototype, 'createReview');
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 9,
+      prTitle: 'First Pass Test',
+      prAuthor: 'author',
+      commitSha: sha('c1'),
+      baseSha: sha('d1'),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 1);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+    // 'Completing' has never been started -> this is a first-pass finalize, no re-post risk.
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok',
+      errorMessage: null,
+    });
+
+    await runWithDb(env, async () => {
+      const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-firstpass', phase: 'finalize' });
+      expect(result).toEqual({ action: 'ack' });
+    });
+
+    expect(findSpy).not.toHaveBeenCalled();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('done');
+
+    findSpy.mockRestore();
+    createSpy.mockRestore();
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
 });

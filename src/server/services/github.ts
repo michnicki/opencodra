@@ -28,6 +28,10 @@ export class GitHubService {
     return this.client.createReview(owner, repo, prNumber, params);
   }
 
+  async findBotReviewForCommit(owner: string, repo: string, prNumber: number, commitSha: string, botLogin: string) {
+    return this.client.findBotReviewForCommit(owner, repo, prNumber, commitSha, botLogin);
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return this.client.ensureLabel(owner, repo, name, color);
   }

@@ -179,6 +179,13 @@ export async function setJobPullRequestMeta(
 
 export async function markSystemActive(env: Pick<AppBindings, 'APP_KV'>) {
   try {
+    // claimJobLease() calls this on every review chunk, so a single large PR (dozens of chunks) used
+    // to issue dozens of identical KV writes -- enough to blow through the Workers-Free daily KV
+    // write quota. KV reads are far cheaper and have a much higher quota, so read first and only
+    // write when the flag is actually missing (expired, or the first job after an idle period). The
+    // 20-minute TTL means an active job refreshes it at most ~once per 20 minutes, not per chunk.
+    const existing = await env.APP_KV.get('system:active_jobs');
+    if (existing) return;
     await env.APP_KV.put('system:active_jobs', '1', { expirationTtl: 20 * 60 });
   } catch (error) {
     // Ignore KV errors to avoid failing the DB transaction

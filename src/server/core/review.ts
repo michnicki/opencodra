@@ -76,6 +76,14 @@ const MAX_RETRYABLE_FILE_REVIEW_FAILURES = 3;
 // job never approaches this; it only fires when a job is genuinely wedged (e.g. a provider is
 // down for the whole backoff window) and stops it from churning for hours before finalizing.
 const MAX_JOB_CONTINUATIONS = 20;
+// Finalize gets a much lower reschedule ceiling than review. Unlike review (which makes real
+// progress one file at a time and legitimately spans many continuations), finalize is a short,
+// self-contained phase: on a fresh invocation it either fits the subrequest budget and posts, or
+// it doesn't. Retrying it a few times covers a transient budget miss (a reschedule that lands on a
+// genuinely fresh invocation), but if a saturated long-lived workflow instance can't give finalize
+// a clean budget, more retries won't help -- so cap them low and fail fast (the check-run reconciler
+// and an inheriting re-run recover) instead of churning ~20 min against the shared ceiling.
+const MAX_FINALIZE_CONTINUATIONS = 3;
 // A job's commit (and therefore its diff) never changes, so the raw diff can be
 // cached for the job's entire lifetime instead of being re-fetched from GitHub on
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
@@ -400,12 +408,13 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'transient model/provider failures');
     }
 
-    // Running out of this invocation's subrequest budget is not a job failure: the prepare and
-    // review phases are idempotent (already-reviewed files are persisted and skipped next time),
-    // so reschedule the same phase to resume on a fresh budget instead of terminally failing the
-    // whole review. Finalize is intentionally excluded -- it posts the GitHub review and isn't
-    // safe to re-run, and with no AI calls it does not realistically approach the cap anyway.
-    if (phase !== 'finalize' && isSubrequestBudgetError(error)) {
+    // Running out of this invocation's subrequest budget is not a job failure: every phase is
+    // idempotent enough to resume on a fresh budget, so reschedule the same phase instead of
+    // terminally failing the whole review. Prepare and review skip already-persisted files;
+    // finalize re-derives its inputs and is guarded against double-posting the GitHub review
+    // (see the findBotReviewForCommit guard in runFinalizePhase), so a finalize that exhausts the
+    // budget mid-way -- which the large-PR degrade path genuinely can -- resumes rather than dying.
+    if (isSubrequestBudgetError(error)) {
       // A fresh Worker invocation is what fixes budget exhaustion -- but only a long-enough sleep
       // actually hibernates the workflow into one. Yield long enough to force that hibernation.
       const record = error && typeof error === 'object' ? error as { retryAfterSeconds?: unknown } : null;
@@ -443,7 +452,12 @@ async function continueOrFailWedgedJob(
 ): Promise<ReviewJobRunResult> {
   const continuationCount = await markJobContinuationQueued(env, job.id, delaySeconds);
 
-  if (continuationCount > MAX_JOB_CONTINUATIONS) {
+  // Finalize burns its low ceiling fast so a saturated instance that can't post the review fails
+  // within a few minutes instead of looping ~20 min against the review-sized ceiling; every other
+  // phase keeps the generous ceiling because it makes real per-file progress.
+  const ceiling = phase === 'finalize' ? MAX_FINALIZE_CONTINUATIONS : MAX_JOB_CONTINUATIONS;
+
+  if (continuationCount > ceiling) {
     if (phase === 'review') {
       // Degrade to a partial review rather than throwing away the work done so far. NOTE: we must
       // RETURN the finalize transition here, not call enqueueJobPhase() -- that helper throws
@@ -467,6 +481,11 @@ async function continueOrFailWedgedJob(
           clearAsync: true,
         });
       }
+      // Hand finalize its own fresh continuation budget. Without this the counter is already past
+      // MAX_JOB_CONTINUATIONS (that's what triggered this degrade), so the first time finalize hits
+      // a subrequest-budget limit it would re-enter continueOrFailWedgedJob already over the ceiling
+      // and fail terminally -- exactly the large-PR "Too many subrequests" failure this guards.
+      await resetJobContinuationCount(env, job.id);
       await releaseJobLease(env, job.id, leaseOwner);
       // Finalize on a fresh invocation/budget -- this invocation is the one that hit the wall.
       return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS };
@@ -1301,8 +1320,18 @@ async function runFinalizePhase(
     formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${effectiveMaxComments}). Showing the most critical issues.`;
   }
 
+  // If a prior finalize attempt already reached the posting stage (the 'Completing' step was
+  // started) and then died before completeJob recorded the review id, the review may already be on
+  // GitHub. Re-posting would duplicate it, so reuse the existing one. This GitHub read is only paid
+  // on an actual finalize re-run, never on the common first pass.
+  const finalizeRetriedPastPost = job.steps.some(
+    (step) => step.name === 'Completing' && (step.status === 'running' || step.status === 'done'),
+  );
   await updateJobStep(env, job.id, 'Completing', { status: 'running' });
-  const review = await github.createReview(job.owner, job.repo, job.prNumber, {
+  const existingReview = finalizeRetriedPastPost
+    ? await github.findBotReviewForCommit(job.owner, job.repo, job.prNumber, pr.head.sha, env.BOT_USERNAME)
+    : null;
+  const review = existingReview ?? await github.createReview(job.owner, job.repo, job.prNumber, {
     commitSha: pr.head.sha,
     event: formatter.toReviewEvent(verdictSummary.verdict),
     body: formattedSummary,
@@ -1341,6 +1370,14 @@ async function runFinalizePhase(
     errorMessage: partialErrorMessage,
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
+
+  // The cached PR diff is only needed while the job is being reviewed. Drop it now the job is done
+  // so completed jobs don't leave large diff blobs sitting in KV until the 6h TTL expires.
+  try {
+    await env.APP_KV.delete(diffCacheKey(job.id));
+  } catch (error) {
+    logger.warn(`Failed to delete cached diff for completed job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
+  }
 
   // Cosmetics: labels and the check-run conclusion. Best-effort -- the review is posted and the job
   // is already 'done', so a failure here (e.g. subrequest budget spent, GitHub blip) must not fail

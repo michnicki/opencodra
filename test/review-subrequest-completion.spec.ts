@@ -18,6 +18,7 @@ const {
   updateJobStepMock,
   failJobMock,
   markJobCheckRunCompletedMock,
+  resetJobContinuationCountMock,
   getPullRequestMock,
 } = vi.hoisted(() => ({
   getJobForProcessingMock: vi.fn(),
@@ -29,6 +30,7 @@ const {
   updateJobStepMock: vi.fn(),
   failJobMock: vi.fn(),
   markJobCheckRunCompletedMock: vi.fn(),
+  resetJobContinuationCountMock: vi.fn(),
   getPullRequestMock: vi.fn(),
 }));
 
@@ -45,6 +47,7 @@ vi.mock('@server/db/jobs', async (importOriginal) => {
     updateJobStep: updateJobStepMock,
     failJob: failJobMock,
     markJobCheckRunCompleted: markJobCheckRunCompletedMock,
+    resetJobContinuationCount: resetJobContinuationCountMock,
   };
 });
 
@@ -96,6 +99,7 @@ describe('runReviewJob subrequest-budget handling', () => {
     markJobContinuationQueuedMock.mockResolvedValue(undefined);
     updateJobStepMock.mockResolvedValue(undefined);
     failJobMock.mockResolvedValue(undefined);
+    resetJobContinuationCountMock.mockResolvedValue(undefined);
   });
 
   it('reschedules the same phase (fresh budget) instead of failing the job when it hits the per-invocation subrequest limit', async () => {
@@ -149,6 +153,41 @@ describe('runReviewJob subrequest-budget handling', () => {
 
     expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
     expect(failJobMock).not.toHaveBeenCalled();
+    expect(releaseJobLeaseMock).toHaveBeenCalled();
+    // The degrade must hand finalize a fresh continuation budget; otherwise finalize enters already
+    // over the ceiling and the first subrequest-budget hit there fails the job terminally.
+    expect(resetJobContinuationCountMock).toHaveBeenCalledWith(expect.anything(), JOB_ID);
+  });
+
+  it('reschedules the finalize phase (fresh budget) while under its low continuation ceiling', async () => {
+    const env = createTestEnv();
+    // The large-PR degrade path runs finalize to post a partial review; that finalize can itself
+    // exhaust the subrequest budget (backfilling missing files, fetching the PR/diff). It must
+    // resume on a fresh budget -- NOT terminally fail with the review unposted (the PR #26 incident).
+    // At the finalize ceiling (MAX_FINALIZE_CONTINUATIONS = 3) it still reschedules.
+    markJobContinuationQueuedMock.mockResolvedValue(3);
+    getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
+
+    const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'finalize' } as any);
+
+    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+    expect(markJobContinuationQueuedMock).toHaveBeenCalledTimes(1);
+    expect(releaseJobLeaseMock).toHaveBeenCalledTimes(1);
+    expect(failJobMock).not.toHaveBeenCalled();
+  });
+
+  it('fails a wedged finalize phase fast once it exceeds the LOW finalize ceiling (not the review ceiling)', async () => {
+    const env = createTestEnv();
+    // Finalize is bounded much tighter than review: just past MAX_FINALIZE_CONTINUATIONS (3) it
+    // fails terminally instead of churning ~20 min up to the review-sized ceiling (20). This is the
+    // fix for the ~20-minute finalize loop observed when a saturated instance can't post the review.
+    markJobContinuationQueuedMock.mockResolvedValue(4);
+    getPullRequestMock.mockRejectedValue(new Error('Too many subrequests by single Worker invocation.'));
+
+    const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'finalize' } as any);
+
+    expect(result).toEqual({ action: 'ack' });
+    expect(failJobMock).toHaveBeenCalledTimes(1);
     expect(releaseJobLeaseMock).toHaveBeenCalled();
   });
 
