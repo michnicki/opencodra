@@ -653,7 +653,8 @@ dbDescribe('Review Flow Lifecycle', () => {
         phase: 'review',
       });
 
-      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 30 });
+      // Transient model failure (not a subrequest limit) -> stays in-instance, freshInstance false.
+      expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: 30, jobId: expect.any(String), freshInstance: false });
       expect(reviewSpy).toHaveBeenCalled();
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
     });
@@ -728,7 +729,8 @@ dbDescribe('Review Flow Lifecycle', () => {
 
       // Finalize always yields long enough to hibernate into a fresh invocation (fresh subrequest
       // budget), so the delay is the hibernation yield, not 0.
-      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+      // Transitioning into finalize -> runs on a fresh instance for a clean subrequest budget.
+      expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number), jobId: expect.any(String), freshInstance: true });
       expect(result.action === 'next_phase' && result.delaySeconds).toBeGreaterThan(0);
       expect(maxActive).toBe(2);
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);

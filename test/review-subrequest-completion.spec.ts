@@ -108,7 +108,7 @@ describe('runReviewJob subrequest-budget handling', () => {
 
     const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
 
-    expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number) });
+    expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: JOB_ID, freshInstance: true });
     // Queued for continuation and the lease released so the fresh invocation can re-claim it...
     expect(markJobContinuationQueuedMock).toHaveBeenCalledTimes(1);
     expect(releaseJobLeaseMock).toHaveBeenCalledTimes(1);
@@ -136,7 +136,7 @@ describe('runReviewJob subrequest-budget handling', () => {
 
     const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
 
-    expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number) });
+    expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: JOB_ID, freshInstance: true });
     expect(failJobMock).not.toHaveBeenCalled();
   });
 
@@ -151,7 +151,7 @@ describe('runReviewJob subrequest-budget handling', () => {
 
     const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'review' } as any);
 
-    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number), jobId: JOB_ID, freshInstance: true });
     expect(failJobMock).not.toHaveBeenCalled();
     expect(releaseJobLeaseMock).toHaveBeenCalled();
     // The degrade must hand finalize a fresh continuation budget; otherwise finalize enters already
@@ -170,7 +170,7 @@ describe('runReviewJob subrequest-budget handling', () => {
 
     const result = await runReviewJob(env, { jobId: JOB_ID, phase: 'finalize' } as any);
 
-    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number) });
+    expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number), jobId: JOB_ID, freshInstance: true });
     expect(markJobContinuationQueuedMock).toHaveBeenCalledTimes(1);
     expect(releaseJobLeaseMock).toHaveBeenCalledTimes(1);
     expect(failJobMock).not.toHaveBeenCalled();
