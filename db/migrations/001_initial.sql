@@ -615,26 +615,6 @@ ON CONFLICT (model_id) DO UPDATE SET
   model_name = EXCLUDED.model_name,
   updated_at = now();
 
-INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-SELECT 'gemma-4-31b-it', 15, 1000000, 1500, 'gemini', p.id, 'gemma-4-31b-it', now()
-FROM llm_providers p
-WHERE p.name = 'Google'
-ON CONFLICT (model_id) DO UPDATE SET
-  provider = EXCLUDED.provider,
-  provider_id = EXCLUDED.provider_id,
-  model_name = EXCLUDED.model_name,
-  updated_at = now();
-
-INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-SELECT 'gemma-4-26b-a4b-it', 30, 1000000, 1500, 'gemini', p.id, 'gemma-4-26b-a4b-it', now()
-FROM llm_providers p
-WHERE p.name = 'Google'
-ON CONFLICT (model_id) DO UPDATE SET
-  provider = EXCLUDED.provider,
-  provider_id = EXCLUDED.provider_id,
-  model_name = EXCLUDED.model_name,
-  updated_at = now();
-
 ALTER TABLE model_configs ALTER COLUMN provider_id SET NOT NULL;
 ALTER TABLE model_configs ALTER COLUMN model_name SET NOT NULL;
 ALTER TABLE model_configs ALTER COLUMN rpm DROP NOT NULL;

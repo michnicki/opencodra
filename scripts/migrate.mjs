@@ -335,34 +335,6 @@ async function ensureModelCatalog() {
     `,
   );
 
-  await query(
-    `
-      INSERT INTO model_configs (model_id, provider, provider_id, model_name, updated_at)
-      SELECT 'gemma-4-31b-it', 'gemini', p.id, 'gemma-4-31b-it', now()
-      FROM llm_providers p
-      WHERE p.name = 'Google'
-      ON CONFLICT (model_id) DO UPDATE SET
-        provider = EXCLUDED.provider,
-        provider_id = EXCLUDED.provider_id,
-        model_name = EXCLUDED.model_name,
-        updated_at = now()
-    `,
-  );
-
-  await query(
-    `
-      INSERT INTO model_configs (model_id, provider, provider_id, model_name, updated_at)
-      SELECT 'gemma-4-26b-a4b-it', 'gemini', p.id, 'gemma-4-26b-a4b-it', now()
-      FROM llm_providers p
-      WHERE p.name = 'Google'
-      ON CONFLICT (model_id) DO UPDATE SET
-        provider = EXCLUDED.provider,
-        provider_id = EXCLUDED.provider_id,
-        model_name = EXCLUDED.model_name,
-        updated_at = now()
-    `,
-  );
-
   await query('DELETE FROM model_configs WHERE model_id = $1', [kimiK25Model]);
 
   await query('ALTER TABLE model_configs ALTER COLUMN provider_id SET NOT NULL');

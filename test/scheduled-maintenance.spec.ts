@@ -60,4 +60,17 @@ describe('scheduled() cron maintenance gating', () => {
     // Flag retained -> the cron keeps maintaining the still-active job(s).
     expect(await env.APP_KV.get('system:active_jobs')).toBe('1');
   });
+
+  it('markSystemActive writes the flag only once while it is set (no per-chunk KV write storm)', async () => {
+    const { markSystemActive } = await import('@server/db/jobs');
+    const env = createTestEnv();
+    const putSpy = vi.spyOn(env.APP_KV, 'put');
+
+    await markSystemActive(env); // flag absent -> one write
+    await markSystemActive(env); // flag present -> skipped
+    await markSystemActive(env); // still present -> skipped
+
+    expect(putSpy).toHaveBeenCalledTimes(1);
+    expect(await env.APP_KV.get('system:active_jobs')).toBe('1');
+  });
 });

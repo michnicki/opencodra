@@ -567,6 +567,37 @@ export class GitHubClient {
     });
   }
 
+  // Returns a review this app already posted on the given commit, if one exists. Used by finalize
+  // ONLY when re-running after a prior attempt reached the posting stage, to avoid double-posting a
+  // review when the earlier invocation died in the narrow window between createReview() succeeding
+  // and completeJob() recording the review id (e.g. a subrequest-budget error). One GET, first page
+  // of 100 -- enough for the guard on any realistic PR (a PR with >100 reviews is pathological).
+  async findBotReviewForCommit(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    commitSha: string,
+    botLogin: string,
+  ): Promise<{ id: number } | null> {
+    return withRetry(`findBotReviewForCommit ${owner}/${repo}#${pullNumber}`, async () => {
+      const response = await this.requestAndCheck(
+        `${repoApiPath(owner, repo)}/pulls/${pullNumber}/reviews?per_page=100`,
+      );
+      const reviews = (await response.json()) as Array<{
+        id: number;
+        commit_id?: string | null;
+        user?: { login?: string | null } | null;
+      }>;
+      const login = botLogin.toLowerCase();
+      const match = reviews.find(
+        (review) =>
+          review.commit_id === commitSha &&
+          (review.user?.login ?? '').toLowerCase().startsWith(login),
+      );
+      return match ? { id: match.id } : null;
+    });
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return withRetry(`ensureLabel ${owner}/${repo} ${name}`, async () => {
       const listResponse = await this.request(`${repoApiPath(owner, repo)}/labels/${encodeURIComponent(name)}`);
