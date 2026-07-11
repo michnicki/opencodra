@@ -1,6 +1,5 @@
 import type {
   AuthSessionResponse,
-  DlqResponse,
   JobDetailResponse,
   JobsResponse,
   ModelConfigsResponse,
@@ -11,7 +10,7 @@ import type {
   SyncReposResponse,
   UpdatesEmailResponse,
 } from '@shared/api';
-import type { LlmApiFormat, LlmProvider, ModelConfig, RepoConfig } from '@shared/schema';
+import type { LlmApiFormat, LlmProvider, RepoConfig, ReviewSettings } from '@shared/schema';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -24,7 +23,6 @@ function pathSegment(value: string) {
 }
 
 type QueryValue = string | number | boolean | null | undefined;
-export type ModelConfigPayload = Pick<ModelConfig, 'providerId' | 'modelName' | 'rpm' | 'tpm' | 'rpd'>;
 export type ProviderPayload = {
   name: string;
   apiFormat: LlmApiFormat;
@@ -174,6 +172,21 @@ export const api = {
       method: 'POST',
     });
   },
+  rerunJob(id: string) {
+    return request<RetryJobResponse>(`/api/jobs/${pathSegment(id)}/rerun`, {
+      method: 'POST',
+    });
+  },
+  stopJob(id: string) {
+    return request<RetryJobResponse>(`/api/jobs/${pathSegment(id)}/stop`, {
+      method: 'POST',
+    });
+  },
+  deleteJob(id: string) {
+    return request<void>(`/api/jobs/${pathSegment(id)}`, {
+      method: 'DELETE',
+    });
+  },
   getRepos() {
     return request<RepoConfigsResponse>('/api/repos');
   },
@@ -189,21 +202,6 @@ export const api = {
       method: 'POST',
     });
   },
-  getDlqMessages(limit = 20) {
-    return request<DlqResponse>(`/api/dlq?limit=${limit}`);
-  },
-  replayDlqMessages(leaseIds: string[]) {
-    return request<{ replayedCount: number }>('/api/dlq/replay', {
-      method: 'POST',
-      body: JSON.stringify({ lease_ids: leaseIds }),
-    });
-  },
-  purgeDlqMessages(leaseIds: string[]) {
-    return request<{ purged: number }>('/api/dlq/purge', {
-      method: 'POST',
-      body: JSON.stringify({ lease_ids: leaseIds }),
-    });
-  },
   updateRepoConfig(owner: string, repo: string, config: RepoConfigPatch) {
     return request<{ ok: boolean }>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config`, {
       method: 'PATCH',
@@ -216,17 +214,6 @@ export const api = {
   refreshModelCatalog() {
     return request<ModelConfigsResponse>('/api/models/sync', {
       method: 'POST',
-    });
-  },
-  updateModelConfig(id: string, config: ModelConfigPayload) {
-    return request<{ ok: boolean; config: ModelConfig }>(`/api/models/${pathSegment(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(config),
-    });
-  },
-  deleteModelConfig(id: string) {
-    return request<{ ok: boolean }>(`/api/models/${pathSegment(id)}`, {
-      method: 'DELETE',
     });
   },
   createProvider(config: ProviderPayload) {
@@ -246,11 +233,6 @@ export const api = {
       method: 'DELETE',
     });
   },
-  testModelConfig(id: string) {
-    return request<{ ok: boolean; modelUsed: string; provider: string; inputTokens: number; outputTokens: number }>(`/api/models/${pathSegment(id)}/test`, {
-      method: 'POST',
-    });
-  },
   getGlobalConfig() {
     return request<{ config: RepoConfig['model'] }>('/api/models/global');
   },
@@ -258,6 +240,15 @@ export const api = {
     return request<{ ok: boolean }>('/api/models/global', {
       method: 'PATCH',
       body: JSON.stringify(config),
+    });
+  },
+  getReviewSettings() {
+    return request<{ settings: ReviewSettings }>('/api/settings');
+  },
+  updateReviewSettings(settings: ReviewSettings) {
+    return request<{ ok: boolean; settings: ReviewSettings }>('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(settings),
     });
   },
 };

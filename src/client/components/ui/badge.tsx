@@ -47,6 +47,7 @@ function getTone(value: string): BadgeVariant {
       return 'danger';
     case 'queued':
     case 'superseded':
+    case 'cancelled':
       return 'neutral';
     default:
       return 'neutral';

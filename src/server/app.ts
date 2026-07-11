@@ -10,8 +10,8 @@ import { createAuthApiRouter } from '@server/routes/api/auth';
 import { createJobsRouter } from '@server/routes/api/jobs';
 import { createReposRouter } from '@server/routes/api/repos';
 import { createStatsRouter } from '@server/routes/api/stats';
-import { createDlqRouter } from '@server/routes/api/dlq';
 import { createModelsRouter } from '@server/routes/api/models';
+import { createSettingsRouter } from '@server/routes/api/settings';
 
 async function serveIndex(c: Context<AppEnv>) {
   return c.env.ASSETS.fetch(new URL('/index.html', c.req.url));
@@ -34,8 +34,8 @@ export function createApp() {
   app.route('/api/jobs', createJobsRouter());
   app.route('/api/repos', createReposRouter());
   app.route('/api/stats', createStatsRouter());
-  app.route('/api/dlq', createDlqRouter());
   app.route('/api/models', createModelsRouter());
+  app.route('/api/settings', createSettingsRouter());
 
   app.get('/login', serveIndex);
   app.get('/', serveIndex); // Unauthenticated landing page

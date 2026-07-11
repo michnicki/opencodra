@@ -10,6 +10,7 @@ export default defineConfig({
       '@client': resolve(__dirname, './src/client'),
       '@shared': resolve(__dirname, './src/shared'),
       '@': resolve(__dirname, './src/client'),
+      'cloudflare:workers': resolve(__dirname, './test/mocks/cloudflare-workers.ts'),
     },
   },
   test: {

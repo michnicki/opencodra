@@ -9,11 +9,7 @@ import { JobDetailSkeleton } from '@client/components/features/job-detail/job-sk
 import { Alert } from '@client/components/ui/alert';
 import type { FileReviewRecord } from '@shared/schema';
 
-function fmtMs(ms: number | null) {
-  if (ms === null) return null;
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
+import { formatDuration } from '@client/lib/utils';
 
 function fmtK(n: number | null) {
   if (n === null) return null;
@@ -37,7 +33,7 @@ const STATUS_META: Record<FileStatus, {
 function FileCard({ file }: { file: FileReviewRecord }) {
   const meta = STATUS_META[file.fileStatus] ?? STATUS_META.pending;
   const { Icon } = meta;
-  const duration = fmtMs(file.durationMs);
+  const duration = formatDuration(file.durationMs);
   const inTok    = fmtK(file.inputTokens);
   const outTok   = fmtK(file.outputTokens);
   const modelShort = file.modelUsed?.split('/').pop() ?? null;

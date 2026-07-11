@@ -196,9 +196,22 @@ export class GitHubClient {
     private readonly tracker?: { incrementSubrequests(count?: number): void },
   ) {}
 
+  // In-memory token cache scoped to this client instance (i.e. one Worker invocation). Without it,
+  // every GitHub request re-read the token from KV -- a wasted subrequest per call. A finalize or
+  // review invocation makes many GitHub calls, so that repeated KV read pushed the invocation toward
+  // the Workers-Free 50-subrequest cap (finalize could tip over it right before posting the review).
+  private memoToken: InstallationTokenCacheRecord | null = null;
+
   async getInstallationToken(): Promise<string> {
+    // Reuse the in-memory token while it's comfortably unexpired (invocations are < ~120s; tokens
+    // last ~1h, so this holds for the whole invocation) -- no KV read, no network call.
+    if (this.memoToken?.token && new Date(this.memoToken.expiresAt).getTime() > Date.now() + 60_000) {
+      return this.memoToken.token;
+    }
+
     const cached = await readCachedInstallationToken(this.env, this.installationId, this.tracker);
     if (cached?.token) {
+      this.memoToken = cached;
       return cached.token;
     }
 
@@ -229,10 +242,12 @@ export class GitHubClient {
       }
 
       const data = (await response.json()) as { token: string; expires_at: string };
-      await writeCachedInstallationToken(this.env, this.installationId, {
+      const record: InstallationTokenCacheRecord = {
         token: data.token,
         expiresAt: data.expires_at,
-      }, this.tracker);
+      };
+      await writeCachedInstallationToken(this.env, this.installationId, record, this.tracker);
+      this.memoToken = record;
 
       return data.token;
     });
@@ -462,7 +477,7 @@ export class GitHubClient {
       title: string;
       summary: string;
       status?: 'in_progress' | 'completed';
-      conclusion?: 'success' | 'neutral' | 'failure';
+      conclusion?: 'success' | 'neutral' | 'failure' | 'cancelled';
     },
   ) {
     return withRetry(`updateCheckRun ${owner}/${repo} ${checkRunId}`, async () => {
@@ -549,6 +564,37 @@ export class GitHubClient {
       }
 
       return (await response.json()) as { id: number };
+    });
+  }
+
+  // Returns a review this app already posted on the given commit, if one exists. Used by finalize
+  // ONLY when re-running after a prior attempt reached the posting stage, to avoid double-posting a
+  // review when the earlier invocation died in the narrow window between createReview() succeeding
+  // and completeJob() recording the review id (e.g. a subrequest-budget error). One GET, first page
+  // of 100 -- enough for the guard on any realistic PR (a PR with >100 reviews is pathological).
+  async findBotReviewForCommit(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    commitSha: string,
+    botLogin: string,
+  ): Promise<{ id: number } | null> {
+    return withRetry(`findBotReviewForCommit ${owner}/${repo}#${pullNumber}`, async () => {
+      const response = await this.requestAndCheck(
+        `${repoApiPath(owner, repo)}/pulls/${pullNumber}/reviews?per_page=100`,
+      );
+      const reviews = (await response.json()) as Array<{
+        id: number;
+        commit_id?: string | null;
+        user?: { login?: string | null } | null;
+      }>;
+      const login = botLogin.toLowerCase();
+      const match = reviews.find(
+        (review) =>
+          review.commit_id === commitSha &&
+          (review.user?.login ?? '').toLowerCase().startsWith(login),
+      );
+      return match ? { id: match.id } : null;
     });
   }
 

@@ -55,19 +55,6 @@ export type SyncReposResponse = {
   synced: string[];
 };
 
-export type DlqMessage = {
-  lease_id: string;
-  body: unknown;
-  metadata: {
-    attempts: number;
-    timestamp: string;
-  };
-};
-
-export type DlqResponse = {
-  messages: DlqMessage[];
-  count: number;
-};
 
 export type ModelConfigsResponse = {
   providers: import('./schema').LlmProvider[];

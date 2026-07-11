@@ -1,6 +1,7 @@
 import { createApp } from '@server/app';
 import { getJobForProcessing, insertJob } from '@server/db/jobs';
 import { insertFileReview } from '@server/db/file-reviews';
+import { queryRows } from '@server/db/client';
 import { getRepoConfigRecord } from '@server/db/repo-configs';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
 import { GitHubClient } from '@server/core/github';
@@ -153,6 +154,126 @@ describe('Dashboard API Suite', () => {
     }, env);
 
     expect(response.status).toBe(404);
+  });
+
+  it('preserves omitted review settings when patching a single setting', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const headers = {
+      Cookie: `codra_session=${token}`,
+      'x-requested-with': 'XMLHttpRequest',
+      'content-type': 'application/json',
+    };
+
+    try {
+      const seed = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'low', maxComments: 5 }),
+      }, env);
+      expect(seed.status).toBe(200);
+
+      const commentsOnly = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ maxComments: 20 }),
+      }, env);
+      expect(commentsOnly.status).toBe(200);
+
+      const afterCommentsOnly = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(afterCommentsOnly.status).toBe(200);
+      await expect(afterCommentsOnly.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'low', maxComments: 20 },
+      });
+
+      const concurrencyOnly = await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'high' }),
+      }, env);
+      expect(concurrencyOnly.status).toBe(200);
+
+      const afterConcurrencyOnly = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(afterConcurrencyOnly.status).toBe(200);
+      await expect(afterConcurrencyOnly.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'high', maxComments: 20 },
+      });
+    } finally {
+      await app.request('/api/settings', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ concurrencyLevel: 'medium', maxComments: 10 }),
+      }, env);
+    }
+  });
+
+  it('returns 400 for malformed review settings JSON', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    const response = await app.request('/api/settings', {
+      method: 'PATCH',
+      headers: {
+        Cookie: `codra_session=${token}`,
+        'x-requested-with': 'XMLHttpRequest',
+        'content-type': 'application/json',
+      },
+      body: '{',
+    }, env);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: 'Invalid review settings.' });
+  });
+
+  it('falls back invalid stored review settings independently', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+
+    try {
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'turbo'),
+          ('review_max_comments', '20')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+
+      const invalidConcurrency = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(invalidConcurrency.status).toBe(200);
+      await expect(invalidConcurrency.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'medium', maxComments: 20 },
+      });
+
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'high'),
+          ('review_max_comments', '999')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+
+      const invalidComments = await app.request('/api/settings', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(invalidComments.status).toBe(200);
+      await expect(invalidComments.json()).resolves.toMatchObject({
+        settings: { concurrencyLevel: 'high', maxComments: 10 },
+      });
+    } finally {
+      await queryRows(
+        env,
+        `INSERT INTO global_settings (key, value) VALUES
+          ('review_concurrency_level', 'medium'),
+          ('review_max_comments', '10')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+    }
   });
 
   it('rejects logout without the CSRF header', async () => {
@@ -375,9 +496,7 @@ describe('Dashboard API Suite', () => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        rpm: -1,
-        tpm: Number.NaN,
-        rpd: 100,
+        providerId: 'not-a-uuid',
         provider: 'unknown',
       }),
     }, env);
@@ -491,7 +610,7 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as ModelConfigsResponse;
     const discoveredGoogleModel = data.configs.find(config => config.modelName === discoveredModelName);
-    expect(discoveredGoogleModel).toMatchObject({ rpm: null, rpd: null, tpm: null });
+    expect(discoveredGoogleModel).toMatchObject({ modelName: discoveredModelName, apiFormat: 'gemini' });
     expect(data.configs.some(config => config.providerName === 'Cloudflare' && config.modelName === '@cf/openai/gpt-oss-120b')).toBe(true);
     expect(data.syncErrors).toEqual([]);
   });
@@ -519,7 +638,7 @@ describe('Dashboard API Suite', () => {
     const env = createTestEnv();
     const token = await getAuthCookie(env);
     await saveTestProviderApiKey(env);
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({
       error: {
         code: 429,
         message: 'Quota exceeded. Please retry later.',
@@ -585,7 +704,8 @@ describe('Dashboard API Suite', () => {
     }, env);
 
     expect(response.status).toBe(502);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // GEMINI_MAX_RETRIES = 2, so a persistent 5xx is attempted 3 times before giving up.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const data = await response.json() as { error: string };
     expect(data.error).toContain('Internal error encountered.');
   });
@@ -838,6 +958,76 @@ describe('Dashboard API Suite', () => {
         },
       ],
     });
+  });
+
+  it('stops an ongoing job: marks it cancelled and terminates the workflow', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `stop-${Date.now()}`, prNumber: 1,
+      prTitle: 'Stop', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${job.id}/stop`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { job: { status: string } };
+    expect(body.job.status).toBe('cancelled');
+    expect((env.REVIEW_WORKFLOW as any).terminated).toContain(job.id);
+
+    const row = await getJobForProcessing(env, job.id);
+    expect(row?.status).toBe('cancelled');
+
+    // Stopping an already-terminal job is a 409.
+    const second = await app.request(`/api/jobs/${job.id}/stop`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+    expect(second.status).toBe(409);
+  });
+
+  it('deletes a job (and it is gone afterwards)', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const job = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `delete-${Date.now()}`, prNumber: 1,
+      prTitle: 'Delete', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${job.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(204);
+    expect(await getJobForProcessing(env, job.id)).toBeNull();
+  });
+
+  it('reruns a job from start: creates a fresh job that does NOT inherit the parent (no retryOfJobId)', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const source = await insertJob(env, {
+      installationId: '123', owner: 'api-test-owner', repo: `rerun-${Date.now()}`, prNumber: 1,
+      prTitle: 'Rerun', prAuthor: 'author', commitSha: 'a'.repeat(40), baseSha: 'b'.repeat(40),
+      trigger: 'auto', headRef: 'feature', baseRef: 'main',
+    });
+
+    const response = await app.request(`/api/jobs/${source.id}/rerun`, {
+      method: 'POST',
+      headers: { Cookie: `codra_session=${token}`, 'x-requested-with': 'XMLHttpRequest' },
+    }, env);
+
+    expect(response.status).toBe(202);
+    const body = await response.json() as { job: { id: string } };
+    expect(body.job.id).not.toBe(source.id);
+    const fresh = await getJobForProcessing(env, body.job.id);
+    // Rerun-from-start must not inherit parent file reviews, so retry_of_job_id stays null.
+    expect(fresh?.retry_of_job_id ?? null).toBeNull();
   });
 
   it('accepts legacy jobId-only queue messages during schema transition', () => {

@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { FileText } from 'lucide-react';
-import { cn } from '@client/lib/utils';
 import type { JobDetail } from '@shared/schema';
 import { reviewSeverities } from '@shared/schema';
+import { Tabs, TabsList, TabsTrigger } from '@client/components/motion/tabs';
 import { FileFinding } from './file-finding';
 import { CommentCard } from './comment-card';
 import { severityConfig } from './constants';
@@ -24,22 +24,16 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">View by</span>
-          <div className="flex rounded-md bg-secondary p-0.5 gap-0.5">
-            {(['files', 'severity'] as const).map((view) => (
-              <button
-                key={view}
-                onClick={() => setViewBy(view)}
-                className={cn(
-                  'rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition-all',
-                  viewBy === view
-                    ? 'bg-card text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                {view}
-              </button>
-            ))}
-          </div>
+          <Tabs value={viewBy} onValueChange={(v) => setViewBy(v as 'files' | 'severity')} variant="segment">
+            <TabsList className="bg-secondary">
+              <TabsTrigger value="files" className="text-xs">
+                Files
+              </TabsTrigger>
+              <TabsTrigger value="severity" className="text-xs">
+                Severity
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </div>
       </div>
 
@@ -59,6 +53,30 @@ export function JobFindingsList({ job }: JobFindingsListProps) {
         </div>
       ) : (
         <div className="flex flex-col gap-4">
+          {job.files.some((f) => f.fileStatus === 'failed') && (
+            <div className="surface surface-static-shadow overflow-hidden">
+              {/* Group header */}
+              <div className="flex items-center gap-2.5 px-5 py-4 border-b border-border">
+                <FileText size={14} strokeWidth={1.75} className="text-danger" />
+                <span className="text-sm font-semibold text-foreground uppercase tracking-wide font-mono">
+                  Failed Files
+                </span>
+                <span
+                  className="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                  style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
+                >
+                  {job.files.filter((f) => f.fileStatus === 'failed').length}
+                </span>
+              </div>
+              {/* Failed files list */}
+              <div className="flex flex-col gap-3 p-5">
+                {job.files.filter((f) => f.fileStatus === 'failed').map((file) => (
+                  <FileFinding key={file.id} file={file} />
+                ))}
+              </div>
+            </div>
+          )}
+
           {reviewSeverities.map((groupName) => {
             const comments = job.files.flatMap((f) =>
               f.parsedComments

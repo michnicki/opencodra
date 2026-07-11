@@ -13,6 +13,10 @@ export async function recoverJobs(env: AppBindings) {
         jobId,
         deliveryId: crypto.randomUUID(),
         phase: 'review',
+        // The job's previous Workflow instance (keyed on jobId) is dead but still exists, so a
+        // same-id create() would be dropped as a duplicate. Force a fresh instance keyed on the new
+        // deliveryId so the recovered job actually resumes instead of climbing recovery_count.
+        forceFreshInstance: true,
       });
     }
 
@@ -28,17 +32,43 @@ export async function recoverJobs(env: AppBindings) {
 }
 
 export async function completeTerminalCheckRuns(env: AppBindings) {
-  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env);
+  // Limit to 1 to avoid Cloudflare's 50 subrequest limit per invocation,
+  // especially when called opportunistically via waitUntil during API polling.
+  // Each job requires multiple subrequests (KV, GitHub API, Hyperdrive).
+  const jobs = await getTerminalJobsNeedingCheckRunCompletion(env, 1);
   for (const job of jobs) {
     if (!job.check_run_id) continue;
 
     try {
       const github = new GitHubService(env, job.installation_id);
+
+      let conclusion: 'success' | 'neutral' | 'failure' | 'cancelled';
+      let title: string;
+      let summary: string;
+      if (job.status === 'done') {
+        // A completed review whose inline check-run update didn't land (e.g. finalize ran out of
+        // subrequest budget). Reconstruct the same conclusion finalize would have posted.
+        const partial = (job.error_msg ?? '').startsWith('Partial review');
+        conclusion = partial ? 'failure' : (job.verdict === 'approve' ? 'success' : 'neutral');
+        title = partial ? 'Review partially failed' : (job.verdict === 'approve' ? 'LGTM' : 'Comments posted');
+        summary = job.error_msg ?? `${job.comment_count ?? 0} inline comments across ${job.file_count ?? 0} files.`;
+      } else {
+        const checkRunPresentation = {
+          superseded: { conclusion: 'neutral' as const, title: 'Review superseded', summary: 'Superseded by a newer commit or job.' },
+          cancelled: { conclusion: 'cancelled' as const, title: 'Review stopped', summary: 'Stopped by user.' },
+          failed: { conclusion: 'failure' as const, title: 'Review failed', summary: 'Review failed.' },
+        };
+        const presentation = checkRunPresentation[job.status as keyof typeof checkRunPresentation] ?? checkRunPresentation.failed;
+        conclusion = presentation.conclusion;
+        title = presentation.title;
+        summary = job.error_msg ?? presentation.summary;
+      }
+
       await github.updateCheckRun(job.owner, job.repo, job.check_run_id, {
         status: 'completed',
-        conclusion: job.status === 'superseded' ? 'neutral' : 'failure',
-        title: job.status === 'superseded' ? 'Review superseded' : 'Review failed',
-        summary: job.error_msg ?? (job.status === 'superseded' ? 'Superseded by a newer commit or job.' : 'Review failed.'),
+        conclusion,
+        title,
+        summary,
       });
       await markJobCheckRunCompleted(env, job.id);
     } catch (error) {

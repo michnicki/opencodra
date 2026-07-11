@@ -271,15 +271,6 @@ async function ensureModelCatalog() {
   await query('ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS provider_id UUID');
   await query('ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS model_name TEXT');
 
-  await query('ALTER TABLE model_configs ALTER COLUMN rpm DROP NOT NULL');
-  await query('ALTER TABLE model_configs ALTER COLUMN tpm DROP NOT NULL');
-  await query('ALTER TABLE model_configs ALTER COLUMN rpd DROP NOT NULL');
-  await query(`
-    UPDATE model_configs
-    SET rpm = NULL, tpm = NULL, rpd = NULL, updated_at = now()
-    WHERE rpm = 1 AND tpm = 1 AND rpd = 1
-  `);
-
   await query(
     `
       UPDATE model_configs mc
@@ -317,14 +308,11 @@ async function ensureModelCatalog() {
 
   await query(
     `
-      INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-      SELECT $1, 10, 131072, 300, 'cloudflare', p.id, $1, now()
+      INSERT INTO model_configs (model_id, provider, provider_id, model_name, updated_at)
+      SELECT $1, 'cloudflare', p.id, $1, now()
       FROM llm_providers p
       WHERE p.name = 'Cloudflare'
       ON CONFLICT (model_id) DO UPDATE SET
-        rpm = EXCLUDED.rpm,
-        tpm = EXCLUDED.tpm,
-        rpd = EXCLUDED.rpd,
         provider = EXCLUDED.provider,
         provider_id = EXCLUDED.provider_id,
         model_name = EXCLUDED.model_name,
@@ -335,41 +323,10 @@ async function ensureModelCatalog() {
 
   await query(
     `
-      INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-      SELECT '@cf/zai-org/glm-4.7-flash', 20, 131072, 600, 'cloudflare', p.id, '@cf/zai-org/glm-4.7-flash', now()
+      INSERT INTO model_configs (model_id, provider, provider_id, model_name, updated_at)
+      SELECT '@cf/zai-org/glm-4.7-flash', 'cloudflare', p.id, '@cf/zai-org/glm-4.7-flash', now()
       FROM llm_providers p
       WHERE p.name = 'Cloudflare'
-      ON CONFLICT (model_id) DO UPDATE SET
-        rpm = EXCLUDED.rpm,
-        tpm = EXCLUDED.tpm,
-        rpd = EXCLUDED.rpd,
-        provider = EXCLUDED.provider,
-        provider_id = EXCLUDED.provider_id,
-        model_name = EXCLUDED.model_name,
-        updated_at = now()
-    `,
-  );
-
-  await query(
-    `
-      INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-      SELECT 'gemma-4-31b-it', 15, 1000000, 1500, 'gemini', p.id, 'gemma-4-31b-it', now()
-      FROM llm_providers p
-      WHERE p.name = 'Google'
-      ON CONFLICT (model_id) DO UPDATE SET
-        provider = EXCLUDED.provider,
-        provider_id = EXCLUDED.provider_id,
-        model_name = EXCLUDED.model_name,
-        updated_at = now()
-    `,
-  );
-
-  await query(
-    `
-      INSERT INTO model_configs (model_id, rpm, tpm, rpd, provider, provider_id, model_name, updated_at)
-      SELECT 'gemma-4-26b-a4b-it', 30, 1000000, 1500, 'gemini', p.id, 'gemma-4-26b-a4b-it', now()
-      FROM llm_providers p
-      WHERE p.name = 'Google'
       ON CONFLICT (model_id) DO UPDATE SET
         provider = EXCLUDED.provider,
         provider_id = EXCLUDED.provider_id,

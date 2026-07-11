@@ -277,7 +277,7 @@ dbDescribe('resumable queue primitives', () => {
 });
 
 describe('queue handler', () => {
-  it('retries invalid messages instead of acknowledging them', async () => {
+  it('drops invalid messages by acknowledging them', async () => {
     const env = createTestEnv();
     const message = {
       body: { bad: true },
@@ -287,7 +287,7 @@ describe('queue handler', () => {
 
     await worker.queue({ messages: [message] } as any, env, {} as ExecutionContext);
 
-    expect(message.retry).toHaveBeenCalledTimes(1);
-    expect(message.ack).not.toHaveBeenCalled();
+    expect(message.ack).toHaveBeenCalledTimes(1);
+    expect(message.retry).not.toHaveBeenCalled();
   });
 });

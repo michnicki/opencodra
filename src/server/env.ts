@@ -1,7 +1,7 @@
 import type { ReviewJobMessage } from '@shared/schema';
 
 export interface WorkersAiBinding {
-  run(model: string, input: Record<string, unknown>): Promise<any>;
+  run(model: string, input: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<any>;
 }
 
 export interface QueueProducer<T> {
@@ -29,6 +29,7 @@ export interface AppBindings {
   AI: WorkersAiBinding;
   APP_KV: KVNamespace;
   REVIEW_QUEUE: QueueProducer<ReviewJobMessage>;
+  REVIEW_WORKFLOW: Workflow;
   ASSETS: AssetsBinding;
   HYPERDRIVE: HyperdriveBinding;
   APP_PRIVATE_KEY: string;
@@ -45,7 +46,6 @@ export interface AppBindings {
   ENVIRONMENT: string;
   CF_API_TOKEN: string;
   CF_ACCOUNT_ID: string;
-  CF_DLQ_ID: string;
 }
 
 export interface AppVariables {

@@ -19,6 +19,7 @@ import './app.css';
 
 import { ThemeProvider } from './lib/theme';
 import { useIsDarkMode } from './hooks/use-is-dark-mode';
+import { SmoothScroll } from './components/motion/smooth-scroll';
 
 function ToasterWrapper() {
   const isDark = useIsDarkMode();
@@ -26,7 +27,6 @@ function ToasterWrapper() {
     <Toaster
       theme={isDark ? 'dark' : 'light'}
       position="bottom-right"
-      richColors
       closeButton
       gap={8}
       toastOptions={{
@@ -112,8 +112,10 @@ const router = createBrowserRouter([
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
-      <RouterProvider router={router} />
-      <ToasterWrapper />
+      <SmoothScroll root lerp={0.16} duration={0.9}>
+        <RouterProvider router={router} />
+        <ToasterWrapper />
+      </SmoothScroll>
     </ThemeProvider>
   </React.StrictMode>,
 );

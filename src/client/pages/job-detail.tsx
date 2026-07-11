@@ -10,7 +10,16 @@ import { Alert } from '@client/components/ui/alert';
 
 export function JobDetailPage() {
   const { id = '' } = useParams();
-  const { job, error, isRetrying, handleRetry } = useJobDetail(id);
+  const {
+    job,
+    error,
+    isRerunning,
+    isStopping,
+    isDeleting,
+    handleRerun,
+    handleStop,
+    handleDelete,
+  } = useJobDetail(id);
 
   if (!job) {
     return <JobDetailSkeleton error={error} />;
@@ -18,10 +27,14 @@ export function JobDetailPage() {
 
   return (
     <section className="flex flex-col gap-6">
-      <JobHeader 
-        job={job} 
-        isRetrying={isRetrying} 
-        onRetry={handleRetry} 
+      <JobHeader
+        job={job}
+        isRerunning={isRerunning}
+        isStopping={isStopping}
+        isDeleting={isDeleting}
+        onRerun={handleRerun}
+        onStop={handleStop}
+        onDelete={handleDelete}
       />
 
       {error && (

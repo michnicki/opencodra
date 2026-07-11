@@ -4,6 +4,7 @@ import { reviewWithCloudflare } from '@server/models/cloudflare';
 import { reviewWithGoogle } from '@server/models/google';
 import { createTestEnv, saveTestProviderApiKey } from './helpers';
 import { defaultRepoConfig } from '@shared/schema';
+import { TokenTracker } from '@server/core/token-tracker';
 
 describe('ModelService', () => {
   afterEach(() => {
@@ -60,7 +61,7 @@ describe('ModelService', () => {
     })).toThrow('No review model strategy is configured');
   });
 
-  it('turns Cloudflare reasoning-only responses into inconclusive review JSON', async () => {
+  it('fails (throws) on a Cloudflare reasoning-only response instead of faking an inconclusive review', async () => {
     const env = createTestEnv({
       AI: {
         async run() {
@@ -80,18 +81,14 @@ describe('ModelService', () => {
       } as any,
     });
 
-    const response = await reviewWithCloudflare(env, '@cf/moonshotai/kimi-k2.6', {
-      systemPrompt: 'system',
-      userPrompt: 'user',
-    });
-    const parsed = JSON.parse(response.rawText);
-
-    expect(parsed.findings).toEqual([]);
-    expect(parsed.overall_correctness).toBe('patch is incorrect');
-    expect(parsed.overall_explanation).toContain('inconclusive');
+    // The file was not actually reviewed, so this must surface as a failure (to be marked failed
+    // after the fallback chain), not a synthesized "inconclusive" pass.
+    await expect(
+      reviewWithCloudflare(env, '@cf/moonshotai/kimi-k2.6', { systemPrompt: 'system', userPrompt: 'user' }),
+    ).rejects.toThrow(/no reviewable output.*reasoning-only/i);
   });
 
-  it('does not parse Cloudflare reasoning as review JSON when final content is missing', async () => {
+  it('throws when Cloudflare final content is missing (does not parse reasoning as review JSON)', async () => {
     const env = createTestEnv({
       AI: {
         async run() {
@@ -111,14 +108,9 @@ describe('ModelService', () => {
       } as any,
     });
 
-    const response = await reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
-      systemPrompt: 'system',
-      userPrompt: 'user',
-    });
-    const parsed = JSON.parse(response.rawText);
-
-    expect(parsed.findings).toEqual([]);
-    expect(parsed.overall_explanation).toContain('reasoning-only response');
+    await expect(
+      reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', { systemPrompt: 'system', userPrompt: 'user' }),
+    ).rejects.toThrow(/no reviewable output/i);
   });
 
   it('asks Cloudflare chat models for strict review JSON', async () => {
@@ -187,6 +179,69 @@ describe('ModelService', () => {
     expect(response.rawText).toContain('"findings"');
   });
 
+  it('caps the Retry-After sleep for Google 429 responses at the max in-call retry delay', async () => {
+    // A 429 carries retry-after: 7s, but the in-call sleep is capped at GEMINI_MAX_RETRY_DELAY_MS
+    // (5s) -- a longer cool-off is handled by deferring the file to a fresh invocation, not by
+    // pinning a gate slot in-call. So the retry must fire at 5s, not 7s.
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ error: { code: 429, message: 'Rate limited.' } }),
+            { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '7' } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+              usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+
+      const promise = reviewWithGoogle(
+        { apiKey: 'test-key' },
+        'gemma-4-31b-it',
+        { systemPrompt: 'system', userPrompt: 'user' },
+      );
+      promise.catch(() => {});
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const response = await promise;
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(response.rawText).toContain('"findings"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry TypeErrors thrown after a successful Google response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => {
+        throw new TypeError('parser exploded after response');
+      },
+    } as unknown as Response);
+
+    await expect(
+      reviewWithGoogle(
+        { apiKey: 'test-key' },
+        'gemma-4-31b-it',
+        { systemPrompt: 'system', userPrompt: 'user' },
+      ),
+    ).rejects.toThrow('parser exploded after response');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not spend an extra queue slice retrying the same Cloudflare model inline', async () => {
     let attempts = 0;
     const env = createTestEnv({
@@ -207,33 +262,50 @@ describe('ModelService', () => {
     expect(attempts).toBe(1);
   });
 
+  it('aborts and fails fast (as a retryable timeout) when a Cloudflare model hangs past the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const env = createTestEnv({
+        AI: {
+          run(_model: string, _request: any, options?: { signal?: AbortSignal }) {
+            capturedSignal = options?.signal;
+            // Model never responds -- only the timeout can end this call.
+            return new Promise(() => {});
+          },
+        } as any,
+      });
+
+      const promise = reviewWithCloudflare(env, '@cf/zai-org/glm-4.7-flash', {
+        systemPrompt: 'system',
+        userPrompt: 'user',
+      });
+      // Prevent an unhandled-rejection warning while the timer is still pending.
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(45_000);
+
+      await expect(promise).rejects.toThrow('timed out after 45000ms');
+      // The underlying Workers-AI request was actually cancelled, not just abandoned.
+      expect(capturedSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('tries the smaller Google fallback after the primary Google model fails', async () => {
     let cloudflareCalls = 0;
+    const gemini500 = () =>
+      new Response(
+        JSON.stringify({ error: { code: 500, message: 'Internal error encountered.', status: 'INTERNAL' } }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      );
+    // GEMINI_MAX_RETRIES = 2, so the primary model makes 3 attempts (initial + 2 retries) before
+    // failing over; then the smaller fallback succeeds on the 4th call.
     const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: 500,
-              message: 'Internal error encountered.',
-              status: 'INTERNAL',
-            },
-          }),
-          { status: 500, headers: { 'content-type': 'application/json' } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: 500,
-              message: 'Internal error encountered.',
-              status: 'INTERNAL',
-            },
-          }),
-          { status: 500, headers: { 'content-type': 'application/json' } },
-        ),
-      )
+      .mockResolvedValueOnce(gemini500())
+      .mockResolvedValueOnce(gemini500())
+      .mockResolvedValueOnce(gemini500())
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -285,12 +357,140 @@ describe('ModelService', () => {
       totalLineCount: 1,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
     expect(String(fetchMock.mock.calls[1][0])).toContain('/models/gemma-4-31b-it:generateContent');
-    expect(String(fetchMock.mock.calls[2][0])).toContain('/models/gemma-4-26b-a4b-it:generateContent');
+    expect(String(fetchMock.mock.calls[2][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(String(fetchMock.mock.calls[3][0])).toContain('/models/gemma-4-26b-a4b-it:generateContent');
     expect(cloudflareCalls).toBe(0);
     expect(response.modelUsed).toBe('gemma-4-26b-a4b-it');
+  });
+
+  it('classifies an exhausted run of Google 5xx failures as retryable (not a permanent file failure)', async () => {
+    // A sustained upstream 5xx outage across every configured model must be deferred and retried on
+    // a fresh budget, not marked permanently failed. Regression guard for isTransientModelFailure
+    // dropping 5xx / "internal error" detection.
+    // Fresh Response per call -- a Response body can only be read once, so a shared instance would
+    // make the 2nd+ fetch fail on an already-consumed body instead of on the 500 under test.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 500, message: 'Internal error encountered.', status: 'INTERNAL' } }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    await expect(
+      service.reviewFile({
+        file: { path: 'src/app.ts', lineCount: 1, hunks: [], isDeleted: false, isBinary: false, isNew: false, previousPath: null },
+        prTitle: 'Test',
+        prDescription: null,
+        config: {
+          ...defaultRepoConfig,
+          model: { main: 'gemma-4-31b-it', fallbacks: ['gemma-4-26b-a4b-it'], size_overrides: [] },
+        },
+        totalLineCount: 1,
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('still tries the primary model even when the shared job budget is already near the subrequest limit', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    tracker.incrementSubrequests(40); // above the near-limit threshold (MAX_SUBREQUESTS 50 - SAFE_MARGIN 25)
+    const service = new ModelService(env, tracker);
+
+    const response = await service.reviewFile({
+      file: {
+        path: 'src/app.ts',
+        lineCount: 1,
+        hunks: [],
+        isDeleted: false,
+        isBinary: false,
+        isNew: false,
+        previousPath: null,
+      },
+      prTitle: 'Test',
+      prDescription: null,
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: ['gemma-4-26b-a4b-it'],
+          size_overrides: [],
+        },
+      },
+      totalLineCount: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+  });
+
+  it('skips remaining fallback models (instead of spending more of the shared budget) once near the subrequest limit', async () => {
+    // Google's client retries a 5xx once internally before giving up on a model, so the
+    // primary model alone can issue more than one raw fetch call; return a fresh Response for
+    // every call so retries do not reuse an already-consumed body. Use a 503/"unavailable"
+    // (a genuinely transient failure) so the near-limit skip produces a retryable deferral --
+    // a 500 "internal error" is now treated as a permanent failure and would not defer.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 503, message: 'The model is overloaded and currently unavailable.', status: 'UNAVAILABLE' } }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    tracker.incrementSubrequests(40); // above the near-limit threshold (MAX_SUBREQUESTS 50 - SAFE_MARGIN 25)
+    const service = new ModelService(env, tracker);
+
+    await expect(
+      service.reviewFile({
+        file: {
+          path: 'src/app.ts',
+          lineCount: 1,
+          hunks: [],
+          isDeleted: false,
+          isBinary: false,
+          isNew: false,
+          previousPath: null,
+        },
+        prTitle: 'Test',
+        prDescription: null,
+        config: {
+          ...defaultRepoConfig,
+          model: {
+            main: 'gemma-4-31b-it',
+            fallbacks: ['gemma-4-26b-a4b-it'],
+            size_overrides: [],
+          },
+        },
+        totalLineCount: 1,
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+
+    // Only the primary model was attempted (possibly with its own internal retry); the
+    // fallback model was skipped rather than risking tipping the shared invocation over
+    // Cloudflare's subrequest cap. The file is deferred for a later retry (via the
+    // RetryableModelError) instead of being burned through here.
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).toContain('/models/gemma-4-31b-it:generateContent');
+    }
   });
 
   it('marks exhausted transient provider failures as retryable for the queue', async () => {
@@ -406,10 +606,10 @@ describe('ModelService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('uses the configured Gemma prompt cap and output token budget on the first attempt', async () => {
-    let requestBody: any = null;
+  it('splits an oversized Gemma diff into capped chunks and reviews each in its own call', async () => {
+    const requestBodies: any[] = [];
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
-      requestBody = JSON.parse(String(init?.body));
+      requestBodies.push(JSON.parse(String(init?.body)));
       return new Response(
         JSON.stringify({
           candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
@@ -456,20 +656,27 @@ describe('ModelService', () => {
       totalLineCount: 500,
     });
 
-    const userPrompt = requestBody.contents[0].parts[0].text as string;
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(requestBody.generationConfig.maxOutputTokens).toBe(4096);
-    expect(userPrompt).toContain('[NOTE: This diff has been truncated from 900 lines to 800 lines for brevity.]');
-    expect(userPrompt).toContain('const value799 = 799;');
-    expect(userPrompt).not.toContain('const value800 = 800;');
-    expect(response.reviewedLineCount).toBe(800);
-    expect(response.wasPromptTruncated).toBe(true);
+    // A 900-line file with the configured 800-line cap is split into two chunks (800 + 100)
+    // and each chunk is reviewed in its own model call instead of the tail being truncated away.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const body of requestBodies) {
+      expect(body.generationConfig.maxOutputTokens).toBe(8192);
+    }
+    const firstPrompt = requestBodies[0].contents[0].parts[0].text as string;
+    expect(firstPrompt).toContain('const value799 = 799;');
+    expect(firstPrompt).not.toContain('const value800 = 800;');
+    const secondPrompt = requestBodies[1].contents[0].parts[0].text as string;
+    expect(secondPrompt).toContain('const value800 = 800;');
+    expect(secondPrompt).toContain('const value899 = 899;');
+    // The whole file is covered across the chunks, so nothing is dropped as truncated.
+    expect(response.reviewedLineCount).toBe(900);
+    expect(response.wasPromptTruncated).toBe(false);
   });
 
-  it('uses a compact Gemma prompt only after a prior transient failure', async () => {
-    let requestBody: any = null;
+  it('applies the compact Gemma prompt cap by producing smaller chunks after a prior transient failure', async () => {
+    const requestBodies: any[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
-      requestBody = JSON.parse(String(init?.body));
+      requestBodies.push(JSON.parse(String(init?.body)));
       return new Response(
         JSON.stringify({
           candidates: [{ content: { parts: [{ text: '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok","overall_confidence_score":0.9}' }] } }],
@@ -517,11 +724,14 @@ describe('ModelService', () => {
       compactPrompt: true,
     });
 
-    const userPrompt = requestBody.contents[0].parts[0].text as string;
-    expect(userPrompt).toContain('[NOTE: This diff has been truncated from 900 lines to 400 lines for brevity.]');
-    expect(userPrompt).toContain('const value399 = 399;');
-    expect(userPrompt).not.toContain('const value400 = 400;');
-    expect(response.reviewedLineCount).toBe(400);
-    expect(response.wasPromptTruncated).toBe(true);
+    // compactPrompt lowers the per-call cap to COMPACT_REVIEW_PROMPT_LINE_CAP (400), so the
+    // 900-line file is split into three chunks (400 + 400 + 100) rather than the two chunks
+    // the full 800-line cap would produce -- the first chunk stops exactly at the compact cap.
+    expect(requestBodies.length).toBe(3);
+    const firstPrompt = requestBodies[0].contents[0].parts[0].text as string;
+    expect(firstPrompt).toContain('const value399 = 399;');
+    expect(firstPrompt).not.toContain('const value400 = 400;');
+    expect(response.reviewedLineCount).toBe(900);
+    expect(response.wasPromptTruncated).toBe(false);
   });
 });
