@@ -82,6 +82,29 @@ export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMes
       }
 
       if (result.action === 'next_phase') {
+        // Hand the next phase to a BRAND-NEW workflow instance when this one can no longer get a
+        // clean subrequest budget. A long-lived instance (large PR -> many continuations over
+        // ~30-60 min) stops hibernating between steps, so its per-invocation budget never resets and
+        // every subsequent step immediately hits Cloudflare's 50-subrequest cap -- stalling the review
+        // and preventing finalize from posting. runReviewJob sets freshInstance when it hit that wall
+        // (a subrequest-limit deferral) or when entering finalize (which needs ~20 subrequests at once).
+        // A fresh instance's first step gets a clean budget, so the job keeps making progress.
+        // (Same-phase retries in the fresh instance are bounded by the continuation ceilings.)
+        if (result.freshInstance) {
+          const nextJobId = result.jobId ?? jobId;
+          if (nextJobId) {
+            const nextPhase = result.phase;
+            await step.do(`enqueue-fresh-${nextPhase}-${attempt}`, async () => {
+              await env.REVIEW_QUEUE.send({
+                jobId: nextJobId,
+                deliveryId: crypto.randomUUID(),
+                phase: nextPhase,
+                forceFreshInstance: true,
+              });
+            });
+            break;
+          }
+        }
         phase = result.phase;
         // Force a 1-second sleep minimum to yield execution back to Cloudflare.
         // This resets the 50 subrequest per-invocation limit between chunks/phases!

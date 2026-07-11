@@ -44,7 +44,16 @@ type PersistedReviewJob = ReturnType<typeof mapJob>;
 export type ReviewJobRunResult =
   | { action: 'ack' }
   | { action: 'retry'; delaySeconds: number }
-  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number };
+  // jobId is the RESOLVED job id (not the delivery id): mention-triggered jobs don't carry a jobId
+  // in the queue message, so the workflow can't otherwise know it. The workflow uses it to re-enqueue
+  // the next phase as a fresh instance.
+  //
+  // freshInstance signals the workflow to run the next phase in a BRAND-NEW instance rather than
+  // continuing this one. It's set when the current instance can't get a usable per-invocation
+  // subrequest budget anymore: either a subrequest-limit deferral (a long-lived instance has stopped
+  // hibernating, so its budget never resets) or the transition into finalize (which needs ~20
+  // subrequests at once to post the review). A fresh instance's first step always gets a clean budget.
+  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number; jobId?: string; freshInstance?: boolean };
 
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
 const JOB_LEASE_SECONDS = 15 * 60;
@@ -395,7 +404,10 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
     if (error instanceof NextPhaseError) {
       await releaseJobLease(env, job.id, leaseOwner);
-      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds };
+      // Finalize needs a fresh instance for a clean subrequest budget to post the review; other
+      // phase transitions (e.g. the per-chunk review yield) stay in this instance and rely on the
+      // normal step.sleep hibernation to reset the budget.
+      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds, jobId: job.id, freshInstance: error.phase === 'finalize' };
     }
 
     if (isRetryableModelError(error)) {
@@ -487,8 +499,8 @@ async function continueOrFailWedgedJob(
       // and fail terminally -- exactly the large-PR "Too many subrequests" failure this guards.
       await resetJobContinuationCount(env, job.id);
       await releaseJobLease(env, job.id, leaseOwner);
-      // Finalize on a fresh invocation/budget -- this invocation is the one that hit the wall.
-      return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS };
+      // Finalize on a fresh instance/budget -- this instance is the one that hit the wall.
+      return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS, jobId: job.id, freshInstance: true };
     } else {
       const message = `Review could not make progress after ${continuationCount} continuation attempts (${reason}). Failing the job to avoid an endless retry loop; re-run it once the underlying provider issue clears.`;
       logger.error(`Review job exceeded the continuation ceiling; failing terminally: ${job.owner}/${job.repo} PR #${job.prNumber}`, {
@@ -503,7 +515,11 @@ async function continueOrFailWedgedJob(
   }
 
   await releaseJobLease(env, job.id, leaseOwner);
-  return { action: 'next_phase', phase, delaySeconds }; // Resume same phase
+  // A subrequest-limit deferral means THIS instance is saturated and won't get a fresh budget by
+  // sleeping (a long-lived instance stops hibernating), so resume the phase in a brand-new instance.
+  // A transient model/provider deferral is not budget-related, so it stays in this instance.
+  const freshInstance = reason.includes('subrequest');
+  return { action: 'next_phase', phase, delaySeconds, jobId: job.id, freshInstance }; // Resume same phase
 }
 
 async function resolveQueuedJob(
@@ -1254,7 +1270,7 @@ async function runFinalizePhase(
         env,
         job.id,
         missingFiles.map((file) => ({ filePath: file.path, diffLineCount: file.lineCount })),
-        { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'Review could not be completed after repeated infrastructure limits' },
+        { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'This file was not reviewed before the review run completed.' },
       );
 
       // Refresh reviews list after inserting the missing ones
@@ -1352,7 +1368,7 @@ async function runFinalizePhase(
   }
 
   const partialErrorMessage = hasFailures
-    ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed after repeated model/provider outages.`
+    ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed.`
     : null;
   // Record the posted review and mark the job done IMMEDIATELY after createReview -- before the
   // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
@@ -1390,7 +1406,7 @@ async function runFinalizePhase(
         status: 'completed',
         conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
         title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
-        summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed after repeated provider outages.` : ''}`,
+        summary: `${finalComments.length} inline comments across ${files.length} files.${hasFailures ? ` ${failedFileCount} file${failedFileCount === 1 ? '' : 's'} could not be reviewed.` : ''}`,
       });
       // Only now is the check run genuinely completed -- record it so the maintenance sweep doesn't
       // redo it. If the update above threw, this line is skipped and completeTerminalCheckRuns will
