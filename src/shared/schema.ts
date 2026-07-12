@@ -7,6 +7,7 @@ export const reviewVerdicts = ['approve', 'comment'] as const;
 export const reviewSeverities = ['P0', 'P1', 'P2', 'P3', 'nit'] as const;
 export const reviewCategories = ['security', 'bugs', 'performance', 'correctness', 'quality'] as const; // Keeping for DB compatibility but will deprecate usage in prompts
 export const llmApiFormats = ['openai', 'anthropic', 'gemini', 'cloudflare-workers-ai'] as const;
+export const vcsProviders = ['github', 'bitbucket'] as const;
 
 export const dateStringSchema = z.union([z.string(), z.date()]).transform((d) => (d instanceof Date ? d.toISOString() : d));
 export const coerceNumberSchema = z.coerce.number();
@@ -166,6 +167,9 @@ export const reviewJobMessageSchema = z.object({
   // Set by lease recovery so the queue consumer creates a FRESH instance (keyed on deliveryId)
   // instead of colliding with the dead instance that is still keyed on jobId.
   forceFreshInstance: z.boolean().optional(),
+  // Optional + defaulted so a queue message enqueued by code that predates this field (no
+  // `provider` key at all) still validates and resolves to 'github' (NREG-03/Pitfall 10).
+  provider: z.enum(vcsProviders).optional().default('github'),
 }).superRefine((message, ctx) => {
   if (message.jobId || message.eventName) {
     return;
@@ -378,7 +382,13 @@ export function normalizeRepoConfig(config: RepoConfig): RepoConfig {
   };
 }
 
-export type ReviewJobMessage = z.infer<typeof reviewJobMessageSchema>;
+// z.input (not z.output/z.infer) -- reviewJobMessageSchema's new `provider` field carries a
+// `.default('github')`, which zod's output type treats as always-present/non-optional. Every
+// consumer of ReviewJobMessage (queue producers constructing a message pre-validation, and the
+// large existing test suite's hand-built fixtures) predates the `provider` field and must keep
+// compiling without supplying it -- z.input models the pre-default shape (`provider` optional),
+// matching how these call sites are actually used (NREG-03/Pitfall 10).
+export type ReviewJobMessage = z.input<typeof reviewJobMessageSchema>;
 export type JobSummary = z.infer<typeof jobSummarySchema>;
 export type FileReviewRecord = z.infer<typeof fileReviewRecordSchema>;
 export type JobDetail = z.infer<typeof jobDetailSchema>;
