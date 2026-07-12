@@ -25,6 +25,7 @@
     "migrate": "node scripts/migrate.mjs",
     "test": "node scripts/test.mjs",
     "test:watch": "vitest",
+    "test:browser": "vitest run --project browser",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
