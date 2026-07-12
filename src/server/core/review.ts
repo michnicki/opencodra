@@ -28,8 +28,8 @@ import {
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 
-import { GitHubService } from '../services/github';
-import { GitHubClient } from './github';
+import { VcsService } from '../services/vcs';
+import type { VcsProvider, VcsPullRequest, VcsUpdateStatusCheckInput } from '../vcs/types';
 import { isRetryableModelError, ModelService } from '../services/model';
 import { FormatterService } from '../services/formatter';
 import { TokenTracker } from './token-tracker';
@@ -379,17 +379,17 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
   const phase = resolved.phase;
   const tracker = new TokenTracker();
-  const github = new GitHubService(env, job.installationId, tracker);
+  const vcs = await VcsService.forRepo(env, job, tracker);
   const model = new ModelService(env, tracker, { jobId: job.id });
   const formatter = new FormatterService(env.APP_URL);
 
   try {
     if (phase === 'prepare') {
-      await runPreparePhase(env, job, leaseOwner, github);
+      await runPreparePhase(env, job, leaseOwner, vcs);
     } else if (phase === 'finalize') {
-      await runFinalizePhase(env, job, leaseOwner, github, formatter);
+      await runFinalizePhase(env, job, leaseOwner, vcs, formatter);
     } else {
-      await runReviewPhase(env, job, leaseOwner, github, model, tracker);
+      await runReviewPhase(env, job, leaseOwner, vcs, model, tracker);
     }
 
     await releaseJobLease(env, job.id, leaseOwner);
@@ -417,7 +417,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'transient model/provider failures');
+      return continueOrFailWedgedJob(env, job, vcs, leaseOwner, phase, delaySeconds, 'transient model/provider failures');
     }
 
     // Running out of this invocation's subrequest budget is not a job failure: every phase is
@@ -438,11 +438,11 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
         phase,
         delaySeconds,
       });
-      return continueOrFailWedgedJob(env, job, github, leaseOwner, phase, delaySeconds, 'per-invocation subrequest limits');
+      return continueOrFailWedgedJob(env, job, vcs, leaseOwner, phase, delaySeconds, 'per-invocation subrequest limits');
     }
 
     logger.error(`Review job failed: ${job.owner}/${job.repo} PR #${job.prNumber}`, error);
-    await failJobAndCheckRun(env, job, github, messageText);
+    await failJobAndCheckRun(env, job, checkRunUpdaterFor(vcs), messageText);
     await releaseJobLease(env, job.id, leaseOwner);
     return { action: 'ack' };
   }
@@ -456,7 +456,7 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 async function continueOrFailWedgedJob(
   env: AppBindings,
   job: PersistedReviewJob,
-  github: GitHubService,
+  vcs: VcsProvider,
   leaseOwner: string,
   phase: 'prepare' | 'review' | 'finalize',
   delaySeconds: number,
@@ -508,7 +508,7 @@ async function continueOrFailWedgedJob(
         continuationCount,
         reason,
       });
-      await failJobAndCheckRun(env, job, github, message);
+      await failJobAndCheckRun(env, job, checkRunUpdaterFor(vcs), message);
       await releaseJobLease(env, job.id, leaseOwner);
       return { action: 'ack' };
     }
@@ -584,8 +584,10 @@ async function resolveQueuedJob(
       const prPayload = payload as PullRequestWebhookPayload;
       if (prPayload.action === 'closed' && repoConfig.parsedJson.review.labels !== false) {
         const labels = repoConfig.parsedJson.review.labels;
-        const gh = new GitHubClient(env, installationId);
-        await gh.removeIssueLabelsIfPresent(
+        // No tracker here (finding 8, ZBC): this path runs before runReviewJob's TokenTracker
+        // exists, replicating today's tracker-less raw-client construction at this site.
+        const cleanupVcs = await VcsService.forProvider(env, { provider: 'github', installationId });
+        await cleanupVcs.labels?.removeIfPresent(
           prPayload.repository.owner.login,
           prPayload.repository.name,
           prPayload.pull_request.number,
@@ -597,17 +599,19 @@ async function resolveQueuedJob(
   }
 
   let resolved = extracted;
-  const githubClient = new GitHubClient(env, installationId);
   if (eventName === 'issue_comment') {
-    const pr = await githubClient.getPullRequest(extracted.owner, extracted.repo, extracted.prNumber);
+    // No tracker here (finding 8, ZBC): this path runs before runReviewJob's TokenTracker
+    // exists, replicating today's tracker-less raw-client construction at this site.
+    const commentVcs = await VcsService.forProvider(env, { provider: 'github', installationId });
+    const pr = await commentVcs.getPullRequest(extracted.owner, extracted.repo, extracted.prNumber);
     resolved = {
       ...extracted,
       prTitle: pr.title,
-      prAuthor: pr.user.login,
-      commitSha: pr.head.sha,
-      baseSha: pr.base.sha,
-      headRef: pr.head.ref,
-      baseRef: pr.base.ref,
+      prAuthor: pr.authorLogin,
+      commitSha: pr.headSha,
+      baseSha: pr.baseSha,
+      headRef: pr.headRef,
+      baseRef: pr.baseRef,
     };
   }
 
@@ -658,10 +662,10 @@ async function runPreparePhase(
   env: AppBindings,
   job: PersistedReviewJob,
   leaseOwner: string,
-  github: GitHubService,
+  vcs: VcsProvider,
 ) {
   await updateJobStep(env, job.id, 'Preparation', { status: 'running' });
-  const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
+  const pr = await vcs.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
 
   // Refresh the cached PR title/author from the live PR: these are snapshotted at job creation and
@@ -669,7 +673,7 @@ async function runPreparePhase(
   try {
     await setJobPullRequestMeta(env, job.id, {
       prTitle: pr.title ?? null,
-      prAuthor: pr.user?.login ?? null,
+      prAuthor: pr.authorLogin ?? null,
     });
   } catch (error) {
     logger.warn(`Failed to refresh PR metadata for job ${job.id}`, error instanceof Error ? error : new Error(String(error)));
@@ -677,16 +681,17 @@ async function runPreparePhase(
 
   let checkRunId = job.checkRunId;
   if (!checkRunId) {
-    const checkRun = await github.createCheckRun(job.owner, job.repo, {
-      headSha: pr.head.sha,
+    const checkRun = await vcs.createStatusCheck(job.owner, job.repo, {
+      headSha: pr.headSha,
       title: 'Review queued',
       summary: 'Codra has started reviewing this pull request.',
     });
-    checkRunId = checkRun.id;
-    await updateJobCheckRun(env, job.id, checkRun.id);
+    // ref -> id at this boundary (D-02); the numeric check_run_id column stays canonical.
+    checkRunId = Number(checkRun.ref);
+    await updateJobCheckRun(env, job.id, checkRunId);
   }
 
-  const files = await getDiffFiles(env, job, github, config);
+  const files = await getDiffFiles(env, job, vcs, config);
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -700,7 +705,7 @@ async function runPreparePhase(
     // Best-effort progress cosmetics only (see runReviewPhase): don't let a failed check-run
     // update block enqueuing the review phase that does the actual work.
     try {
-      await github.updateCheckRun(job.owner, job.repo, checkRunId, {
+      await vcs.updateStatusCheck(job.owner, job.repo, String(checkRunId), {
         title: `Reviewing (0/${files.length})`,
         summary: 'Codra is analyzing changed files.',
       });
@@ -715,18 +720,18 @@ async function runReviewPhase(
   env: AppBindings,
   job: PersistedReviewJob,
   leaseOwner: string,
-  github: GitHubService,
+  vcs: VcsProvider,
   model: ModelService,
   tracker: TokenTracker,
 ) {
   if (!hasCompletedStep(job, 'Preparation')) {
-    await runPreparePhase(env, job, leaseOwner, github);
+    await runPreparePhase(env, job, leaseOwner, vcs);
     return;
   }
 
   await updateJobStep(env, job.id, 'Reviewing Files', { status: 'running' });
 
-  const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
+  const pr = await vcs.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
   const failureModelId = config.model?.main ?? 'unconfigured';
   let failureModelProviderPromise: Promise<string | null> | null = null;
@@ -734,7 +739,7 @@ async function runReviewPhase(
     failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
     return failureModelProviderPromise;
   };
-  const files = await getDiffFiles(env, job, github, config);
+  const files = await getDiffFiles(env, job, vcs, config);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
   const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
@@ -984,7 +989,7 @@ async function runReviewPhase(
     // persisted, so a failure here (e.g. this invocation's subrequest budget is spent) must
     // not stop us from enqueuing the next chunk that finishes the job.
     try {
-      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+      await vcs.updateStatusCheck(job.owner, job.repo, String(job.checkRunId), {
         title: `Reviewing (${completedCount}/${files.length})`,
         summary: 'Codra is continuing this review in the next queue chunk.',
       });
@@ -1086,7 +1091,7 @@ async function reviewAndPersistFile(
   env: AppBindings,
   job: PersistedReviewJob,
   file: ReturnType<typeof parseUnifiedDiff>[number],
-  pr: Awaited<ReturnType<GitHubService['getPullRequest']>>,
+  pr: VcsPullRequest,
   config: RepoConfig,
   totalLineCount: number,
   model: ModelService,
@@ -1246,14 +1251,14 @@ async function runFinalizePhase(
   env: AppBindings,
   job: PersistedReviewJob,
   leaseOwner: string,
-  github: GitHubService,
+  vcs: VcsProvider,
   formatter: FormatterService,
 ) {
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'running' });
 
-  const pr = await github.getPullRequest(job.owner, job.repo, job.prNumber);
+  const pr = await vcs.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
-  const files = await getDiffFiles(env, job, github, config);
+  const files = await getDiffFiles(env, job, vcs, config);
   let reviews = await getFileReviewsForJobs(env, [job.id]);
 
   if (reviews.length < files.length) {
@@ -1330,7 +1335,7 @@ async function runFinalizePhase(
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
-  let formattedSummary = formatter.formatReviewOverview(pr.head.sha, env.BOT_USERNAME);
+  let formattedSummary = formatter.formatReviewOverview(pr.headSha, env.BOT_USERNAME);
 
   if (omittedCount > 0) {
     formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${effectiveMaxComments}). Showing the most critical issues.`;
@@ -1344,13 +1349,14 @@ async function runFinalizePhase(
     (step) => step.name === 'Completing' && (step.status === 'running' || step.status === 'done'),
   );
   await updateJobStep(env, job.id, 'Completing', { status: 'running' });
+  // The interface omits botLogin (Pitfall 5) -- the adapter injects env.BOT_USERNAME internally.
   const existingReview = finalizeRetriedPastPost
-    ? await github.findBotReviewForCommit(job.owner, job.repo, job.prNumber, pr.head.sha, env.BOT_USERNAME)
+    ? await vcs.findExistingReviewForCommit(job.owner, job.repo, job.prNumber, pr.headSha)
     : null;
-  const review = existingReview ?? await github.createReview(job.owner, job.repo, job.prNumber, {
-    commitSha: pr.head.sha,
-    event: formatter.toReviewEvent(verdictSummary.verdict),
-    body: formattedSummary,
+  const review = existingReview ?? await vcs.submitReview(job.owner, job.repo, job.prNumber, {
+    commitSha: pr.headSha,
+    verdict: verdictSummary.verdict,
+    summaryBody: formattedSummary,
     comments: finalComments.map(comment => ({
       path: comment.path,
       position: comment.position ?? undefined,
@@ -1381,7 +1387,8 @@ async function runFinalizePhase(
     totalInputTokens: fileInputTokens,
     totalOutputTokens: fileOutputTokens,
     summaryMarkdown: formattedSummary,
-    reviewId: review.id,
+    // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
+    reviewId: Number(review.ref),
     summaryModel: null,
     errorMessage: partialErrorMessage,
   });
@@ -1402,7 +1409,7 @@ async function runFinalizePhase(
     // Check-run conclusion first: it drives the PR's status badge, so it matters more than labels
     // if the budget only allows one of them.
     if (job.checkRunId) {
-      await github.updateCheckRun(job.owner, job.repo, job.checkRunId, {
+      await vcs.updateStatusCheck(job.owner, job.repo, String(job.checkRunId), {
         status: 'completed',
         conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
         title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
@@ -1414,7 +1421,9 @@ async function runFinalizePhase(
       await markJobCheckRunCompleted(env, job.id);
     }
 
-    if (config.review.labels !== false) {
+    // Bitbucket Cloud has no native PR-labels feature (Pattern 2) -- feature-detect rather than
+    // assume every provider has labels.
+    if (vcs.labels && config.review.labels !== false) {
       const labels = config.review.labels;
       const labelMap = {
         comment: { name: labels.p1, color: 'f79009' },
@@ -1422,15 +1431,15 @@ async function runFinalizePhase(
       } as const;
       const label = labelMap[verdictSummary.verdict];
 
-      await github.removeIssueLabelsIfPresent(
+      await vcs.labels.removeIfPresent(
         job.owner,
         job.repo,
         job.prNumber,
         [labels.p1, labels.p2, labels.p3].filter(possibleLabel => possibleLabel !== label.name),
       );
 
-      await github.ensureLabel(job.owner, job.repo, label.name, label.color);
-      await github.addIssueLabels(job.owner, job.repo, job.prNumber, [label.name]);
+      await vcs.labels.ensure(job.owner, job.repo, label.name, label.color);
+      await vcs.labels.add(job.owner, job.repo, job.prNumber, [label.name]);
     }
   } catch (error) {
     logger.warn(`Post-review labels/check-run update failed for job ${job.id}; review is posted and job is completed, so leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
@@ -1482,14 +1491,14 @@ function diffCacheKey(jobId: string) {
 export async function getDiffFiles(
   env: AppBindings,
   job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
-  github: Pick<GitHubService, 'getPullRequestDiff'>,
+  vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
   config: RepoConfig,
 ) {
   const cacheKey = diffCacheKey(job.id);
   let rawDiff = await env.APP_KV.get(cacheKey);
 
   if (!rawDiff) {
-    rawDiff = await github.getPullRequestDiff(job.owner, job.repo, job.prNumber);
+    rawDiff = await vcs.getPullRequestDiff(job.owner, job.repo, job.prNumber);
     try {
       await env.APP_KV.put(cacheKey, rawDiff, { expirationTtl: DIFF_CACHE_TTL_SECONDS });
     } catch (error) {
@@ -1500,10 +1509,33 @@ export async function getDiffFiles(
   return filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
 }
 
+/**
+ * Local structural type for failJobAndCheckRun's injected collaborator. Deliberately NOT typed
+ * against the (now-removed) direct provider service type, and NOT `Pick<VcsProvider,
+ * 'updateStatusCheck'>` either (review finding 2): test/review-resilience.spec.ts (a PROTECTED
+ * spec) injects `{ updateCheckRun }` and asserts it's called with a NUMERIC checkRunId, so this
+ * collaborator key and call shape must stay byte-identical.
+ */
+type CheckRunUpdater = {
+  updateCheckRun(owner: string, repo: string, checkRunId: number, input: VcsUpdateStatusCheckInput): Promise<void>;
+};
+
+/**
+ * Binds a VcsProvider's string-ref `updateStatusCheck` under the numeric-id `updateCheckRun` key
+ * failJobAndCheckRun's DI contract expects (review finding 2). The `String(checkRunId)` here is
+ * the ref<->id conversion (D-02); end behavior is byte-identical since the adapter maps it back
+ * via `Number(ref)`.
+ */
+function checkRunUpdaterFor(vcs: VcsProvider): CheckRunUpdater {
+  return {
+    updateCheckRun: (owner, repo, checkRunId, input) => vcs.updateStatusCheck(owner, repo, String(checkRunId), input),
+  };
+}
+
 export async function failJobAndCheckRun(
   env: AppBindings,
   job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'checkRunId'>,
-  github: Pick<GitHubService, 'updateCheckRun'>,
+  github: CheckRunUpdater,
   message: string,
 ) {
   // Marking the job failed in the DB is the critical, must-not-lose write: it's what
