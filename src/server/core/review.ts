@@ -699,7 +699,15 @@ async function runPreparePhase(
       summary: 'Codra has started reviewing this pull request.',
     });
     // ref -> id at this boundary (D-02); the numeric check_run_id column stays canonical.
-    checkRunId = Number(checkRun.ref);
+    // Guard the conversion so the GitHub-only assumption is explicit HERE, not just in a distant
+    // comment (WR-03): a non-numeric ref (the Bitbucket case this seam anticipates) would otherwise
+    // write NaN into check_run_id unguarded. Longer term (Phase 4/5) check_run_id likely becomes
+    // `text` to hold opaque refs; until then, fail loudly rather than silently persist NaN.
+    const numericCheckRunId = Number(checkRun.ref);
+    if (!Number.isFinite(numericCheckRunId)) {
+      throw new Error(`Provider ${vcs.name} returned a non-numeric check-run ref: ${checkRun.ref}`);
+    }
+    checkRunId = numericCheckRunId;
     await updateJobCheckRun(env, job.id, checkRunId);
   }
 
@@ -1392,6 +1400,13 @@ async function runFinalizePhase(
   // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
   // label/check-run calls exhaust this invocation's subrequest budget (large PR), we must not leave
   // the job stranded as 'failed' with review_id null. This is the critical, must-not-lose write.
+  // Guard the ref -> id conversion (WR-03): a non-numeric ref (the Bitbucket case this seam
+  // anticipates) would otherwise write NaN into review_id unguarded. Fail loudly here until
+  // review_id becomes `text` to hold opaque refs (Phase 4/5 schema decision).
+  const numericReviewId = Number(review.ref);
+  if (!Number.isFinite(numericReviewId)) {
+    throw new Error(`Provider ${vcs.name} returned a non-numeric review ref: ${review.ref}`);
+  }
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
@@ -1400,7 +1415,7 @@ async function runFinalizePhase(
     totalOutputTokens: fileOutputTokens,
     summaryMarkdown: formattedSummary,
     // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
-    reviewId: Number(review.ref),
+    reviewId: numericReviewId,
     summaryModel: null,
     errorMessage: partialErrorMessage,
   });
