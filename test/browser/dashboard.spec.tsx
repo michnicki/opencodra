@@ -1,13 +1,9 @@
-/**
- * @vitest-environment jsdom
- */
 import { expect, it, describe, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { screen } from '@testing-library/react';
 import { LoginPage } from '@client/pages/login';
 import { DashboardPage } from '@client/pages/dashboard';
-import { MemoryRouter } from 'react-router-dom';
 import { api } from '@client/lib/api';
-import { ThemeProvider } from '@client/lib/theme';
+import { renderPage } from './render';
 
 // Mock the API client
 vi.mock('@client/lib/api', () => ({
@@ -20,7 +16,7 @@ vi.mock('@client/lib/api', () => ({
   }
 }));
 
-describe('Frontend UI Flows (JSDOM)', () => {
+describe('Frontend UI Flows', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -32,13 +28,7 @@ describe('Frontend UI Flows (JSDOM)', () => {
   });
 
   it('renders the GitHub sign-in flow', async () => {
-    render(
-      <ThemeProvider>
-        <MemoryRouter>
-          <LoginPage />
-        </MemoryRouter>
-      </ThemeProvider>
-    );
+    renderPage(<LoginPage />);
 
     const signInLink = screen.getByRole('link', { name: 'Sign in with GitHub' });
     expect(signInLink.getAttribute('href')).toBe('/auth/github');
@@ -77,22 +67,17 @@ describe('Frontend UI Flows (JSDOM)', () => {
       total: 1
     });
 
-    render(
-      <MemoryRouter>
-        <DashboardPage />
-      </MemoryRouter>
-    );
+    renderPage(<DashboardPage />);
 
     // Check for dashboard title (from PageHeader)
-    expect(await screen.findByText('Dashboard')).toBeDefined();
-    
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument();
+
     // Check for stats totals (using data from getStats mock)
-    // Note: fmtNumber might format 500 as "500" or similar
-    expect(screen.getByText('10')).toBeDefined();
-    expect(screen.getByText('500')).toBeDefined();
+    expect(await screen.findByText('10')).toBeInTheDocument();
+    expect(screen.getByText('500')).toBeInTheDocument();
 
     // Check for activity stream item
-    expect(screen.getByText('test-owner/test-repo')).toBeDefined();
-    expect(screen.getByRole('link', { name: 'Fixing bug' })).toBeDefined();
+    expect(await screen.findByText('test-owner/test-repo')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Fixing bug' })).toBeInTheDocument();
   });
 });

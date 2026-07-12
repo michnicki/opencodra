@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { playwright } from '@vitest/browser-playwright';
 import { resolve } from 'path';
 
 export default defineConfig({
@@ -15,9 +16,32 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: 'node',
-    include: ['test/**/*.spec.ts', 'test/**/*.spec.tsx'],
-    setupFiles: ['./test/setup.ts'],
-    fileParallelism: false,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'node',
+          environment: 'node',
+          include: ['test/**/*.spec.ts'],
+          exclude: ['test/browser/**'],
+          setupFiles: ['./test/setup.ts'],
+          fileParallelism: false,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'browser',
+          include: ['test/browser/**/*.spec.tsx'],
+          setupFiles: ['./test/browser/setup.ts'],
+          browser: {
+            enabled: true,
+            headless: true,
+            provider: playwright(),
+            instances: [{ browser: 'chromium' }],
+          },
+        },
+      },
+    ],
   },
 });
