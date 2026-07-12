@@ -1,6 +1,8 @@
 import type { AppBindings } from '@server/env';
 import { encryptLlmApiKey } from '@server/core/llm-crypto';
 import { queryRows } from '@server/db/client';
+import { updateModelConfig } from '@server/db/model-configs';
+import { updateGlobalConfig } from '@server/core/config';
 
 export class MemoryKV {
   private readonly store = new Map<string, string>();
@@ -184,6 +186,66 @@ index 1234567..890abcd 100644
 ${lines.map((l) => `+${l}`).join('\n')}`;
     })
     .join('\n');
+}
+
+/**
+ * Seeds a cached installation token so the real GitHubClient (core/github.ts)
+ * can run without touching APP_PRIVATE_KEY/GITHUB_APP_ID (which throw in
+ * createTestEnv). GitHubClient.getInstallationToken() checks this cache key
+ * before doing any JWT signing.
+ */
+export async function seedInstallationToken(env: AppBindings, installationId: string, token = 'test-installation-token') {
+  await env.APP_KV.put(
+    `install:${installationId}`,
+    JSON.stringify({
+      token,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }),
+  );
+}
+
+/**
+ * Registers a model as the global review strategy so the real ModelService
+ * (services/model.ts) can resolve a model instead of throwing "No review
+ * model strategy is configured".
+ */
+export async function seedDefaultModelStrategy(env: AppBindings, modelId: string, providerName = 'Cloudflare') {
+  const [provider] = await queryRows<{ id: string }>(
+    env,
+    `SELECT id FROM llm_providers WHERE name = $1`,
+    [providerName],
+  );
+  if (!provider) {
+    throw new Error(`Test provider "${providerName}" not found; check that migrations seeded it.`);
+  }
+
+  await updateModelConfig(env, {
+    modelId,
+    providerId: provider.id,
+    modelName: modelId,
+    rpm: null,
+    tpm: null,
+    rpd: null,
+  });
+  await updateGlobalConfig(env, { main: modelId, fallbacks: [], size_overrides: [] });
+}
+
+/**
+ * Signs a raw webhook body the same way GitHub does, for driving /webhook directly.
+ */
+export async function signWebhookPayload(secret: string, payload: string) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+  return `sha256=${Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')}`;
 }
 
 /**
