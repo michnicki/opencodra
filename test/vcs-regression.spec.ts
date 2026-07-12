@@ -13,7 +13,16 @@
 // runReviewJob exit path, so a bug that drops a `releaseJobLease` call surfaces here loudly
 // instead of silently wedging jobs behind a stale lease.
 //
-// Invariants 2 and 3 (forceFreshInstance threading, supersede-on-new-push) are added in Task 2.
+// Invariant 2 (Task 2): the `freshInstance` producer flag on ReviewJobRunResult is set
+// correctly for the phase transitions that need a clean subrequest budget (finalize,
+// subrequest-limit deferrals) and left false for normal in-instance continuations; a
+// lease-recovery-shaped ReviewJobMessage with forceFreshInstance:true round-trips through
+// reviewJobMessageSchema with its PARSED value preserved (review finding 10).
+//
+// Invariant 3 (Task 2): the supersede-on-new-push guard (T-02-02) -- a mid-execution
+// JOB_SUPERSEDED releases the lease and acks, and a newer push for the same PR marks the
+// older in-flight job 'superseded' via supersedeOlderJobs -- so a refactor that drops this
+// guard fails loudly here rather than shipping a stale/duplicate review post.
 
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
@@ -26,7 +35,7 @@ import {
   updateJobStep,
 } from '@server/db/jobs';
 import { upsertFileReview } from '@server/db/file-reviews';
-import { defaultRepoConfig } from '@shared/schema';
+import { defaultRepoConfig, reviewJobMessageSchema } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
 
 const sha = (char: string) => char.repeat(40);
@@ -117,6 +126,23 @@ async function getLeaseOwner(env: ReturnType<typeof createTestEnv>, jobId: strin
   const row = await getJobForProcessing(env, jobId);
   return row?.lease_owner ?? null;
 }
+
+// Schema-level assertion needs no DB, so it runs unconditionally (never skipped by a missing
+// TEST_DATABASE_URL) -- it is the cheapest possible tripwire for the forceFreshInstance producer
+// contract (review finding 10: assert the PARSED value, not merely that parsing succeeds).
+describe('Invariant 2b: forceFreshInstance schema round-trip (no DB required)', () => {
+  it('parses a lease-recovery-shaped message with forceFreshInstance:true and preserves the parsed value', () => {
+    const parsed = reviewJobMessageSchema.parse({
+      deliveryId: 'delivery-lease-recovery',
+      jobId: crypto.randomUUID(),
+      phase: 'review',
+      forceFreshInstance: true,
+    });
+    // Review finding 10: the whole point of this assertion is the parsed VALUE, not that
+    // `.parse()` merely succeeded without throwing.
+    expect(parsed.forceFreshInstance).toBe(true);
+  });
+});
 
 dbDescribe('VCS Regression Safety Net (NREG-01)', () => {
   const env = createTestEnv();
@@ -369,6 +395,187 @@ dbDescribe('VCS Regression Safety Net (NREG-01)', () => {
       // acks WITHOUT ever calling claimJobLease.
       expect(result).toEqual({ action: 'ack' });
       expect(await getLeaseOwner(env, terminalJob.id)).toBeNull();
+    }, REGRESSION_TIMEOUT_MS);
+  });
+
+  describe('Invariant 2: forceFreshInstance producer flag threads correctly', () => {
+    it('sets freshInstance=true for the NextPhaseError transition into finalize', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `vcs-regress-${Date.now()}-freshinstance-finalize`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+
+      const job = await insertJob(env, {
+        installationId: '123', owner: 'test-owner', repo,
+        prNumber: 201, prTitle: 'FreshInstance Finalize', prAuthor: 'author',
+        commitSha: sha('e'), baseSha: sha('f'), trigger: 'auto',
+        headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+      });
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runWithDb(env, async () => {
+        const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-freshinstance-finalize', phase: 'review' });
+        expect(result).toEqual({ action: 'next_phase', phase: 'finalize', delaySeconds: expect.any(Number), jobId: job.id, freshInstance: true });
+      });
+
+      getDiffSpy.mockRestore();
+    }, REGRESSION_TIMEOUT_MS);
+
+    it('sets freshInstance=true for a subrequest-limit deferral via continueOrFailWedgedJob', async () => {
+      const { ModelService } = await import('@server/services/model');
+      const budgetError = new Error('Too many subrequests by single Worker invocation');
+      const reviewSpy = vi.spyOn(ModelService.prototype, 'reviewFile').mockRejectedValue(budgetError);
+      const repo = `vcs-regress-${Date.now()}-freshinstance-subrequest`;
+
+      const job = await insertJob(env, {
+        installationId: '123', owner: 'test-owner', repo,
+        prNumber: 202, prTitle: 'FreshInstance Subrequest', prAuthor: 'author',
+        commitSha: sha('1'), baseSha: sha('2'), trigger: 'auto',
+        headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+      });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runWithDb(env, async () => {
+        const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-freshinstance-subrequest', phase: 'review' });
+        expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: job.id, freshInstance: true });
+      });
+
+      reviewSpy.mockRestore();
+    }, REGRESSION_TIMEOUT_MS);
+
+    it('leaves freshInstance false/absent for a normal in-instance phase continuation', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `vcs-regress-${Date.now()}-ininstance-continuation`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'a' },
+          { path: 'src/two.ts', content: 'b' },
+          { path: 'src/three.ts', content: 'c' },
+        ]),
+      );
+
+      const job = await insertJob(env, {
+        installationId: '123', owner: 'test-owner', repo,
+        prNumber: 203, prTitle: 'In-instance continuation', prAuthor: 'author',
+        commitSha: sha('3'), baseSha: sha('4'), trigger: 'auto',
+        headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+      });
+      // 3 files with the default 'medium' concurrency (chunk limit 2) leaves one file for the
+      // next chunk -- a normal same-instance continuation, distinct from the finalize/subrequest
+      // transitions above that both correctly set freshInstance=true.
+      await updateJobFileCount(env, job.id, 3);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runWithDb(env, async () => {
+        const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-ininstance-continuation', phase: 'review' });
+        expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: job.id, freshInstance: false });
+      });
+
+      getDiffSpy.mockRestore();
+    }, REGRESSION_TIMEOUT_MS);
+  });
+
+  describe('Invariant 3: supersede-on-new-push (T-02-02)', () => {
+    it('a mid-execution JOB_SUPERSEDED releases the lease and returns action:"ack"', async () => {
+      const { ModelService } = await import('@server/services/model');
+      const repo = `vcs-regress-${Date.now()}-supersede-midexec`;
+
+      const job = await insertJob(env, {
+        installationId: '123', owner: 'test-owner', repo,
+        prNumber: 301, prTitle: 'Supersede Mid Exec', prAuthor: 'author',
+        commitSha: sha('5'), baseSha: sha('6'), trigger: 'auto',
+        headRef: 'feature', baseRef: 'main', configSnapshot: defaultRepoConfig,
+      });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const reviewSpy = vi.spyOn(ModelService.prototype, 'reviewFile').mockImplementationOnce(async () => {
+        await queryRows(env, `UPDATE jobs SET status = 'superseded' WHERE id = $1`, [job.id]);
+        return {
+          parsed: { comments: [], verdict: 'approve' as const, fileSummary: 'ok', overallCorrectness: 'no issues', confidenceScore: 0.9 },
+          modelUsed: 'test-model', provider: 'test-provider', inputTokens: 1, outputTokens: 1, rawText: '{}', userPrompt: '',
+          reviewedLineCount: 1, wasPromptTruncated: false,
+        };
+      });
+
+      const result = await runWithDb(env, async () => {
+        return runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-supersede-midexec', phase: 'review' });
+      });
+
+      // This is the supersede invariant itself, not an incidental stop: a job that discovers it
+      // has been superseded mid-chunk must stop cleanly (ack) and release its lease so nothing
+      // is left wedged behind a dead job's lease.
+      expect(result).toEqual({ action: 'ack' });
+      expect(await getLeaseOwner(env, job.id)).toBeNull();
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('superseded');
+      reviewSpy.mockRestore();
+    }, REGRESSION_TIMEOUT_MS);
+
+    it('a newer push marks the older in-flight job "superseded" via supersedeOlderJobs', async () => {
+      const repo = `vcs-regress-${Date.now()}-supersede-newpush`;
+      const olderSha = sha('7');
+      const newerSha = sha('8');
+      const baseSha = sha('9');
+
+      let olderJobId: string | null = null;
+
+      await runWithDb(env, async () => {
+        const firstResult = await runReviewJob(env, {
+          deliveryId: 'delivery-supersede-older',
+          eventName: 'pull_request',
+          payload: {
+            action: 'opened',
+            installation: { id: 123 },
+            repository: { owner: { login: 'test-owner' }, name: repo },
+            pull_request: {
+              number: 302,
+              head: { sha: olderSha, ref: 'feature' },
+              base: { sha: baseSha, ref: 'main' },
+              title: 'Supersede New Push',
+              user: { login: 'author' },
+              draft: false,
+            },
+          },
+        });
+        expect(firstResult.action).toBe('next_phase');
+        if (firstResult.action === 'next_phase') {
+          olderJobId = firstResult.jobId ?? null;
+        }
+      });
+
+      expect(olderJobId).not.toBeNull();
+      const olderBeforeSecondPush = await getJobForProcessing(env, olderJobId!);
+      expect(olderBeforeSecondPush?.status).not.toBe('superseded');
+
+      await runWithDb(env, async () => {
+        await runReviewJob(env, {
+          deliveryId: 'delivery-supersede-newer',
+          eventName: 'pull_request',
+          payload: {
+            action: 'synchronize',
+            installation: { id: 123 },
+            repository: { owner: { login: 'test-owner' }, name: repo },
+            pull_request: {
+              number: 302,
+              head: { sha: newerSha, ref: 'feature' },
+              base: { sha: baseSha, ref: 'main' },
+              title: 'Supersede New Push',
+              user: { login: 'author' },
+              draft: false,
+            },
+          },
+        });
+      });
+
+      const olderJobAfter = await getJobForProcessing(env, olderJobId!);
+      expect(olderJobAfter?.status).toBe('superseded');
     }, REGRESSION_TIMEOUT_MS);
   });
 });
