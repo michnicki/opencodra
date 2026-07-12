@@ -30,8 +30,10 @@ export type VcsCreateStatusCheckInput = {
   headSha: string;
   title: string;
   summary: string;
-  status?: 'in_progress' | 'completed';
-  conclusion?: 'success' | 'neutral' | 'failure' | 'cancelled';
+  // NO `status`/`conclusion` here: creation is always `in_progress` (the GitHub adapter's
+  // `createCheckRun` hardcodes it, and Bitbucket's create is equivalently fixed). Advertising
+  // them on the create input would be a silent no-op the adapter cannot honor (WR-02) --
+  // callers that need a terminal state use `updateStatusCheck`/`VcsUpdateStatusCheckInput`.
 };
 
 /**
