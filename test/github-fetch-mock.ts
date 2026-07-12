@@ -36,6 +36,7 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
   const calls: RecordedGitHubCall[] = [];
   const originalFetch = globalThis.fetch;
   const repoPrefix = `/repos/${fixtures.owner}/${fixtures.repo}`;
+  const reviewsListPath = `${repoPrefix}/pulls/${fixtures.prNumber}/reviews`;
   const reviewResponses = fixtures.reviewResponses ?? [{ status: 200, id: 5150 }];
   let reviewCallIndex = 0;
 
@@ -47,7 +48,9 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
     const url = new URL(rawUrl);
 
     if (url.hostname !== 'api.github.com') {
-      return originalFetch(input as any, init);
+      // core/telemetry.ts fires a real POST to codra.run on every finalize; return a fast synthetic
+      // response instead of letting it reach the real network from a test run.
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
 
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -82,7 +85,13 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
       return json({});
     }
 
-    if (method === 'POST' && url.pathname === `${repoPrefix}/pulls/${fixtures.prNumber}/reviews`) {
+    if (method === 'GET' && url.pathname === reviewsListPath) {
+      // findBotReviewForCommit's existing-review lookup (only hit when a finalize retries past
+      // the posting step). No prior review exists in these fixtures.
+      return json([]);
+    }
+
+    if (method === 'POST' && url.pathname === reviewsListPath) {
       const script = reviewResponses[Math.min(reviewCallIndex, reviewResponses.length - 1)];
       reviewCallIndex += 1;
       if (script.status >= 400) {

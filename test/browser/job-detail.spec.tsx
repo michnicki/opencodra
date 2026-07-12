@@ -10,7 +10,7 @@ import type { JobDetail } from '@shared/schema';
 vi.mock('@client/lib/api', () => ({
   api: {
     getJob: vi.fn(),
-    retryJob: vi.fn(),
+    rerunJob: vi.fn(),
     getUpdatesEmailStatus: vi.fn(),
     subscribeUpdates: vi.fn(),
   },
@@ -140,8 +140,8 @@ describe('JobDetailPage findings and retry', () => {
     expect(screen.getByText('Prefer const over let')).toBeInTheDocument();
   });
 
-  it('triggers a retry when the re-run button is clicked', async () => {
-    vi.mocked(api.retryJob).mockResolvedValue({
+  it('triggers a rerun when the re-run button is clicked', async () => {
+    vi.mocked(api.rerunJob).mockResolvedValue({
       job: { ...JOB, id: 'new-job-id', status: 'queued' } as any,
     });
 
@@ -152,7 +152,7 @@ describe('JobDetailPage findings and retry', () => {
     await user.click(screen.getByRole('button', { name: 'Re-run job' }));
 
     await waitFor(() => {
-      expect(api.retryJob).toHaveBeenCalledWith(JOB_ID);
+      expect(api.rerunJob).toHaveBeenCalledWith(JOB_ID);
     });
   });
 });

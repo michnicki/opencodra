@@ -11,13 +11,11 @@ vi.mock('@client/lib/api', () => ({
   api: {
     getModelConfigs: vi.fn(),
     getGlobalConfig: vi.fn(),
+    getReviewSettings: vi.fn(),
     refreshModelCatalog: vi.fn(),
     updateProvider: vi.fn(),
     createProvider: vi.fn(),
     deleteProvider: vi.fn(),
-    updateModelConfig: vi.fn(),
-    deleteModelConfig: vi.fn(),
-    testModelConfig: vi.fn(),
     updateGlobalConfig: vi.fn(),
     getUpdatesEmailStatus: vi.fn(),
     subscribeUpdates: vi.fn(),
@@ -41,9 +39,6 @@ const MODEL_CONFIG: ModelConfig = {
   providerName: PROVIDER.name,
   apiFormat: 'openai',
   modelName: 'gpt-4o-mini',
-  rpm: null,
-  tpm: null,
-  rpd: null,
   updatedAt: new Date().toISOString(),
 };
 
@@ -62,6 +57,7 @@ describe('SettingsPage provider management', () => {
     vi.mocked(api.getModelConfigs).mockResolvedValue(modelConfigsResponse());
     vi.mocked(api.refreshModelCatalog).mockResolvedValue(modelConfigsResponse());
     vi.mocked(api.getGlobalConfig).mockResolvedValue({ config: { main: null, fallbacks: [], size_overrides: [] } });
+    vi.mocked(api.getReviewSettings).mockResolvedValue({ settings: { concurrencyLevel: 'medium', maxComments: 10 } });
     vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
       status: 'subscribed',
       email: 'user@example.com',
@@ -73,7 +69,9 @@ describe('SettingsPage provider management', () => {
     renderPage(<SettingsPage />);
 
     expect((await screen.findAllByText('Custom OpenAI')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('gpt-4o-mini').length).toBeGreaterThan(0);
+    // Proves the model catalog loaded: the provider row shows its model count.
+    expect(screen.getByText('· 1 model')).toBeInTheDocument();
+    expect(screen.getByText('Default models')).toBeInTheDocument();
   });
 
   it('edits a provider API key and saves the expected payload', async () => {

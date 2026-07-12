@@ -1,6 +1,6 @@
 import { createApp } from '@server/app';
 import { runReviewJob } from '@server/core/review';
-import { runWithDb } from '@server/db/client';
+import { queryRows, runWithDb } from '@server/db/client';
 import { findExistingJobForHead } from '@server/db/jobs';
 import {
   createMockPRWebhook,
@@ -92,14 +92,45 @@ async function postWebhook(app: ReturnType<typeof createApp>, env: ReturnType<ty
   );
 }
 
-async function drainQueue(env: ReturnType<typeof createTestEnv>) {
+// The review pipeline now runs through Cloudflare Workflows in production: runReviewJob no longer
+// re-enqueues the next phase onto REVIEW_QUEUE itself, it returns `{action:'next_phase', phase,
+// delaySeconds}` and the caller (normally ReviewWorkflow's step loop) decides whether to continue.
+// This mirrors the `runAndDrain` helper in test/review-flow.spec.ts: drive runReviewJob directly,
+// chasing the returned phase, and backdate last_queue_message_at so the next claim doesn't read as
+// 'busy' (claimJobLease treats a future last_queue_message_at as a fresh lease held elsewhere).
+async function runAndDrain(env: ReturnType<typeof createTestEnv>, message: Parameters<typeof runReviewJob>[1]) {
   await runWithDb(env, async () => {
-    const queue = env.REVIEW_QUEUE as any;
-    while (queue.sent.length > 0) {
-      const next = queue.sent.shift();
-      await runReviewJob(env, next);
+    let currentMessage: typeof message | null = message;
+    let retries = 0;
+    const MAX_RETRIES = 5;
+
+    while (currentMessage) {
+      const result = await runReviewJob(env, currentMessage);
+      if (result.action === 'next_phase') {
+        currentMessage = { ...currentMessage, phase: result.phase };
+        retries = 0;
+        const jobId = (currentMessage as any).jobId;
+        if (jobId) {
+          await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [jobId]);
+        }
+      } else if (result.action === 'retry') {
+        if (++retries > MAX_RETRIES) throw new Error('Max retries exceeded');
+        break;
+      } else {
+        currentMessage = null;
+      }
     }
   });
+}
+
+// runReviewJob throttles admission of a fresh 'queued' job once REVIEW_CONCURRENCY_LIMITS[level]
+// other jobs are 'running' (globally, with no per-installation/repo scoping). Other spec files in
+// this shared-DB suite intentionally leave jobs 'running' to exercise that same admission-control
+// path, which would otherwise make this spec's outcome depend on file execution order. Since
+// fileParallelism is false, nothing else touches the DB concurrently with this file, so it's safe
+// to clear stray 'running' rows before each test.
+async function clearStrayRunningJobs(env: ReturnType<typeof createTestEnv>) {
+  await queryRows(env, `UPDATE jobs SET status = 'failed', error_msg = 'stray running job cleared before pipeline test' WHERE status = 'running'`);
 }
 
 dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
@@ -110,6 +141,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
     const env = createTestEnv({ AI: fakeAiBinding(AI_WITH_ISSUE) as any });
     await seedInstallationToken(env, String(INSTALLATION_ID));
     await seedDefaultModelStrategy(env, MODEL_ID);
+    await clearStrayRunningJobs(env);
 
     const { headSha, diff, pull, webhookPayload } = buildFixture(repo, 11);
     const { calls, restore } = installGitHubFetchMock({
@@ -127,7 +159,8 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       expect(json.message).toBe('queued');
       expect((env.REVIEW_QUEUE as any).sent).toHaveLength(1);
 
-      await drainQueue(env);
+      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
         owner: 'test-owner',
@@ -174,6 +207,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
     const env = createTestEnv({ AI: fakeAiBinding(AI_CLEAN) as any });
     await seedInstallationToken(env, String(INSTALLATION_ID));
     await seedDefaultModelStrategy(env, MODEL_ID);
+    await clearStrayRunningJobs(env);
 
     const { headSha, diff, pull, webhookPayload } = buildFixture(repo, 22);
     const { calls, restore } = installGitHubFetchMock({
@@ -188,7 +222,8 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       const response = await postWebhook(app, env, webhookPayload);
       expect(response.status).toBe(202);
 
-      await drainQueue(env);
+      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
         owner: 'test-owner',
@@ -218,6 +253,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
     const env = createTestEnv({ AI: fakeAiBinding(AI_WITH_ISSUE) as any });
     await seedInstallationToken(env, String(INSTALLATION_ID));
     await seedDefaultModelStrategy(env, MODEL_ID);
+    await clearStrayRunningJobs(env);
 
     const { headSha, diff, pull, webhookPayload } = buildFixture(repo, 33);
     const { calls, restore } = installGitHubFetchMock({
@@ -233,7 +269,8 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       const response = await postWebhook(app, env, webhookPayload);
       expect(response.status).toBe(202);
 
-      await drainQueue(env);
+      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
         owner: 'test-owner',

@@ -8,7 +8,6 @@ import { renderPage } from './render';
 vi.mock('@client/lib/api', () => ({
   api: {
     getJobs: vi.fn(),
-    getDlqMessages: vi.fn(),
     getUpdatesEmailStatus: vi.fn(),
     subscribeUpdates: vi.fn(),
   },
@@ -32,7 +31,6 @@ function makeJob(overrides: Partial<Record<string, unknown>> = {}) {
 describe('JobsPage filters and pagination', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.getDlqMessages).mockResolvedValue({ messages: [], count: 0 });
     vi.mocked(api.getJobs).mockResolvedValue({ jobs: [makeJob()], total: 1 });
     vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
       status: 'subscribed',
@@ -54,7 +52,7 @@ describe('JobsPage filters and pagination', () => {
 
     await screen.findByText('test-owner/test-repo');
 
-    const searchInput = screen.getByPlaceholderText('Title or #number…');
+    const searchInput = screen.getByPlaceholderText('Title or #number...');
     await user.type(searchInput, 'flaky');
 
     await waitFor(() => {
@@ -70,7 +68,7 @@ describe('JobsPage filters and pagination', () => {
     await screen.findByText('test-owner/test-repo');
 
     await user.click(screen.getByRole('button', { name: /All statuses/i }));
-    await user.click(await screen.findByRole('menuitem', { name: 'Done' }));
+    await user.click(await screen.findByRole('option', { name: 'Done' }));
 
     await waitFor(() => {
       const lastCall = vi.mocked(api.getJobs).mock.calls.at(-1)?.[0];
@@ -78,39 +76,39 @@ describe('JobsPage filters and pagination', () => {
     });
   });
 
-  it('shows a filtered empty state when no jobs match', async () => {
+  it('shows the empty state when no jobs are returned', async () => {
     vi.mocked(api.getJobs).mockResolvedValue({ jobs: [], total: 0 });
     const user = userEvent.setup();
     renderPage(<JobsPage />);
 
-    const searchInput = await screen.findByPlaceholderText('Title or #number…');
+    const searchInput = await screen.findByPlaceholderText('Title or #number...');
     await user.type(searchInput, 'nonexistent');
 
-    expect(await screen.findByText('No jobs match your filters. Try adjusting them.')).toBeInTheDocument();
+    expect(await screen.findByText('No jobs yet')).toBeInTheDocument();
   });
 
-  it('paginates using the Next and Prev controls', async () => {
+  it('paginates using the Next and Previous page controls', async () => {
     vi.mocked(api.getJobs).mockResolvedValue({
       jobs: [makeJob()],
-      total: 45, // 3 pages at limit=20
+      total: 25, // 3 pages at the default itemsPerPage of 10
     });
 
     const user = userEvent.setup();
     renderPage(<JobsPage />);
 
     expect(await screen.findByText(/Page 1 of 3/)).toBeInTheDocument();
-    const prevButton = screen.getByRole('button', { name: /Prev/i });
+    const prevButton = screen.getByRole('button', { name: 'Previous page' });
     expect(prevButton).toBeDisabled();
 
-    await user.click(screen.getByRole('button', { name: /Next/i }));
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
 
     await waitFor(() => {
       const lastCall = vi.mocked(api.getJobs).mock.calls.at(-1)?.[0];
-      expect(lastCall).toMatchObject({ offset: 20 });
+      expect(lastCall).toMatchObject({ offset: 10 });
     });
     expect(await screen.findByText(/Page 2 of 3/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /Prev/i }));
+    await user.click(screen.getByRole('button', { name: 'Previous page' }));
     await waitFor(() => {
       const lastCall = vi.mocked(api.getJobs).mock.calls.at(-1)?.[0];
       expect(lastCall).toMatchObject({ offset: 0 });
