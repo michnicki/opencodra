@@ -54,8 +54,8 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
     }
 
     const method = (init?.method ?? 'GET').toUpperCase();
-    const headers = (init?.headers ?? {}) as Record<string, string>;
-    const accept = headers.Accept ?? null;
+    const headers = new Headers(init?.headers);
+    const accept = headers.get('Accept');
     let body: any = null;
     if (typeof init?.body === 'string') {
       try {

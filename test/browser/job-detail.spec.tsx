@@ -142,7 +142,7 @@ describe('JobDetailPage findings and retry', () => {
 
   it('triggers a rerun when the re-run button is clicked', async () => {
     vi.mocked(api.rerunJob).mockResolvedValue({
-      job: { ...JOB, id: 'new-job-id', status: 'queued' } as any,
+      job: { ...JOB, id: 'new-job-id', status: 'queued' } as JobDetail,
     });
 
     const user = userEvent.setup();
