@@ -223,9 +223,6 @@ export async function seedDefaultModelStrategy(env: AppBindings, modelId: string
     modelId,
     providerId: provider.id,
     modelName: modelId,
-    rpm: null,
-    tpm: null,
-    rpd: null,
   });
   await updateGlobalConfig(env, { main: modelId, fallbacks: [], size_overrides: [] });
 }
