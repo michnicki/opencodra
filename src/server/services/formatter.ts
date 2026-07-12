@@ -3,10 +3,6 @@ import type { ParsedReviewComment } from '@shared/schema';
 export class FormatterService {
   constructor(private baseUrl: string) {}
 
-  toReviewEvent(verdict: 'approve' | 'comment') {
-    return verdict === 'approve' ? 'APPROVE' as const : 'COMMENT' as const;
-  }
-
   severityIcon(severity: ParsedReviewComment['severity']) {
     const iconBase = `${this.baseUrl}/icons`;
     const img = (name: string, alt: string) =>

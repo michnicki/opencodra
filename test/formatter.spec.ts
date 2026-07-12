@@ -19,16 +19,6 @@ function comment(overrides: Partial<ParsedReviewComment> = {}): ParsedReviewComm
   };
 }
 
-describe('FormatterService.toReviewEvent', () => {
-  it('maps approve to APPROVE', () => {
-    expect(formatter.toReviewEvent('approve')).toBe('APPROVE');
-  });
-
-  it('maps comment to COMMENT', () => {
-    expect(formatter.toReviewEvent('comment')).toBe('COMMENT');
-  });
-});
-
 describe('FormatterService.severityIcon', () => {
   it.each(['P0', 'P1', 'P2', 'P3', 'nit'] as const)('renders an <img> icon for %s', (severity) => {
     const icon = formatter.severityIcon(severity);
