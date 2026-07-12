@@ -62,6 +62,14 @@ export class GithubAdapter implements VcsProvider {
       title: input.title,
       summary: input.summary,
     });
+    // Validate the id at the adapter boundary before stringifying (WR-04). `createCheckRun`
+    // casts its response with an unchecked `as { id: number }`, so a body without a numeric `id`
+    // (API change, error envelope that still parsed) would otherwise produce `String(undefined)`
+    // -> "undefined" -> `Number("undefined")` -> NaN written into check_run_id at the call site.
+    // Fail loudly at the seam instead.
+    if (typeof id !== 'number') {
+      throw new Error(`createCheckRun returned a non-numeric id for ${owner}/${repo}: ${String(id)}`);
+    }
     // id -> ref at the adapter boundary (D-02); the numeric column stays canonical.
     return { ref: String(id) };
   }
