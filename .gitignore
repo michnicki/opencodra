@@ -143,3 +143,7 @@ vite.config.ts.timestamp-*
 .wrangler
 
 .agent
+
+# Vitest browser mode failure screenshots and attachments
+test/browser/__screenshots__/
+.vitest-attachments/
