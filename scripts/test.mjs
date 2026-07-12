@@ -1,7 +1,14 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+// Resolve Vitest's CLI relative to the actual install location (`./package.json` is the only
+// reliably-exported subpath — `vitest/vitest.mjs` is blocked by the package's "exports" map).
+// This survives hoisting/monorepo layouts and doesn't assume the process cwd is the repo root.
+const vitestCli = path.join(path.dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const envFiles = ['.env.test', '.env.local', '.env', '.dev.vars', '.env.test.example'];
@@ -74,4 +81,4 @@ if (!usableEnvValue(process.env.TEST_DATABASE_URL)) {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 run(process.execPath, ['scripts/migrate.mjs']);
-run(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', '--project', 'node']);
+run(process.execPath, [vitestCli, 'run', '--project', 'node']);

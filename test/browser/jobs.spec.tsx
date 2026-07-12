@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { JobsPage } from '@client/pages/jobs';
 import { api } from '@client/lib/api';
 import { renderPage } from './render';
+import type { JobSummary } from '@shared/schema';
 
 vi.mock('@client/lib/api', () => ({
   api: {
@@ -13,7 +14,7 @@ vi.mock('@client/lib/api', () => ({
   },
 }));
 
-function makeJob(overrides: Partial<Record<string, unknown>> = {}) {
+function makeJob(overrides: Partial<JobSummary> = {}) {
   return {
     id: '1',
     owner: 'test-owner',
@@ -25,7 +26,7 @@ function makeJob(overrides: Partial<Record<string, unknown>> = {}) {
     createdAt: new Date().toISOString(),
     commentCount: 2,
     ...overrides,
-  } as any;
+  } as unknown as JobSummary;
 }
 
 describe('JobsPage filters and pagination', () => {

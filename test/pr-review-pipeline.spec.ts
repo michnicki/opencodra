@@ -7,6 +7,7 @@ import {
   createTestEnv,
   generateMockDiff,
   hasConfiguredTestDatabaseUrl,
+  MockQueue,
   seedDefaultModelStrategy,
   seedInstallationToken,
   signWebhookPayload,
@@ -109,7 +110,7 @@ async function runAndDrain(env: ReturnType<typeof createTestEnv>, message: Param
       if (result.action === 'next_phase') {
         currentMessage = { ...currentMessage, phase: result.phase };
         retries = 0;
-        const jobId = (currentMessage as any).jobId;
+        const jobId = currentMessage.jobId;
         if (jobId) {
           await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [jobId]);
         }
@@ -155,11 +156,11 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
     try {
       const response = await postWebhook(app, env, webhookPayload);
       expect(response.status).toBe(202);
-      const json = await response.json() as any;
+      const json = await response.json() as { message: string };
       expect(json.message).toBe('queued');
-      expect((env.REVIEW_QUEUE as any).sent).toHaveLength(1);
+      expect((env.REVIEW_QUEUE as unknown as MockQueue).sent).toHaveLength(1);
 
-      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      const initialMessage = (env.REVIEW_QUEUE as unknown as MockQueue).sent[0];
       await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
@@ -222,7 +223,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       const response = await postWebhook(app, env, webhookPayload);
       expect(response.status).toBe(202);
 
-      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      const initialMessage = (env.REVIEW_QUEUE as unknown as MockQueue).sent[0];
       await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
@@ -269,7 +270,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       const response = await postWebhook(app, env, webhookPayload);
       expect(response.status).toBe(202);
 
-      const initialMessage = (env.REVIEW_QUEUE as any).sent[0];
+      const initialMessage = (env.REVIEW_QUEUE as unknown as MockQueue).sent[0];
       await runAndDrain(env, initialMessage);
 
       const finalJob = await findExistingJobForHead(env, {
