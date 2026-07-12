@@ -1,0 +1,99 @@
+# Technology Stack
+
+**Analysis Date:** 2026-07-12
+
+## Languages
+
+**Primary:**
+- TypeScript (strict mode, `tsconfig.json`) - Entire codebase (server, client, shared, tests)
+
+**Secondary:**
+- SQL - `db/migrations/*.sql`, plain numbered migration files (no ORM)
+- Shell/Node scripts - `scripts/migrate.mjs`, `scripts/test.mjs`, `scripts/setup-cloudflare.js`
+
+## Runtime
+
+**Environment:**
+- Cloudflare Workers (V8 isolate runtime), `nodejs_compat` flag enabled in `wrangler.jsonc`
+- Node.js v24.x used locally for build tooling/tests (no `.nvmrc` committed)
+- Local dev worker runs via `wrangler dev --local` (`npm run dev:worker`)
+
+**Package Manager:**
+- npm (lockfile `package-lock.json` present)
+
+## Frameworks
+
+**Core:**
+- Hono `^4.12.12` - HTTP framework mounted as the Worker's `fetch` handler (`src/server/app.ts`)
+- React `^19.2.5` + React DOM `^19.2.5` - Dashboard SPA (`src/client/`)
+- React Router `^7.14.0` - Client-side routing
+- Zod `^4.3.6` - Runtime schema validation for all shared data contracts (`src/shared/schema.ts`)
+- Tailwind CSS `^4.2.2` (via `@tailwindcss/vite`) - Styling
+- Radix UI primitives (`@radix-ui/react-dialog`, `-dropdown-menu`, `-separator`, `-slot`, `-tooltip`) - Unstyled accessible components wrapped in `src/client/components/ui/`
+- Cloudflare Workflows (`WorkflowEntrypoint`, binding `REVIEW_WORKFLOW`, class `ReviewWorkflow` in `src/server/workflows/review.ts`) - Durable, step-based execution wrapping the same `runReviewJob` core logic used by the queue path
+
+**Testing:**
+- Vitest `^4.1.9` - Test runner, two projects defined in `vitest.config.mts`: `node` (`test/**/*.spec.ts`) and `browser` (`test/browser/**/*.spec.tsx`, headless Chromium via `@vitest/browser-playwright`)
+- `@testing-library/react`, `@testing-library/dom`, `@testing-library/jest-dom`, `@testing-library/user-event` - Component testing
+- `jsdom` - DOM environment for non-browser-project tests where needed
+- Playwright `^1.59.1` - Browser automation backing the vitest browser project
+
+**Build/Dev:**
+- Vite `^8.0.8` (`@vitejs/plugin-react`) - Client bundler, `vite build --watch` for dev
+- Wrangler `^4.81.1` - Worker bundling, local dev server, deploy, type generation (`wrangler types`)
+- `concurrently` - Runs client watch + worker dev servers together (`npm run dev`)
+- TypeScript `^6.0.2` - `tsc --noEmit` for typechecking only (build is via Vite/Wrangler, not `tsc`)
+
+## Key Dependencies
+
+**Critical:**
+- `postgres` `^3.4.9` (postgres.js) - Raw SQL Postgres client, no ORM; wrapped by `runWithDb`/`getDb`/`queryRows` in `src/server/db/client.ts` using `AsyncLocalStorage` for request-scoped connection sharing over Hyperdrive
+- `zod` `^4.3.6` - Single source of truth for queue message, config, job/file status, and API response shapes (`src/shared/schema.ts`); model output responses are validated against these schemas
+- `jsonrepair` `^3.13.3` - Fallback repair of malformed LLM JSON output (`src/server/core/model-output.ts`)
+- `hono` `^4.12.12` - Routes `/webhook`, `/auth`, `/api/*`, and SPA fallthrough
+
+**Infrastructure:**
+- `picomatch` `^4.0.4` - Glob matching, likely used for file-pattern based repo/model config rules
+- `lucide-react`, `class-variance-authority`, `clsx`, `tailwind-merge` - UI component styling utilities
+- `recharts` `^3.8.1` - Dashboard charts/analytics visualizations
+- `react-markdown` `^10.1.0` + `remark-gfm`, `rehype-raw`, `rehype-sanitize` - Rendering LLM-generated review markdown safely
+- `sonner` `^2.0.7` - Toast notifications in the SPA
+- `motion` `^12.42.2`, `lenis` `^1.3.25` - UI animation/smooth-scroll
+
+## Configuration
+
+**Environment:**
+- Local dev secrets/config in `.dev.vars` (gitignored; copy from `.dev.vars.example`)
+- Test env loading order: `.env.test`, `.env.local`, `.env`, `.dev.vars`, `.env.test.example` (per `CLAUDE.md`)
+- Required secrets declared in `wrangler.jsonc` under `secrets.required`: `APP_PRIVATE_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `LLM_CONFIG_ENCRYPTION_KEY`, `CF_API_TOKEN`, `CF_ACCOUNT_ID`
+- Non-secret vars in `wrangler.jsonc` under `vars`: `APP_URL`, `AUTH_CALLBACK_URL`, `BOT_USERNAME`, `GITHUB_APP_SLUG`, `DASHBOARD_ALLOWED_USERS`, `ENVIRONMENT`
+- Optional telemetry opt-out vars: `TELEMETRY_DISABLED`, `TELEMETRY_API_URL`, `TELEMETRY_SECRET` (see `.dev.vars.example`)
+- Database URLs: `DATABASE_URL` (used by `scripts/migrate.mjs`) and `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` (worker runtime Hyperdrive local binding), plus `TEST_DATABASE_URL` for tests
+
+**Build:**
+- `wrangler.jsonc` - Worker bindings, routes, crons (`*/2 * * * *`), queue config, secrets/vars declarations
+- `tsconfig.json` - Path aliases (`@server`, `@client`, `@shared`, `@`), ES2024 target, strict mode
+- `vitest.config.mts` - Test projects, path aliases, `cloudflare:workers` mock alias (`test/mocks/cloudflare-workers.ts`)
+- `src/server/worker-env.d.ts` - Generated by `npm run cf-typegen` after binding changes; must be regenerated whenever `wrangler.jsonc` bindings change
+
+## Platform Requirements
+
+**Development:**
+- Node.js (v24 confirmed in this environment) for npm scripts, Vite, Vitest, Wrangler CLI
+- Disposable/local Postgres database for tests (`TEST_DATABASE_URL`) and dev (`DATABASE_URL`)
+- Cloudflare account with Workers AI, Hyperdrive, KV, Queues, and Workflows enabled for full local parity (`wrangler dev --local` mocks most of this; Workers AI catalog discovery calls the real Cloudflare API)
+- GitHub App registered (App ID, private key, webhook secret, OAuth client id/secret) for webhook/auth flows
+
+**Production:**
+- Cloudflare Workers (single Worker, `src/server/index.ts` entry, custom domain `app.codra.devarshi.dev`)
+- Cloudflare Queues (`codra-review-jobs` producer/consumer, DLQ `codra-review-dlq`)
+- Cloudflare Workflows (`codra-review-workflow` / `ReviewWorkflow`) as a durable execution path alongside/complementing the queue consumer
+- Cloudflare KV (`APP_KV`) for sessions
+- Cloudflare Hyperdrive (`HYPERDRIVE`) fronting an external PostgreSQL database
+- Cloudflare Workers AI (`AI` binding) for on-platform model inference
+- Static assets (`dist/client`) served through Workers Assets (`ASSETS` binding), with `run_worker_first` routing so the Worker gates auth on SPA routes
+- Cron trigger every 2 minutes (`*/2 * * * *`) for job maintenance (`core/job-recovery.ts`)
+
+---
+
+*Stack analysis: 2026-07-12*
