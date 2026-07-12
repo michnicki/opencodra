@@ -379,7 +379,19 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
   const phase = resolved.phase;
   const tracker = new TokenTracker();
-  const vcs = await VcsService.forRepo(env, job, tracker);
+  // Provider construction is awaited BEFORE the main lease-release try block below. Today
+  // `forRepo` is non-throwing, but its docstring promises a real, potentially-rejecting
+  // provider/credential read in Phase 4/5. If that read is added without covering this await,
+  // a rejection would escape with a live lease held -> the job wedges behind a stale lease_owner
+  // until expiry recovery reclaims it (WR-01). Release the lease on rejection and re-throw. It
+  // can't simply move into the main try block: that block's catch handlers reference `vcs`.
+  let vcs: VcsProvider;
+  try {
+    vcs = await VcsService.forRepo(env, job, tracker);
+  } catch (error) {
+    await releaseJobLease(env, job.id, leaseOwner);
+    throw error;
+  }
   const model = new ModelService(env, tracker, { jobId: job.id });
   const formatter = new FormatterService(env.APP_URL);
 
