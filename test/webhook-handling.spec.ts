@@ -1,5 +1,5 @@
 import { createApp } from '@server/app';
-import { createMockPRWebhook, createTestEnv } from './helpers';
+import { createMockPRWebhook, createTestEnv, signWebhookPayload as signPayload } from './helpers';
 import { vi } from 'vitest';
 
 // Mock GitHubClient to avoid real JWT signing and network calls
@@ -13,21 +13,6 @@ vi.mock('@server/core/github', async (importOriginal) => {
     }
   };
 });
-
-async function signPayload(secret: string, payload: string) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
-  return `sha256=${Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')}`;
-}
 
 describe('Webhook Handling Suite', () => {
   const env = createTestEnv();
