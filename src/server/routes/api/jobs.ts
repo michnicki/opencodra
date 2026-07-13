@@ -85,6 +85,16 @@ export function createJobsRouter() {
   // it starts from scratch (no inheritance) so every file is reviewed again.
   async function startReplacementJob(c: Context<AppEnv>, rawSource: NonNullable<Awaited<ReturnType<typeof getJobForProcessing>>>, options: { inherit: boolean }) {
     const source = mapJob(rawSource);
+
+    // REV-C-3 / R-01: source.installationId is nullable for Bitbucket rows (no installation_id
+    // after migration 005). The retry path is GitHub-only for now (loadRepoConfig / insertJob
+    // / supersedeOlderJobs all rely on the GitHub shape); the Bitbucket retry UI lands with the
+    // Bitbucket dashboard work in Wave 2. Reject early with 400 so the GitHub API surface stays
+    // byte-identical for the no-bitbucket case.
+    if (source.installationId == null) {
+      return c.json({ error: 'Retry is not yet supported for Bitbucket jobs.' }, 400);
+    }
+
     let configSnapshot;
     try {
       const currentConfig = await loadRepoConfig(c.env, {

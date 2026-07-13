@@ -39,6 +39,13 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
   for (const job of jobs) {
     if (!job.check_run_id) continue;
 
+    // REV-C-3 / R-01: installation_id is nullable for Bitbucket rows. The check-run-completion
+    // sweep is GitHub-only (a Bitbucket job's status is reflected via Code Insights / PR comment,
+    // not a check_run_id). Skip Bitbucket rows defensively even though the SELECT above filters
+    // on `j.check_run_id IS NOT NULL` -- a future Bitbucket flow that writes a placeholder into
+    // check_run_id would otherwise reach this code path with installation_id=null.
+    if (!job.installation_id) continue;
+
     try {
       const github = new GitHubService(env, job.installation_id);
 
