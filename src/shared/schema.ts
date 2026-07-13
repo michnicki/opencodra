@@ -416,6 +416,65 @@ export const modelConfigSchema = z.object({
 export type LlmApiFormat = z.infer<typeof llmProviderSchema>['apiFormat'];
 export type LlmProvider = z.infer<typeof llmProviderSchema>;
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
+
+// --- VCS bot-credential contracts (Phase 4, contract-first D-05/D-10) ---
+// Four-state credential status computed server-side from token_expires_at (D-05).
+export const credentialStatusSchema = z.enum(['missing', 'expired', 'expiring-soon', 'valid']);
+export type CredentialStatus = z.infer<typeof credentialStatusSchema>;
+
+// Redacted READ DTO — never carries secrets/ciphertext (D-10 / T-04-01). Only presence
+// booleans, expiry, label, and computed status. `dateStringSchema` is correct here: these
+// are DB-generated OUTPUT values being serialized, so the loose shape is intentional.
+export const vcsCredentialStatusSchema = z.object({
+  vcsProvider: z.enum(vcsProviders),
+  workspace: z.string(),
+  repoSlug: z.string(),
+  hasToken: z.boolean(),
+  hasWebhookSecret: z.boolean(),
+  tokenExpiresAt: dateStringSchema.nullable(),
+  label: z.string().nullable(),
+  status: credentialStatusSchema,
+  createdAt: dateStringSchema,
+  updatedAt: dateStringSchema,
+});
+export type VcsCredentialStatus = z.infer<typeof vcsCredentialStatusSchema>;
+
+// WRITE/upsert request. `.strict()` rejects unknown keys at the boundary.
+export const vcsCredentialStoreSchema = z
+  .object({
+    // Phase 4 stores only Bitbucket bot credentials; accepting `github` here is needless
+    // write surface (review finding 6). Narrow to a literal with a default.
+    vcsProvider: z.literal('bitbucket').default('bitbucket'),
+    // Normalize workspace/repo slugs to lowercase at the storage boundary (review finding 11).
+    // RATIONALE: Bitbucket canonicalizes workspace and repo slugs to lowercase in API paths
+    // and webhook payloads. Normalizing here guarantees the Phase 5 webhook lookup — which
+    // keys on the lowercase payload values — matches the stored
+    // (vcs_provider, workspace, repo_slug) key. Chosen over deferring to Phase 5 because the
+    // storage key must equal the lookup key, and doing it once at the single write boundary is
+    // the cheapest place. Forward note for Phase 5: its webhook-route lookup must also
+    // lowercase before querying.
+    workspace: z.string().trim().toLowerCase().min(1),
+    repoSlug: z.string().trim().toLowerCase().min(1),
+    accessToken: z.string().optional(),
+    webhookSecret: z.string().optional(),
+    // STRICT ISO-datetime INPUT (review finding 5): a malformed string like `not-a-date` MUST
+    // be rejected here so it never reaches the TIMESTAMPTZ insert. The serialized OUTPUT DTO
+    // (vcsCredentialStatusSchema) keeps the loose `dateStringSchema` shape.
+    tokenExpiresAt: z
+      .string()
+      .refine((v) => !Number.isNaN(Date.parse(v)), {
+        message: 'tokenExpiresAt must be a parseable ISO 8601 datetime.',
+      })
+      .nullable()
+      .optional(),
+    label: z.string().nullable().optional(),
+    // Rotate-in-place semantics (D-11): omit a secret to leave it untouched, or set the
+    // corresponding clear flag to null it out.
+    clearToken: z.boolean().optional(),
+    clearWebhookSecret: z.boolean().optional(),
+  })
+  .strict();
+export type VcsCredentialStoreInput = z.infer<typeof vcsCredentialStoreSchema>;
 export type StatsPayload = z.infer<typeof statsSchema>;
 
 export const defaultRepoConfig = repoConfigSchema.parse({});
