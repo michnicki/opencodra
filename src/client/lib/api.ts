@@ -10,7 +10,14 @@ import type {
   SyncReposResponse,
   UpdatesEmailResponse,
 } from '@shared/api';
-import type { LlmApiFormat, LlmProvider, RepoConfig, ReviewSettings } from '@shared/schema';
+import type {
+  LlmApiFormat,
+  LlmProvider,
+  RepoConfig,
+  ReviewSettings,
+  VcsCredentialStatus,
+  VcsCredentialStoreInput,
+} from '@shared/schema';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -250,5 +257,20 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(settings),
     });
+  },
+  getVcsCredentials() {
+    return request<{ credentials: VcsCredentialStatus[] }>('/api/vcs-credentials');
+  },
+  storeVcsCredential(input: VcsCredentialStoreInput) {
+    return request<{ credential: VcsCredentialStatus }>('/api/vcs-credentials', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+  deleteVcsCredential(key: { vcsProvider: string; workspace: string; repoSlug: string }) {
+    return request<{ ok: boolean }>(
+      `/api/vcs-credentials/${pathSegment(key.vcsProvider)}/${pathSegment(key.workspace)}/${pathSegment(key.repoSlug)}`,
+      { method: 'DELETE' },
+    );
   },
 };
