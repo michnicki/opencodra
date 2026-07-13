@@ -309,7 +309,7 @@ export function VcsCredentialsPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Could not remove the credential. Please try again.';
       setError(msg);
-      toast.error('Could not save credential', { id: tid, description: 'Your changes were not applied. Please try again.' });
+      toast.error('Could not remove credential', { id: tid, description: 'The credential was not removed. Please try again.' });
     } finally {
       setDeleteTarget(null);
     }
