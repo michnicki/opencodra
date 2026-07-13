@@ -1,7 +1,7 @@
 import type { AppBindings } from '@server/env';
 import { getTerminalJobsNeedingCheckRunCompletion, markJobCheckRunCompleted, recoverExpiredJobLeases } from '@server/db/jobs';
 import { logger } from '@server/core/logger';
-import { GitHubService } from '@server/services/github';
+import { VcsService } from '@server/services/vcs';
 
 const MAX_RECOVERY_COUNT = 3;
 
@@ -37,17 +37,20 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
   // Each job requires multiple subrequests (KV, GitHub API, Hyperdrive).
   const jobs = await getTerminalJobsNeedingCheckRunCompletion(env, 1);
   for (const job of jobs) {
-    if (!job.check_run_id) continue;
-
-    // REV-C-3 / R-01: installation_id is nullable for Bitbucket rows. The check-run-completion
-    // sweep is GitHub-only (a Bitbucket job's status is reflected via Code Insights / PR comment,
-    // not a check_run_id). Skip Bitbucket rows defensively even though the SELECT above filters
-    // on `j.check_run_id IS NOT NULL` -- a future Bitbucket flow that writes a placeholder into
-    // check_run_id would otherwise reach this code path with installation_id=null.
-    if (!job.installation_id) continue;
+    // REV-M-8: the WHERE clause on getTerminalJobsNeedingCheckRunCompletion was widened to
+    // (check_run_id IS NOT NULL OR status_check_ref IS NOT NULL) so Bitbucket jobs are
+    // eligible. Skip the row entirely only when BOTH columns are null (defensive: a future
+    // migration that drops one would otherwise reach this code with no ref to update).
+    if (!job.check_run_id && !job.status_check_ref) continue;
 
     try {
-      const github = new GitHubService(env, job.installation_id);
+      // REV-M-8: route the reconciliation through VcsService.forRepo (provider-aware) instead
+      // of the direct `new GitHubService(env, job.installation_id)` construction. The
+      // returned adapter's updateStatusCheck maps the conclusion + status to the provider's
+      // native call: GitHub -> updateCheckRun(numeric id, ...); Bitbucket -> PUT Code Insights
+      // report + POST commit build status (REV-M-9 verdict mapping baked in). This replaces
+      // the previous GitHub-only path so the maintenance sweep is no longer GitHub-blind.
+      const vcs = await VcsService.forRepo(env, job, undefined);
 
       let conclusion: 'success' | 'neutral' | 'failure' | 'cancelled';
       let title: string;
@@ -71,7 +74,13 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
         summary = job.error_msg ?? presentation.summary;
       }
 
-      await github.updateCheckRun(job.owner, job.repo, job.check_run_id, {
+      // Provider-aware ref source: Bitbucket uses the TEXT status_check_ref; GitHub uses
+      // the numeric check_run_id. The VcsService.forRepo return value already encodes the
+      // provider via `vcs.name`, and `updateStatusCheck` interprets `ref` provider-opaquely
+      // (REV-M-10). The `String(...)` cast is necessary for the numeric GitHub case; the
+      // Bitbucket string ref is passed through unchanged.
+      const statusRef = job.status_check_ref ?? (job.check_run_id !== null ? String(job.check_run_id) : '');
+      await vcs.updateStatusCheck(job.owner, job.repo, statusRef, {
         status: 'completed',
         conclusion,
         title,
