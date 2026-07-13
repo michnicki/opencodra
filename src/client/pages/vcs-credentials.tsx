@@ -276,6 +276,7 @@ export function VcsCredentialsPage() {
         const next = current.filter((c) => credentialKey(c) !== credentialKey(credential));
         return [...next, credential].sort((a, b) => credentialKey(a).localeCompare(credentialKey(b)));
       });
+      setError(null);
       closeForms();
       if (mode === 'edit') {
         toast.success('Credential updated', { id: tid, description: 'The stored token and secret were replaced.' });
@@ -301,6 +302,7 @@ export function VcsCredentialsPage() {
         workspace: target.workspace,
         repoSlug: target.repoSlug,
       });
+      setError(null);
       setCredentials((current) => current.filter((c) => credentialKey(c) !== credentialKey(target)));
       toast.success('Credential removed', {
         id: tid,
