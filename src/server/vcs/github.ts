@@ -96,6 +96,11 @@ export class GithubAdapter implements VcsProvider {
     input: VcsSubmitReviewInput,
   ): Promise<{ ref: string }> {
     // Relocated toReviewEvent (formerly services/formatter.ts:6-8).
+    // REV-M-5: `jobIdHint` is intentionally IGNORED here -- the GitHub submitReview flow composes
+    // a single createReview POST that does not embed the job id in its body. The field exists on
+    // VcsSubmitReviewInput so the Bitbucket adapter (REV-R-A) can use it for its combined
+    // marker+summary comment. Reference it once so the linter doesn't flag an unused parameter.
+    void input.jobIdHint;
     const event = input.verdict === 'approve' ? ('APPROVE' as const) : ('COMMENT' as const);
     const { id } = await this.gh.createReview(owner, repo, prNumber, {
       commitSha: input.commitSha,
