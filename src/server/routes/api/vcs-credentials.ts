@@ -44,7 +44,11 @@ export function createVcsCredentialsRouter() {
 
   // POST / -> store/rotate upsert with encrypt-at-boundary (D-11).
   app.post('/', async (c) => {
-    const parsed = vcsCredentialStoreSchema.safeParse(await c.req.json());
+    // Parse the body defensively (WR-02): a non-JSON request body makes c.req.json() throw, which
+    // would surface as a 500 for client-supplied bad input on a mutating route. Catch to null so a
+    // malformed body flows through safeParse and returns a 400 like any other invalid credential.
+    const raw = await c.req.json().catch(() => null);
+    const parsed = vcsCredentialStoreSchema.safeParse(raw);
     if (!parsed.success) {
       // The strict bitbucket-literal provider, lowercase-normalized identity, and strict ISO
       // expiry are enforced here — a malformed tokenExpiresAt is rejected before any DB write
