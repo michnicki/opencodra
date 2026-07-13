@@ -12,6 +12,7 @@ import {
 } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 import { defaultRepoConfig, jobSummarySchema } from '@shared/schema';
+import type { AppBindings } from '@server/env';
 import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 
 // Wave 0 jobs/webhook-deliveries provider-aware widening tests (D-02 / REV-C-1 / REV-C-3 /
