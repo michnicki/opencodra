@@ -13,6 +13,7 @@ const JobLogsPage = React.lazy(() => import('./pages/job-logs').then(m => ({ def
 const ReposPage = React.lazy(() => import('./pages/repos').then(m => ({ default: m.ReposPage })));
 const StatsPage = React.lazy(() => import('./pages/stats').then(m => ({ default: m.StatsPage })));
 const SettingsPage = React.lazy(() => import('./pages/settings').then(m => ({ default: m.SettingsPage })));
+const VcsCredentialsPage = React.lazy(() => import('./pages/vcs-credentials').then(m => ({ default: m.VcsCredentialsPage })));
 const NotFoundPage = React.lazy(() => import('./pages/not-found').then(m => ({ default: m.NotFoundPage })));
 
 import './app.css';
@@ -100,6 +101,7 @@ const router = createBrowserRouter([
       { path: 'jobs/:id/logs', element: withSuspense(JobLogsPage) },
       { path: 'repos', element: withSuspense(ReposPage) },
       { path: 'stats', element: withSuspense(StatsPage) },
+      { path: 'credentials', element: withSuspense(VcsCredentialsPage) },
       { path: 'settings', element: withSuspense(SettingsPage) },
     ],
   },
