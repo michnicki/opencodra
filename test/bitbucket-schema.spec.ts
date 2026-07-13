@@ -63,6 +63,29 @@ describe('pullRequestWebhookPayloadSchema', () => {
     expect(pullRequestWebhookPayloadSchema.safeParse(routeConstructedPayload).success).toBe(true);
   });
 
+  it('accepts documented Bitbucket fields outside Codra\'s consumed projection', () => {
+    const result = pullRequestWebhookPayloadSchema.safeParse({
+      eventName: 'pullrequest:created',
+      actor: { display_name: 'Alice', uuid: '{actor-uuid}' },
+      repository: {
+        ...parsedBody.repository,
+        name: 'backend',
+        links: { html: { href: 'https://bitbucket.org/acme/backend' } },
+      },
+      pullrequest: {
+        ...parsedBody.pullrequest,
+        description: 'A real payload contains more fields than Codra consumes.',
+        source: {
+          ...parsedBody.pullrequest.source,
+          repository: { full_name: 'acme/backend' },
+        },
+        links: { html: { href: 'https://bitbucket.org/acme/backend/pull-requests/42' } },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it('rejects an unknown event name', () => {
     expect(pullRequestWebhookPayloadSchema.safeParse({
       eventName: 'pullrequest:deleted',
