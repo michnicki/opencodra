@@ -460,14 +460,15 @@ export const vcsCredentialStoreSchema = z
     repoSlug: z.string().trim().toLowerCase().min(1).max(100),
     accessToken: z.string().max(4096).optional(),
     webhookSecret: z.string().max(4096).optional(),
-    // STRICT ISO-datetime INPUT (review finding 5): a malformed string like `not-a-date` MUST
-    // be rejected here so it never reaches the TIMESTAMPTZ insert. The serialized OUTPUT DTO
-    // (vcsCredentialStatusSchema) keeps the loose `dateStringSchema` shape.
+    // STRICT ISO INPUT (review finding 5 / IN-02): a malformed string like `not-a-date` or a
+    // non-ISO locale format (`2026/07/13`, `March 5 2099`) MUST be rejected here so it never
+    // reaches the TIMESTAMPTZ insert. The prior `Date.parse` refine was permissive despite this
+    // comment. We accept exactly two strict shapes: a bare `YYYY-MM-DD` date (what the dashboard's
+    // `type="date"` input actually sends, via `toDateInputValue`) and a full RFC3339 datetime with
+    // optional offset. The serialized OUTPUT DTO (vcsCredentialStatusSchema) keeps the loose
+    // `dateStringSchema` shape.
     tokenExpiresAt: z
-      .string()
-      .refine((v) => !Number.isNaN(Date.parse(v)), {
-        message: 'tokenExpiresAt must be a parseable ISO 8601 datetime.',
-      })
+      .union([z.iso.date(), z.iso.datetime({ offset: true })])
       .nullable()
       .optional(),
     label: z.string().max(200).nullable().optional(),

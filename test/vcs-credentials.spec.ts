@@ -13,6 +13,7 @@ import {
   computeCredentialStatus,
   EXPIRING_SOON_THRESHOLD_MS,
 } from '@server/db/vcs-credentials';
+import { vcsCredentialStoreSchema } from '@shared/schema';
 import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 
 const dbDescribe = hasConfiguredTestDatabaseUrl() ? describe : describe.skip;
@@ -135,6 +136,38 @@ describe('computeCredentialStatus four-state boundaries (D-05)', () => {
 
   it('uses a ~14 day expiring-soon threshold (D-05)', () => {
     expect(EXPIRING_SOON_THRESHOLD_MS).toBe(14 * 24 * 60 * 60 * 1000);
+  });
+});
+
+describe('vcsCredentialStoreSchema.tokenExpiresAt strict-ISO validation (IN-02)', () => {
+  const parseExpiry = (tokenExpiresAt: unknown) =>
+    vcsCredentialStoreSchema.safeParse({
+      workspace: 'ws',
+      repoSlug: 'repo',
+      tokenExpiresAt,
+    });
+
+  it('accepts a bare date-only YYYY-MM-DD (the dashboard type="date" contract)', () => {
+    expect(parseExpiry('2026-07-13').success).toBe(true);
+  });
+
+  it('accepts a full RFC3339 datetime', () => {
+    expect(parseExpiry('2026-07-13T00:00:00.000Z').success).toBe(true);
+    expect(parseExpiry('2026-07-13T00:00:00+02:00').success).toBe(true);
+  });
+
+  it('accepts null and undefined (optional/nullable)', () => {
+    expect(parseExpiry(null).success).toBe(true);
+    expect(vcsCredentialStoreSchema.safeParse({ workspace: 'ws', repoSlug: 'repo' }).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects non-ISO / locale formats that the old Date.parse refine let through', () => {
+    expect(parseExpiry('not-a-date').success).toBe(false);
+    expect(parseExpiry('2026/07/13').success).toBe(false);
+    expect(parseExpiry('March 5 2099').success).toBe(false);
+    expect(parseExpiry('3/5/2099').success).toBe(false);
   });
 });
 
