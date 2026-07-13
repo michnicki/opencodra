@@ -9,12 +9,14 @@ import type { JobSummary, ReviewJobMessage, RepoConfig } from '@shared/schema';
 // inputs first and passes an already-parsed `ReviewRequest | null` (or, for a future Bitbucket
 // caller, an equivalent shape) into this helper.
 //
-// DEFERRED TO PHASE 5 (REVIEW finding 3): this helper extracts provider-NEUTRAL ingest
-// orchestration ONLY. insertJob -> getOrCreateRepository defaults an omitted provider to
-// 'github' (db/repositories.ts), and findExistingJobForHead / supersedeOlderJobs filter without
-// a provider column (db/jobs.ts). That means this helper is NOT yet safe for Bitbucket
-// concrete-job identity -- Phase 5 MUST make insert/dedup/supersede/repo-config-lookup
-// provider-aware before any Bitbucket concrete job routes through this helper.
+// 05-04 widening: this helper is now provider-safe end-to-end. It threads an `effectiveProvider =
+// input.provider ?? reviewRequest.repositoryVcsProvider ?? 'github'` value through
+// findExistingJobForHead + supersedeOlderJobs, closing the Phase-3 deferred item (REVIEW
+// finding 3 of Phase 3) that a Bitbucket concrete job would have been mis-attributed to a
+// GitHub repo row. The default falls back to 'github' byte-identically when the caller passes
+// neither -- the GitHub-only caller (tests 1-5 in test/webhook-ingest.spec.ts) stays
+// NREG-02 byte-identical because the effective value 'github' produces the same SQL as the
+// pre-widening no-arg path.
 
 export type WebhookIngestInput = {
   reviewRequest: ReviewRequest | null;
@@ -36,6 +38,14 @@ export async function ingestReviewWebhookEvent(
 ): Promise<WebhookIngestResult> {
   const { reviewRequest } = input;
 
+  // 05-04 widening (D-02 / Phase-3 deferred item closure): the effective provider threads
+  // into findExistingJobForHead + supersedeOlderJobs + the queue message's optional
+  // `provider` field. The chain is deterministic: explicit input.provider wins, then the
+  // widened reviewRequest.repositoryVcsProvider (set by the Bitbucket route), finally
+  // 'github' as the default. The no-arg GitHub caller (tests 1-5 in test/webhook-ingest.spec.ts)
+  // never sets either; effectiveProvider resolves to 'github' byte-identically.
+  const effectiveProvider = input.provider ?? reviewRequest?.repositoryVcsProvider ?? 'github' as const;
+
   // Preserve the exact branch condition from the pre-extraction route (Pitfall 2) -- do not
   // narrow `reviewRequest` to non-null here.
   if (reviewRequest?.commitSha && reviewRequest.baseSha) {
@@ -45,6 +55,7 @@ export async function ingestReviewWebhookEvent(
       prNumber: reviewRequest.prNumber,
       commitSha: reviewRequest.commitSha,
       trigger: reviewRequest.trigger,
+      vcsProvider: effectiveProvider,
     });
 
     if (existingJob) {
@@ -64,6 +75,14 @@ export async function ingestReviewWebhookEvent(
       headRef: reviewRequest.headRef,
       baseRef: reviewRequest.baseRef,
       configSnapshot: input.configSnapshot,
+      // 05-04 widening: when the Bitbucket route hands us a reviewRequest carrying
+      // repositoryWorkspace + repositoryVcsProvider, forward them so insertJob's
+      // getOrCreateRepository (or bypass, when repositoryId is supplied) carries the
+      // Bitbucket identity. The GitHub path leaves these unset and continues to resolve
+      // through getOrCreateRepository byte-identically.
+      ...(reviewRequest.repositoryVcsProvider
+        ? { vcsProvider: reviewRequest.repositoryVcsProvider, workspace: reviewRequest.repositoryWorkspace ?? null }
+        : {}),
     });
 
     await supersedeOlderJobs(env, {
@@ -72,6 +91,7 @@ export async function ingestReviewWebhookEvent(
       repo: reviewRequest.repo,
       prNumber: reviewRequest.prNumber,
       newJobId: job.id,
+      vcsProvider: effectiveProvider,
     });
 
     const message: ReviewJobMessage = {
@@ -85,6 +105,13 @@ export async function ingestReviewWebhookEvent(
     // (which passes no `provider`) breaks.
     if (input.provider !== undefined) {
       message.provider = input.provider;
+    } else if (effectiveProvider !== 'github') {
+      // 05-04 widening: when the call came from the Bitbucket route (which threads provider
+      // through reviewRequest.repositoryVcsProvider without setting input.provider), still
+      // attach `provider: 'bitbucket'` to the queue message so downstream consumers (workflow /
+      // runReviewJob) can branch. The GitHub no-arg path leaves the key absent (existing
+      // behavior, preserved by NREG-02).
+      message.provider = effectiveProvider;
     }
     await env.REVIEW_QUEUE.send(message);
 
@@ -100,6 +127,8 @@ export async function ingestReviewWebhookEvent(
   };
   if (input.provider !== undefined) {
     eventMessage.provider = input.provider;
+  } else if (effectiveProvider !== 'github') {
+    eventMessage.provider = effectiveProvider;
   }
   await env.REVIEW_QUEUE.send(eventMessage);
 
