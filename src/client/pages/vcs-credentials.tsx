@@ -251,11 +251,21 @@ export function VcsCredentialsPage() {
       vcsProvider: 'bitbucket',
       workspace,
       repoSlug,
-      tokenExpiresAt: values.tokenExpiresAt.trim() ? values.tokenExpiresAt.trim() : null,
       label: values.label.trim() ? values.label.trim() : null,
     };
     if (values.accessToken.trim()) input.accessToken = values.accessToken;
     if (values.webhookSecret.trim()) input.webhookSecret = values.webhookSecret;
+
+    // IN-02: the date input is date-only (YYYY-MM-DD), so re-sending an untouched expiry that
+    // originally carried a time component would truncate it (e.g. 15:30 -> 00:00, shifting the
+    // effective expiry backward by up to a day). On edit, only include tokenExpiresAt when the
+    // date input actually changed from the stored value; an unchanged expiry is omitted so the
+    // server leaves it untouched (D-11). On add, always send it.
+    const currentExpiry = values.tokenExpiresAt.trim();
+    const originalExpiry = mode === 'edit' ? toDateInputValue(editingCredential?.tokenExpiresAt ?? null) : '';
+    if (mode !== 'edit' || currentExpiry !== originalExpiry) {
+      input.tokenExpiresAt = currentExpiry ? currentExpiry : null;
+    }
 
     try {
       const { credential } = await api.storeVcsCredential(input);
