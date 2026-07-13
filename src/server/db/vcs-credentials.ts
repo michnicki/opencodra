@@ -58,6 +58,11 @@ export function computeCredentialStatus(
 
   const expiresMs =
     tokenExpiresAt instanceof Date ? tokenExpiresAt.getTime() : new Date(tokenExpiresAt).getTime();
+  // Fail CLOSED on an undecodable expiry (WR-01): a NaN timestamp means we cannot prove the token
+  // is still healthy, so treat it as `expired` rather than silently returning `valid`. Unreachable
+  // via the current Zod-validated write path, but this fn is exported for reuse (Phase 5 webhook),
+  // so a future caller could feed it a raw/unparseable value.
+  if (Number.isNaN(expiresMs)) return 'expired';
   const deltaMs = expiresMs - now.getTime();
 
   if (deltaMs < 0) return 'expired';
