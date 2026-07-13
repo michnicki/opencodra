@@ -236,7 +236,10 @@ export async function hasPendingMaintenanceWork(env: Pick<AppBindings, 'HYPERDRI
       SELECT EXISTS (
         SELECT 1 FROM jobs
         WHERE status IN ('queued', 'running')
-           OR (status IN ('done', 'failed', 'superseded', 'cancelled') AND check_run_id IS NOT NULL AND check_run_completed_at IS NULL)
+           -- REV-M-8: OR status_check_ref IS NOT NULL widens the maintenance work predicate so
+           -- Bitbucket jobs (which populate only status_check_ref, never check_run_id) keep
+           -- the cron 'system:active_jobs' flag alive until the terminal reconciliation runs.
+           OR (status IN ('done', 'failed', 'superseded', 'cancelled') AND (check_run_id IS NOT NULL OR status_check_ref IS NOT NULL) AND check_run_completed_at IS NULL)
       ) AS has_work
     `,
   );
@@ -1083,7 +1086,12 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
       WHERE j.status IN ('done', 'failed', 'superseded', 'cancelled')
-        AND j.check_run_id IS NOT NULL
+        -- REV-M-8: widened to OR status_check_ref IS NOT NULL so Bitbucket jobs (which only
+        -- populate the TEXT status_check_ref column via updateJobStatusCheckRef, never the
+        -- numeric check_run_id) are eligible for the terminal reconciliation sweep. The
+        -- reconciliation routes through VcsService.forRepo (REV-M-8) so a Bitbucket job
+        -- triggers the adapter's updateStatusCheck (PUT Code Insights + POST build status).
+        AND (j.check_run_id IS NOT NULL OR j.status_check_ref IS NOT NULL)
         AND j.check_run_completed_at IS NULL
       ORDER BY COALESCE(j.finished_at, j.started_at, j.created_at) ASC
       LIMIT $1
