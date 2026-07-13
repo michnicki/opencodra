@@ -24,6 +24,7 @@ import {
   setJobWorkflowInstance,
   supersedeOlderJobs,
   updateJobCheckRun,
+  updateJobStatusCheckRef,
   updateJobStep,
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
@@ -260,7 +261,10 @@ export type ReviewRequest = {
   prTitle: string | null;
   prAuthor: string | null;
   commitSha: string;
-  baseSha: string;
+  // REV-M-7: baseSha is nullable so the Bitbucket webhook route may pass empty string OR
+  // destination.commit.hash (when unavailable). The review pipeline tolerates a missing baseSha
+  // because the head SHA + commitSha drive the review, not the base.
+  baseSha: string | null;
   headRef: string | null;
   baseRef: string | null;
   trigger: 'auto' | 'mention';
@@ -652,7 +656,7 @@ async function resolveQueuedJob(
     prTitle: resolved.prTitle,
     prAuthor: resolved.prAuthor,
     commitSha: resolved.commitSha,
-    baseSha: resolved.baseSha,
+    baseSha: resolved.baseSha ?? '',
     trigger: resolved.trigger,
     headRef: resolved.headRef,
     baseRef: resolved.baseRef,
@@ -692,23 +696,34 @@ async function runPreparePhase(
   }
 
   let checkRunId = job.checkRunId;
-  if (!checkRunId) {
+  if (!checkRunId && !job.statusCheckRef) {
     const checkRun = await vcs.createStatusCheck(job.owner, job.repo, {
       headSha: pr.headSha,
       title: 'Review queued',
       summary: 'Codra has started reviewing this pull request.',
     });
-    // ref -> id at this boundary (D-02); the numeric check_run_id column stays canonical.
-    // Guard the conversion so the GitHub-only assumption is explicit HERE, not just in a distant
-    // comment (WR-03): a non-numeric ref (the Bitbucket case this seam anticipates) would otherwise
-    // write NaN into check_run_id unguarded. Longer term (Phase 4/5) check_run_id likely becomes
-    // `text` to hold opaque refs; until then, fail loudly rather than silently persist NaN.
-    const numericCheckRunId = Number(checkRun.ref);
-    if (!Number.isFinite(numericCheckRunId)) {
-      throw new Error(`Provider ${vcs.name} returned a non-numeric check-run ref: ${checkRun.ref}`);
+    // REV-C-2 (provider-aware ref persistence): the `ref` returned by `createStatusCheck` is
+    // PROVIDER-OPAQUE (REV-M-10). Two paths, branched on `vcs.name`:
+    //
+    //   - GitHub: ref is a numeric check_run_id encoded as a string. Persist it into the numeric
+    //     `check_run_id` column via `updateJobCheckRun`. Fail loudly on a non-numeric ref so a
+    //     shape drift doesn't silently write NaN (WR-03).
+    //
+    //   - Bitbucket (and any other provider that returns a non-numeric ref): persist the ref as a
+    //     TEXT string via `updateJobStatusCheckRef`. The Bitbucket adapter returns the literal
+    //     'codra-review' (D-10), which used to throw `Number.isFinite('codra-review') === false`
+    //     before REV-C-2 -- now it is written into status_check_ref unchanged and the prepare
+    //     phase completes cleanly.
+    if (vcs.name === 'github') {
+      const numericCheckRunId = Number(checkRun.ref);
+      if (!Number.isFinite(numericCheckRunId)) {
+        throw new Error(`Provider ${vcs.name} returned a non-numeric check-run ref: ${checkRun.ref}`);
+      }
+      checkRunId = numericCheckRunId;
+      await updateJobCheckRun(env, job.id, checkRunId);
+    } else {
+      await updateJobStatusCheckRef(env, job.id, checkRun.ref);
     }
-    checkRunId = numericCheckRunId;
-    await updateJobCheckRun(env, job.id, checkRunId);
   }
 
   const files = await getDiffFiles(env, job, vcs, config);
@@ -1377,10 +1392,11 @@ async function runFinalizePhase(
     commitSha: pr.headSha,
     verdict: verdictSummary.verdict,
     summaryBody: formattedSummary,
+    jobIdHint: job.id,
     comments: finalComments.map(comment => ({
       path: comment.path,
       position: comment.position ?? undefined,
-      body: formatter.formatInlineComment(comment),
+      body: formatter.formatInlineComment(comment, { provider: vcs.name }),
     })),
   });
 
@@ -1435,8 +1451,17 @@ async function runFinalizePhase(
   try {
     // Check-run conclusion first: it drives the PR's status badge, so it matters more than labels
     // if the budget only allows one of them.
-    if (job.checkRunId) {
-      await vcs.updateStatusCheck(job.owner, job.repo, String(job.checkRunId), {
+    // R-02: the gate is widened to (statusCheckRef || checkRunId) so the Bitbucket path -- which
+    // only ever writes the TEXT status_check_ref (D-10) and never has a numeric check_run_id --
+    // still reaches the cosmetic-update try/catch block. The inner ref-string source is also
+    // provider-aware: GitHub passes String(checkRunId) (numeric), Bitbucket passes the TEXT
+    // status_check_ref directly. `markJobCheckRunCompleted` is intentionally NOT called for the
+    // Bitbucket path (it updates the GitHub check_run_completed_at column; Bitbucket tracks its
+    // own completion via Code Insights / build-status); the Bitbucket path's `updateStatusCheck`
+    // already issues a PUT + POST that completes the review.
+    if (job.statusCheckRef || job.checkRunId) {
+      const statusRef = job.statusCheckRef ?? (job.checkRunId !== null ? String(job.checkRunId) : '');
+      await vcs.updateStatusCheck(job.owner, job.repo, statusRef, {
         status: 'completed',
         conclusion: hasFailures ? 'failure' : (verdictSummary.verdict === 'approve' ? 'success' : 'neutral'),
         title: hasFailures ? 'Review partially failed' : (verdictSummary.verdict === 'approve' ? 'LGTM' : 'Comments posted'),
@@ -1445,6 +1470,10 @@ async function runFinalizePhase(
       // Only now is the check run genuinely completed -- record it so the maintenance sweep doesn't
       // redo it. If the update above threw, this line is skipped and completeTerminalCheckRuns will
       // finish the check run on a later invocation with a fresh budget.
+      // NOTE: this column is GitHub-specific (completeTerminalCheckRuns reads check_run_id). For
+      // Bitbucket jobs, `markJobCheckRunCompleted` is a no-op against a row with check_run_id NULL
+      // (the row's status_check_ref is the source of truth for completion); the maintenance sweep
+      // routes through VcsService.forRepo so the Bitbucket adapter's updateStatusCheck is called.
       await markJobCheckRunCompleted(env, job.id);
     }
 
