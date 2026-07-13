@@ -31,12 +31,14 @@ const sha = (char: string) => char.repeat(40);
 type BitbucketPullRequest = {
   id: number;
   title: string;
+  state?: string;
   source: { branch: { name: string }; commit: { hash: string } };
   destination: { branch: { name: string }; commit: { hash: string } };
 };
 
 type BitbucketRepository = {
   full_name: string;
+  name: string;
   workspace: { slug: string };
   uuid: string;
 };
@@ -48,15 +50,19 @@ type BitbucketWebhookPayload = {
 };
 
 function buildPayload(overrides: Partial<BitbucketWebhookPayload> = {}): BitbucketWebhookPayload {
+  const ws = overrides.repository?.workspace?.slug ?? 'ws-default';
+  const rs = overrides.repository?.name ?? 'bb-repo';
   return {
     repository: {
-      full_name: `${overrides.repository?.workspace?.slug ?? 'ws-default'}/bb-repo`,
-      workspace: { slug: overrides.repository?.workspace?.slug ?? 'ws-default' },
+      full_name: overrides.repository?.full_name ?? `${ws}/${rs}`,
+      name: rs,
+      workspace: { slug: ws },
       uuid: overrides.repository?.uuid ?? '{uuid-default}',
     },
     pullrequest: {
       id: overrides.pullrequest?.id ?? 101,
       title: overrides.pullrequest?.title ?? 'Bitbucket PR',
+      state: overrides.pullrequest?.state ?? 'OPEN',
       source: {
         branch: { name: overrides.pullrequest?.source?.branch?.name ?? 'feature' },
         commit: { hash: overrides.pullrequest?.source?.commit?.hash ?? sha('a') },
@@ -70,6 +76,25 @@ function buildPayload(overrides: Partial<BitbucketWebhookPayload> = {}): Bitbuck
   };
 }
 
+// Mock ingestReviewWebhookEvent so we can assert the provider threaded through without
+// depending on the downstream queue + ingest pipeline. `vi.hoisted` lets the spy reference
+// resolve at the same point in module init as the hoisted `vi.mock` call — without it the
+// factory runs before the `const ingestSpy = ...` declaration (vitest hoists vi.mock above
+// all top-level code) and would throw `cannot access before initialization`.
+const { ingestSpy } = vi.hoisted(() => ({
+  ingestSpy: vi.fn(),
+}));
+vi.mock('@server/core/webhook-ingest', async (importOriginal) => {
+  const actual = await importOriginal() as any;
+  return {
+    ...actual,
+    ingestReviewWebhookEvent: (...args: any[]) => {
+      ingestSpy(...args);
+      return Promise.resolve({ outcome: 'queued', job: { id: 'mock-job-id', status: 'queued' } });
+    },
+  };
+});
+
 dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
   const env = createTestEnv();
   const app = createApp();
@@ -80,21 +105,6 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
   // disabled — review finding 10).
   const createdRepoIds: number[] = [];
   const createdIdentities: Array<{ workspace: string; repoSlug: string }> = [];
-
-  // Mock ingestReviewWebhookEvent so we can assert the provider threaded through
-  // without depending on the downstream queue + ingest pipeline. The mock returns a
-  // successful `queued` outcome by default; individual tests override it.
-  const ingestSpy = vi.fn();
-  vi.mock('@server/core/webhook-ingest', async (importOriginal) => {
-    const actual = await importOriginal() as any;
-    return {
-      ...actual,
-      ingestReviewWebhookEvent: (...args: any[]) => {
-        ingestSpy(...args);
-        return Promise.resolve({ outcome: 'queued', job: { id: 'mock-job-id', status: 'queued' } });
-      },
-    };
-  });
 
   beforeEach(() => {
     ingestSpy.mockClear();
@@ -189,7 +199,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-1}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-1}' },
     });
     const body = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
@@ -220,7 +230,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-2}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-2}' },
       pullrequest: { id: 7, title: 'updated PR', source: { branch: { name: 'feature' }, commit: { hash: sha('c') } }, destination: { branch: { name: 'main' }, commit: { hash: sha('d') } } },
     });
     const body = JSON.stringify(payload);
@@ -258,16 +268,19 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     // Seed an existing job whose commit_sha matches the incoming pullrequest.source.commit.hash.
-    const matchedHash = sha('e');
+    // Use a valid Bitbucket-style hex SHA — decode the hex string to bytea so the bytes
+    // represent the SHA's nibbles, not the ASCII characters (the route's
+    // mostRecentJobForPullRequest+bytesToHex round-trip converts back to the same hex).
+    const matchedHash = '1'.repeat(40);
     await queryRows(
       env,
       `INSERT INTO jobs (repository_id, pr_number, pr_title, pr_author, commit_sha, base_sha, trigger, status, config_snapshot, created_at)
-       VALUES ($1, $2, 'previous review', 'old-author', $3::bytea, $4::bytea, 'auto', 'done', '{}'::jsonb, now() - interval '5 minutes')`,
-      [createdRepoIds[createdRepoIds.length - 1], 11, matchedHash, sha('f')],
+       VALUES ($1, $2, 'previous review', 'old-author', decode($3, 'hex'), decode($4, 'hex'), 'auto', 'done', '{}'::jsonb, now() - interval '5 minutes')`,
+      [createdRepoIds[createdRepoIds.length - 1], 11, matchedHash, '2'.repeat(40)],
     );
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-3}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-3}' },
       pullrequest: { id: 11, title: 'updated PR', source: { branch: { name: 'feature' }, commit: { hash: matchedHash } }, destination: { branch: { name: 'main' }, commit: { hash: sha('f') } } },
     });
     const body = JSON.stringify(payload);
@@ -299,7 +312,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-4}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-4}' },
     });
     const body = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
@@ -327,7 +340,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-5}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-5}' },
     });
     const body = JSON.stringify(payload);
 
@@ -348,7 +361,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-6}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-6}' },
     });
     const originalBody = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, originalBody);
@@ -381,7 +394,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     createdIdentities.push({ workspace, repoSlug });
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-7}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-7}' },
     });
     const body = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
@@ -403,7 +416,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     // NO seedCredential call -- no vcs_credentials row.
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-8}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-8}' },
     });
     const body = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
@@ -425,7 +438,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     const payload = buildPayload({
-      repository: { full_name: `${workspace}/${repoSlug}`, workspace: { slug: workspace }, uuid: '{u-9}' },
+      repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-9}' },
     });
     const body = JSON.stringify(payload);
     const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
@@ -452,6 +465,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     const payload = buildPayload({
       repository: {
         full_name: `${lowercaseWorkspace.toUpperCase()}/${lowercaseRepo.toUpperCase()}`,
+        name: lowercaseRepo.toUpperCase(),
         workspace: { slug: lowercaseWorkspace.toUpperCase() },
         uuid: '{u-10}',
       },
