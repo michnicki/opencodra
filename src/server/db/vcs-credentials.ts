@@ -24,10 +24,14 @@ type VcsCredentialRow = {
   repo_slug: string;
   encrypted_access_token: string | null;
   encrypted_webhook_secret: string | null;
-  token_expires_at: string | null;
+  // postgres.js decodes TIMESTAMPTZ columns into JS `Date` objects, not strings (IN-02). The DTO
+  // boundary (mapCredentialStatus -> vcsCredentialStatusSchema) normalizes these to ISO strings via
+  // `dateStringSchema`, which accepts `string | Date`; annotate the raw row with the driver's real
+  // return type so a future caller isn't misled into treating these as strings.
+  token_expires_at: Date | null;
   label: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at: Date;
+  updated_at: Date;
 };
 
 export type VcsCredentialKey = {
