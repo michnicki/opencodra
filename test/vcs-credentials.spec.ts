@@ -127,6 +127,12 @@ describe('computeCredentialStatus four-state boundaries (D-05)', () => {
     expect(computeCredentialStatus({ hasToken: true, tokenExpiresAt: null }, now)).toBe('valid');
   });
 
+  it('fails closed to "expired" on an unparseable expiry string (WR-01)', () => {
+    expect(computeCredentialStatus({ hasToken: true, tokenExpiresAt: 'not-a-date' }, now)).toBe(
+      'expired',
+    );
+  });
+
   it('uses a ~14 day expiring-soon threshold (D-05)', () => {
     expect(EXPIRING_SOON_THRESHOLD_MS).toBe(14 * 24 * 60 * 60 * 1000);
   });
