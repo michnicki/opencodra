@@ -268,6 +268,15 @@ export type ReviewRequest = {
   headRef: string | null;
   baseRef: string | null;
   trigger: 'auto' | 'mention';
+  // 05-04 widening (D-14 / Phase-3 deferred item closure): optional provider awareness so the
+  // Bitbucket webhook route can carry the Bitbucket identity (workspace + provider) alongside
+  // the GitHub-shaped fields. extractReviewRequest (the GitHub path) leaves these unset; the
+  // Bitbucket route in Task 2 sets them at construction time. NREG-02 holds because the GitHub
+  // call sites never set these fields and webhook-ingest.ts reads them via `?? 'github' /
+  // ?? null` fallbacks. The widening is purely additive — no Zod schema added here per project
+  // convention (the type lives next to its only constructor `extractReviewRequest`).
+  repositoryVcsProvider?: 'github' | 'bitbucket';
+  repositoryWorkspace?: string | null;
 };
 
 export function extractReviewRequest(input: {
