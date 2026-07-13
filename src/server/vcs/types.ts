@@ -64,6 +64,11 @@ export type VcsSubmitReviewInput = {
   verdict: 'approve' | 'comment';
   summaryBody: string;
   comments: VcsReviewComment[];
+  // REV-M-5: optional job id used by the Bitbucket adapter's combined marker+summary comment
+  // (REV-R-A). The GitHub adapter accepts it and ignores it -- the GitHub submitReview flow
+  // composes a single createReview POST that does not need the job id embedded in the body. The
+  // field is optional so existing GitHub call sites continue to type-check unchanged.
+  jobIdHint?: string;
 };
 
 /**
@@ -80,6 +85,19 @@ export interface VcsProvider {
   getPullRequestDiff(owner: string, repo: string, prNumber: number): Promise<string>;
 
   createStatusCheck(owner: string, repo: string, input: VcsCreateStatusCheckInput): Promise<{ ref: string }>;
+  /**
+   * Update an already-created status check.
+   *
+   * `ref` is PROVIDER-OPAQUE (REV-M-10): the adapter chooses how to interpret it. GitHub uses
+   * numeric check_run_id (as a string); Bitbucket uses report_id string ('codra-review' for
+   * both fresh and retry). For Bitbucket the build-status POST always uses key='codra-review'
+   * regardless of `ref` -- `ref` is consumed only by the Code Insights PUT path.
+   *
+   * The implementation contract:
+   *   - GitHubAdapter: `Number(ref)` -> numeric check_run_id; forwarded to `updateCheckRun`.
+   *   - BitbucketAdapter: `ref` -> the report_id for the Code Insights PUT; build-status POST
+   *     uses hardcoded key='codra-review'.
+   */
   updateStatusCheck(owner: string, repo: string, ref: string, input: VcsUpdateStatusCheckInput): Promise<void>;
 
   submitReview(owner: string, repo: string, prNumber: number, input: VcsSubmitReviewInput): Promise<{ ref: string }>;
