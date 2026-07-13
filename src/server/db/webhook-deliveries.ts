@@ -8,12 +8,18 @@ export async function recordWebhookDelivery(
     eventName: string;
     owner: string | null;
     repo: string | null;
+    // REV-R-D: when the caller has already resolved the repository id (e.g. the Bitbucket
+    // webhook route, which calls `findRepositoryByBitbucketIdentity` BEFORE HMAC verify per D-05),
+    // pass it here to attribute the delivery to the correct row. When omitted, the function keeps
+    // its existing owner/repo lookup path -- which is the byte-identical shape the legacy GitHub
+    // route uses (NREG-02 / D-02 byte-identity guarantee).
+    repositoryId?: number | null;
     payload: unknown;
   },
 ) {
-  let repositoryId: number | null = null;
+  let repositoryId: number | null = input.repositoryId ?? null;
 
-  if (input.owner && input.repo) {
+  if (repositoryId === null && input.owner && input.repo) {
     const [repoRow] = await queryRows<{ id: number }>(
       env,
       'SELECT id FROM repositories WHERE owner = $1 AND repo = $2',

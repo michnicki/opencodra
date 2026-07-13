@@ -187,7 +187,11 @@ export const jobSummarySchema = z.object({
   workflowInstanceId: z.string().nullable().optional(),
   owner: z.string(),
   repo: z.string(),
-  installationId: z.string(),
+  // REV-C-3: nullable for Bitbucket rows (which carry no installation_id after migration 005).
+  // GitHub rows continue to carry a non-null string. `.nullable().optional()` so existing
+  // pre-widening fixtures (which never supply it) still parse and the GitHub call chain in
+  // test/webhook-handling.spec.ts stays byte-identical.
+  installationId: z.string().nullable().optional(),
   prNumber: z.number().int(),
   prTitle: z.string().nullable(),
   prAuthor: z.string().nullable(),
@@ -211,6 +215,14 @@ export const jobSummarySchema = z.object({
   checkRunId: coerceNumberSchema.nullable().optional(),
   configSnapshot: repoConfigSchema.nullable().optional(),
   retryOfJobId: z.string().uuid().nullable().optional(),
+  // R-01: expose the parent repository's provider + workspace so VcsService.forRepo can branch
+  // without a separate query. Optional so pre-widening fixtures still parse.
+  repositoryVcsProvider: z.string().optional(),
+  repositoryWorkspace: z.string().nullable().optional(),
+  // REV-R-E: pass-through for the new jobs.status_check_ref column (Bitbucket Code Insights
+  // report key / generic status reference). Used by Plan 03's runPreparePhase writer and the
+  // runFinalizePhase gate widening. Optional so pre-widening fixtures still parse.
+  statusCheckRef: z.string().nullable().optional(),
 });
 
 export const jobsQuerySchema = z.object({

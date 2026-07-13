@@ -29,10 +29,15 @@ export class VcsService {
    */
   static async forRepo(
     env: AppBindings,
-    job: { installationId: string },
+    // REV-C-3 / R-01: installationId is now nullable (Bitbucket rows carry null). The adapter
+    // constructor still requires a string today; the Bitbucket branch lands in Wave 2 via the
+    // GitHubAdapter-for-non-github rows guard. For now, a null installationId should never reach
+    // this method (runReviewJob gates it via the R-02 widenings) -- pass through as '' defensively
+    // so the typecheck stays clean while we wait for the Wave 2 adapter implementation.
+    job: { installationId?: string | null },
     tracker?: { incrementSubrequests(count?: number): void },
   ): Promise<VcsProvider> {
-    return new GithubAdapter(env, job.installationId, tracker);
+    return new GithubAdapter(env, job.installationId ?? '', tracker);
   }
 
   /**

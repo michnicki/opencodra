@@ -6,7 +6,10 @@ import { getOrCreateRepository } from './repositories';
 export type JobRow = {
   id: string;
   workflow_instance_id: string | null;
-  installation_id: string;
+  // REV-C-3 / R-01: nullable so Bitbucket rows (which carry no installation_id after migration 005)
+  // map to `installationId: null` on the JobSummary without throwing. GitHub rows continue to
+  // carry a non-null string; the byte-identity guarantee for the GitHub call chain is preserved.
+  installation_id: string | null;
   owner: string;
   repo: string;
   pr_number: number;
@@ -42,6 +45,14 @@ export type JobRow = {
   summary_model: string | null;
   overall_confidence_score: number | null;
   steps: JobStep[] | string | null;
+  // R-01: exposed on the row so mapJob can publish repositoryVcsProvider / repositoryWorkspace on
+  // the JobSummary without a separate query (VcsService.forRepo reads it in Wave 2).
+  repositoryVcsProvider: string;
+  repositoryWorkspace: string | null;
+  // REV-R-E: pass-through for the status_check_ref column. The DB column was added in migration
+  // 003; this is the first row-type exposure so mapJob can surface it on the JobSummary and
+  // updateJobStatusCheckRef can write it without Number(ref) coercion.
+  status_check_ref: string | null;
 };
 
 type JobStep = {
@@ -116,6 +127,10 @@ export function mapJob(row: JobRow) {
     id: row.id,
     owner: row.owner,
     repo: row.repo,
+    // REV-C-3: Bitbucket rows have installation_id === null (no GitHub-App-equivalent numeric id).
+    // The schema's now-nullable `installationId` accepts it; GitHub rows continue to carry the
+    // non-null string. This is the read-side companion to the getOrCreateRepository bitbucket
+    // branch's bind-NULL write side.
     installationId: row.installation_id,
     prNumber: row.pr_number,
     prTitle: row.pr_title,
@@ -140,6 +155,14 @@ export function mapJob(row: JobRow) {
     configSnapshot: row.config_snapshot ? repoConfigSchema.parse(parseJsonColumn(row.config_snapshot, defaultRepoConfig)) : null,
     retryOfJobId: row.retry_of_job_id,
     workflowInstanceId: row.workflow_instance_id,
+    // R-01: surface parent repository's provider + workspace so VcsService.forRepo can branch
+    // without a separate query. Always present on the JobSummary now -- mapJob is the single
+    // publisher; GitHub rows carry repositoryWorkspace=null, Bitbucket rows carry it.
+    repositoryVcsProvider: row.repositoryVcsProvider,
+    repositoryWorkspace: row.repositoryWorkspace,
+    // REV-R-E: pass-through for jobs.status_check_ref (Bitbucket Code Insights report key /
+    // generic status reference). Plan 03's runFinalizePhase gate reads it via this field.
+    statusCheckRef: row.status_check_ref,
   });
 }
 
@@ -223,7 +246,11 @@ export async function hasPendingMaintenanceWork(env: Pick<AppBindings, 'HYPERDRI
 export async function insertJob(
   env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
   input: {
-    installationId: string;
+    // REV-C-3: nullable for the Bitbucket path (which passes `repositoryId` instead of
+    // `installationId`). The GitHub path always passes a non-null string; the byte-identity
+    // guarantee for the GitHub call chain is preserved because callers that pass a string still
+    // pass a string.
+    installationId: string | null;
     owner: string;
     repo: string;
     prNumber: number;
@@ -236,13 +263,35 @@ export async function insertJob(
     baseRef: string | null;
     configSnapshot?: RepoConfig | null;
     retryOfJobId?: string | null;
+    // REV-C-1 / REV-R-B: provider-aware repository resolution. When `repositoryId` is supplied
+    // (the Bitbucket route passes the id resolved by findRepositoryByBitbucketIdentity),
+    // getOrCreateRepository is BYPASSED entirely so the bitbucket branch's NULL installation_id
+    // binding is never touched and the row's existing installation_id stays NULL. The GitHub
+    // path (no repositoryId, no vcsProvider/workspace) continues to call getOrCreateRepository
+    // with the existing (installationId, owner, repo) shape byte-identically (D-02 byte-identity).
+    repositoryId?: number;
+    vcsProvider?: 'github' | 'bitbucket' | string;
+    workspace?: string | null;
   },
 ) {
-  const repositoryId = await getOrCreateRepository(env, {
-    installationId: input.installationId,
-    owner: input.owner,
-    repo: input.repo,
-  });
+  // REV-C-1: when repositoryId is supplied, the caller has already resolved the row id (typically
+  // via findRepositoryByBitbucketIdentity in the Bitbucket route) -- we MUST NOT invoke
+  // getOrCreateRepository, even with empty-string installationId, because the bitbucket branch
+  // would do an ON CONFLICT DO UPDATE on a different UNIQUE key and could (in the worst case)
+  // mutate a Phase-6-created row. Bypass is the safe path.
+  let repositoryId = input.repositoryId;
+  if (!repositoryId) {
+    // GitHub path (default): installationId must be a non-null string here -- callers that
+    // bypass getOrCreateRepository via repositoryId pass installationId as null, and they
+    // never reach this branch. The non-null assertion is safe.
+    repositoryId = await getOrCreateRepository(env, {
+      installationId: input.installationId ?? '',
+      owner: input.owner,
+      repo: input.repo,
+      vcsProvider: input.vcsProvider,
+      workspace: input.workspace,
+    });
+  }
 
   const [row] = await queryRows<JobRow>(
     env,
@@ -265,7 +314,7 @@ export async function insertJob(
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid)
         RETURNING *
       )
-      SELECT i.*, r.owner, r.repo, r.installation_id
+      SELECT i.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", i.status_check_ref
       FROM inserted i
       JOIN repositories r ON i.repository_id = r.id
     `,
@@ -334,7 +383,7 @@ export async function listJobs(
   const rows = await queryRows<JobRow>(
     env,
     `
-      SELECT j.*, r.owner, r.repo, r.installation_id
+      SELECT j.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", j.status_check_ref
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
       ${whereClause}
@@ -368,7 +417,7 @@ export async function getJobForProcessing(env: Pick<AppBindings, 'HYPERDRIVE'>, 
   const [row] = await queryRows<JobRow>(
     env,
     `
-      SELECT j.*, r.owner, r.repo, r.installation_id
+      SELECT j.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", j.status_check_ref
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
       WHERE j.id = $1
@@ -493,7 +542,7 @@ export async function claimJobLease(
           )
         RETURNING *
       )
-      SELECT c.*, r.owner, r.repo, r.installation_id
+      SELECT c.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", c.status_check_ref
       FROM claimed c
       JOIN repositories r ON c.repository_id = r.id
     `,
@@ -822,15 +871,32 @@ export async function completePreparationStep(env: Pick<AppBindings, 'HYPERDRIVE
 
 export async function findExistingJobForHead(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
-  input: { owner: string; repo: string; prNumber: number; commitSha: string; trigger: 'auto' | 'mention' },
+  input: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    commitSha: string;
+    trigger: 'auto' | 'mention';
+    // D-02: optional vcsProvider filter. Defaults to 'github' so the existing GitHub-only call
+    // sites (which never supply it) produce the byte-identical SQL WHERE -- the no-arg path stays
+    // unchanged (NREG-02 byte-identity guarantee). When 'bitbucket' is passed, the WHERE adds an
+    // explicit r.vcs_provider='bitbucket' guard so a Bitbucket commit never collides with a
+    // GitHub commit at the same owner/repo (the leading vcs_provider column differentiates them,
+    // but the explicit predicate makes intent obvious and avoids surprises on future provider
+    // additions).
+    vcsProvider?: 'github' | 'bitbucket';
+  },
 ) {
+  const vcsProvider = input.vcsProvider ?? 'github';
+
   const [row] = await queryRows<JobRow>(
     env,
     `
-      SELECT j.*, r.owner, r.repo, r.installation_id
+      SELECT j.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", j.status_check_ref
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
-      WHERE r.owner = $1
+      WHERE r.vcs_provider = $6
+        AND r.owner = $1
         AND r.repo = $2
         AND j.pr_number = $3
         AND j.commit_sha = $4
@@ -838,7 +904,7 @@ export async function findExistingJobForHead(
       ORDER BY j.created_at DESC
       LIMIT 1
     `,
-    [input.owner, input.repo, input.prNumber, hexToBytes(input.commitSha), input.trigger],
+    [input.owner, input.repo, input.prNumber, hexToBytes(input.commitSha), input.trigger, vcsProvider],
   );
 
   return row ? mapJob(row) : null;
@@ -993,7 +1059,7 @@ export async function recoverExpiredJobLeases(
         WHERE j.id = expired.id
         RETURNING j.*
       )
-      SELECT u.*, r.owner, r.repo, r.installation_id
+      SELECT u.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", u.status_check_ref
       FROM updated u
       JOIN repositories r ON u.repository_id = r.id
     `,
@@ -1013,7 +1079,7 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
   return queryRows<JobRow>(
     env,
     `
-      SELECT j.*, r.owner, r.repo, r.installation_id
+      SELECT j.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", j.status_check_ref
       FROM jobs j
       JOIN repositories r ON j.repository_id = r.id
       WHERE j.status IN ('done', 'failed', 'superseded', 'cancelled')
@@ -1026,16 +1092,131 @@ export async function getTerminalJobsNeedingCheckRunCompletion(
   );
 }
 
+/**
+ * REV-R-E: write the jobs.status_check_ref column directly. This is the single writer of
+ * status_check_ref -- Plan 03's runPreparePhase calls it with the string ref from
+ * createStatusCheck (Bitbucket Code Insights report key / generic status reference) instead of
+ * `Number(ref)` to check_run_id (which would fail for non-numeric refs). Plan 03's
+ * runFinalizePhase gate reads `job.statusCheckRef` via the JobRow widening in this file.
+ *
+ * Single UPDATE statement, parameterized; no string interpolation.
+ */
+export async function updateJobStatusCheckRef(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  statusCheckRef: string | null,
+) {
+  await queryRows(
+    env,
+    `UPDATE jobs SET status_check_ref = $2 WHERE id = $1`,
+    [jobId, statusCheckRef],
+  );
+}
+
+/**
+ * D-04: return the most recent job for a given (vcs_provider, workspace, owner, repo, prNumber)
+ * tuple. Used by the Bitbucket webhook route's `pullrequest:updated` commit-hash dedup -- when a
+ * push to the same PR head brings a new commit, the route looks up the prior job and skips
+ * re-enqueueing if its commit_sha matches.
+ *
+ * Per REV-R-C, the Bitbucket dual-filter on (workspace, owner) is intentional: both columns are
+ * populated with the workspace slug for Bitbucket rows, so the query matches uniformly. The
+ * `ORDER BY created_at DESC LIMIT 1` is a single-row scan over the (repository_id, pr_number)
+ * index; no full scan risk (T-05-03).
+ *
+ * Returns `JobRow | null`. The route can read `commit_sha` directly via `bytesToHex(...)`.
+ */
+export async function mostRecentJobForPullRequest(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  input: {
+    vcsProvider: 'github' | 'bitbucket';
+    workspace: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+  },
+): Promise<JobRow | null> {
+  const [row] = await queryRows<JobRow>(
+    env,
+    `
+      SELECT j.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", j.status_check_ref
+      FROM jobs j
+      JOIN repositories r ON j.repository_id = r.id
+      WHERE r.vcs_provider = $1
+        AND r.workspace = $2
+        AND r.owner = $3
+        AND r.repo = $4
+        AND j.pr_number = $5
+      ORDER BY j.created_at DESC
+      LIMIT 1
+    `,
+    [input.vcsProvider, input.workspace, input.owner, input.repo, input.prNumber],
+  );
+
+  return row ?? null;
+}
+
 export async function supersedeOlderJobs(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   input: {
-    installationId: string;
+    // REV-C-4: widened to { installationId?, workspace?, owner, repo, prNumber, newJobId, vcsProvider? }.
+    // The GitHub branch reads `installationId`; the Bitbucket branch reads `workspace` and
+    // IGNORES `installationId` entirely (no read of installation_id in the WHERE). The
+    // no-arg-GitHub path stays byte-identical because the default vcsProvider='github' branch
+    // builds the original SQL WHERE.
+    installationId?: string;
+    workspace?: string;
     owner: string;
     repo: string;
     prNumber: number;
     newJobId: string;
+    vcsProvider?: 'github' | 'bitbucket';
   },
 ): Promise<number> {
+  const vcsProvider = input.vcsProvider ?? 'github';
+
+  if (vcsProvider === 'bitbucket') {
+    // Bitbucket branch: filter by (vcs_provider='bitbucket', workspace, owner, repo). The
+    // `installationId` parameter is IGNORED in this branch -- a Phase-5 caller never supplies
+    // one (Bitbucket has no installation_id), and silently falling back to the GitHub shape
+    // would match no rows anyway. Per REV-R-C, the dual-filter on (workspace, owner) is
+    // intentional: both columns are populated with the workspace slug for Bitbucket rows.
+    const rows = await queryRows<{ id: string }>(
+      env,
+      `
+        UPDATE jobs j
+        SET status = 'superseded',
+            finished_at = now(),
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            error_msg = 'Superseded by a newer commit or job.'
+        FROM repositories r
+        WHERE j.repository_id = r.id
+          AND r.vcs_provider = 'bitbucket'
+          AND r.workspace = $1
+          AND r.owner = $2
+          AND r.repo = $3
+          AND j.pr_number = $4
+          AND j.id != $5
+          AND j.status IN ('queued', 'running')
+        RETURNING j.id
+      `,
+      [input.workspace ?? '', input.owner, input.repo, input.prNumber, input.newJobId],
+    );
+
+    return rows.length;
+  }
+
+  // GitHub branch (default): byte-identical to the original query when caller supplies
+  // installationId. The no-arg path defaults here too (vcsProvider='github'), so existing
+  // call sites (webhook-ingest.ts) keep producing the same SQL.
+  if (!input.installationId) {
+    // Defensive: a github call without installationId cannot match a row (every github repo
+    // has a non-null installation_id), so we short-circuit to zero updates instead of
+    // generating SQL with a NULL filter that would silently match nothing.
+    return 0;
+  }
+
   const rows = await queryRows<{ id: string }>(
     env,
     `
