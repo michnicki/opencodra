@@ -453,10 +453,13 @@ export const vcsCredentialStoreSchema = z
     // storage key must equal the lookup key, and doing it once at the single write boundary is
     // the cheapest place. Forward note for Phase 5: its webhook-route lookup must also
     // lowercase before querying.
-    workspace: z.string().trim().toLowerCase().min(1),
-    repoSlug: z.string().trim().toLowerCase().min(1),
-    accessToken: z.string().optional(),
-    webhookSecret: z.string().optional(),
+    // Length caps (IN-03): defense-in-depth against an authenticated user storing arbitrarily
+    // large values in the TEXT columns. Bounds are generous relative to real Bitbucket slugs and
+    // bot tokens, so they never reject legitimate input while keeping row size predictable.
+    workspace: z.string().trim().toLowerCase().min(1).max(100),
+    repoSlug: z.string().trim().toLowerCase().min(1).max(100),
+    accessToken: z.string().max(4096).optional(),
+    webhookSecret: z.string().max(4096).optional(),
     // STRICT ISO-datetime INPUT (review finding 5): a malformed string like `not-a-date` MUST
     // be rejected here so it never reaches the TIMESTAMPTZ insert. The serialized OUTPUT DTO
     // (vcsCredentialStatusSchema) keeps the loose `dateStringSchema` shape.
@@ -467,7 +470,7 @@ export const vcsCredentialStoreSchema = z
       })
       .nullable()
       .optional(),
-    label: z.string().nullable().optional(),
+    label: z.string().max(200).nullable().optional(),
     // Rotate-in-place semantics (D-11): omit a secret to leave it untouched, or set the
     // corresponding clear flag to null it out.
     clearToken: z.boolean().optional(),
