@@ -12,6 +12,7 @@ import { createReposRouter } from '@server/routes/api/repos';
 import { createStatsRouter } from '@server/routes/api/stats';
 import { createModelsRouter } from '@server/routes/api/models';
 import { createSettingsRouter } from '@server/routes/api/settings';
+import { createVcsCredentialsRouter } from '@server/routes/api/vcs-credentials';
 
 async function serveIndex(c: Context<AppEnv>) {
   return c.env.ASSETS.fetch(new URL('/index.html', c.req.url));
@@ -36,6 +37,7 @@ export function createApp() {
   app.route('/api/stats', createStatsRouter());
   app.route('/api/models', createModelsRouter());
   app.route('/api/settings', createSettingsRouter());
+  app.route('/api/vcs-credentials', createVcsCredentialsRouter());
 
   app.get('/login', serveIndex);
   app.get('/', serveIndex); // Unauthenticated landing page
