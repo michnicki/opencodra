@@ -118,6 +118,19 @@ describe('BitbucketClient', () => {
     });
   });
 
+  it('posts marker and summary comments without an inline anchor', async () => {
+    const mock = installBitbucketFetchMock();
+    const { client } = createClient();
+
+    await client.postPullRequestComment('acme', 'backend', 42, {
+      content: { raw: '<!-- codra:job=job-1 commit=head123 -->' },
+    });
+
+    expect(mock.calls[0].body).toEqual({
+      content: { raw: '<!-- codra:job=job-1 commit=head123 -->' },
+    });
+  });
+
   it('approves a pull request with an empty POST body', async () => {
     const mock = installBitbucketFetchMock();
     const { client, tracker } = createClient();
