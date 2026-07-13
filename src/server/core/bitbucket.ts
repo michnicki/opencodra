@@ -200,13 +200,16 @@ export class BitbucketClient {
     const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments`;
     // `line_type` is Codra's internal classification. Bitbucket's OpenAPI accepts only path and
     // to/from on the wire: removed lines anchor with `from`, while added/context lines use `to`.
-    const inline = comment.line_type === 'removed'
-      ? { path: comment.path, from: comment.line }
-      : { path: comment.path, to: comment.line };
-    const response = await this.request('POST', path, {
-      content: { raw: comment.content.raw },
-      inline,
-    });
+    // Marker and summary comments carry content only and intentionally omit the inline object.
+    const body = 'line_type' in comment
+      ? {
+          content: { raw: comment.content.raw },
+          inline: comment.line_type === 'removed'
+            ? { path: comment.path, from: comment.line }
+            : { path: comment.path, to: comment.line },
+        }
+      : { content: { raw: comment.content.raw } };
+    const response = await this.request('POST', path, body);
     return (await response.json()) as { id: number };
   }
 
