@@ -68,7 +68,9 @@ function uniqueIdentity() {
 }
 
 const createdIdentities: Array<{ workspace: string; repoSlug: string }> = [];
-function track(id: { workspace: string; repoSlug: string }) {
+// Generic so the returned identity keeps its `vcsProvider` field (type-only fix; the runtime
+// push shape and behavior are unchanged — only the compile-time type is preserved).
+function track<T extends { workspace: string; repoSlug: string }>(id: T): T {
   createdIdentities.push({ workspace: id.workspace, repoSlug: id.repoSlug });
   return id;
 }
@@ -225,7 +227,7 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
     const webhookSecret = 'webhook-should-never-serialize';
 
     const postRes = await authedPost(cookie, { ...id, accessToken, webhookSecret, label: 'prod' });
-    const postBody = await postRes.json();
+    const postBody = await postRes.json() as any;
     expect(postRes.status).toBe(200);
     expect(postBody.credential).toMatchObject({
       hasToken: true,
@@ -235,7 +237,7 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
     expect(typeof postBody.credential.status).toBe('string');
 
     const getRes = await authedGet(cookie);
-    const getBody = await getRes.json();
+    const getBody = await getRes.json() as any;
     expect(getRes.status).toBe(200);
     expect(Array.isArray(getBody.credentials)).toBe(true);
     const entry = getBody.credentials.find(
@@ -295,7 +297,9 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
     // Review finding 1: rotate ONLY webhookSecret, OMITTING tokenExpiresAt + label ->
     // previously-stored expiry + label must be PRESERVED (not nulled by EXCLUDED-overwrite).
     expect((await authedPost(cookie, { ...id, webhookSecret: 'wh-2' })).status).toBe(200);
-    rows = await queryRows<{ label: string | null; token_expires_at: string | null }>(
+    // Type param includes encrypted_access_token to stay assignable to the `rows` variable's
+    // declared type (line ~276); the column is not selected here and is never read (type-only).
+    rows = await queryRows<{ encrypted_access_token: string; label: string | null; token_expires_at: string | null }>(
       env,
       'SELECT label, token_expires_at FROM vcs_credentials WHERE vcs_provider = $1 AND workspace = $2 AND repo_slug = $3',
       [id.vcsProvider, id.workspace, id.repoSlug],
@@ -305,7 +309,7 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
 
     // Review finding 3: clearToken:true -> hasToken false on the subsequent GET.
     expect((await authedPost(cookie, { ...id, clearToken: true })).status).toBe(200);
-    const getBody = await (await authedGet(cookie)).json();
+    const getBody = await (await authedGet(cookie)).json() as any;
     const entry = getBody.credentials.find(
       (c: any) => c.workspace === id.workspace && c.repoSlug === id.repoSlug,
     );
@@ -331,7 +335,7 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
     expect(delRes.status).toBe(200);
     expect(await delRes.json()).toEqual({ ok: true });
 
-    const getBody = await (await authedGet(cookie)).json();
+    const getBody = await (await authedGet(cookie)).json() as any;
     const entry = getBody.credentials.find(
       (c: any) => c.workspace === id.workspace && c.repoSlug === id.repoSlug,
     );
