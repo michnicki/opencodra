@@ -12,6 +12,7 @@ import {
   Moon,
   Activity,
   Settings,
+  KeyRound,
   Star,
   X,
   ChevronLeft,
@@ -34,6 +35,7 @@ const links = [
   { to: '/jobs', label: 'Jobs', icon: Activity, end: false },
   { to: '/repos', label: 'Repos', icon: GitBranch, end: false },
   { to: '/stats', label: 'Stats', icon: BarChart2, end: false },
+  { to: '/credentials', label: 'Credentials', icon: KeyRound, end: false },
   { to: '/settings', label: 'Settings', icon: Settings, end: false },
 ];
 
