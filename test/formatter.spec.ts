@@ -29,6 +29,28 @@ describe('FormatterService.severityIcon', () => {
   it('falls back to a plain circle for unknown severities', () => {
     expect(formatter.severityIcon('unknown' as ParsedReviewComment['severity'])).toBe('⚪');
   });
+
+  // D-13 (REV-R-01 widening): the Bitbucket provider path uses emoji instead of <img>. The GitHub
+  // path is unchanged — passing provider='github' (or no options at all) returns the <img> shape.
+  it.each([
+    ['P0', '🚨 P0'],
+    ['P1', '⚠️ P1'],
+    ['P2', '⚠️ P2'],
+    ['P3', 'ℹ️ P3'],
+    ['nit', '💬 nit'],
+  ] as const)('returns emoji for %s when provider is "bitbucket"', (severity, expected) => {
+    expect(formatter.severityIcon(severity, { provider: 'bitbucket' })).toBe(expected);
+  });
+
+  it('returns the <img> shape for "github" provider (byte-identical to no-options path)', () => {
+    const icon = formatter.severityIcon('P1', { provider: 'github' });
+    expect(icon).toContain(`<img src="${BASE_URL}/icons/p1-icon.svg"`);
+    expect(icon).toContain('alt="P1"');
+  });
+
+  it('falls back to a plain circle for unknown severities when provider is "bitbucket"', () => {
+    expect(formatter.severityIcon('unknown' as ParsedReviewComment['severity'], { provider: 'bitbucket' })).toBe('⚪');
+  });
 });
 
 describe('FormatterService.stripLeadingTags', () => {
@@ -62,6 +84,17 @@ describe('FormatterService.formatInlineComment', () => {
     const output = formatter.formatInlineComment(comment({ severity: 'P0', title: 'SQL injection risk', body: 'Details here.' }));
     expect(output).toContain(`<img src="${BASE_URL}/icons/p0-icon.svg"`);
     expect(output).toContain('<strong>SQL injection risk</strong>');
+    expect(output).toContain('Details here.');
+  });
+
+  it('uses emoji prefix when provider is "bitbucket" (D-13)', () => {
+    const output = formatter.formatInlineComment(
+      comment({ severity: 'P0', title: 'Bitbucket finding', body: 'Details here.' }),
+      { provider: 'bitbucket' },
+    );
+    expect(output.startsWith('🚨 P0 ')).toBe(true);
+    expect(output).not.toContain('<img ');
+    expect(output).toContain('<strong>Bitbucket finding</strong>');
     expect(output).toContain('Details here.');
   });
 
