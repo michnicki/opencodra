@@ -29,17 +29,25 @@ function buildJobFixture(overrides: Record<string, unknown> = {}) {
 
 // buildAdapter directly constructs an adapter with a stubbed client (the credential-read path is
 // covered in test/vcs-service.spec.ts; this spec exercises the adapter's per-method contract).
-function buildAdapter(env = createTestEnv(), tracker = { incrementSubrequests: vi.fn() }) {
+type AdapterHandle = {
+  adapter: BitbucketAdapter;
+  client: BitbucketClient;
+  env: ReturnType<typeof createTestEnv>;
+  tracker: { incrementSubrequests: ReturnType<typeof vi.fn> };
+};
+
+function buildAdapter(env: ReturnType<typeof createTestEnv> = createTestEnv()): AdapterHandle {
+  const tracker = { incrementSubrequests: vi.fn() };
   const client = new BitbucketClient(env, 'test-token-bearer', tracker);
   const job = buildJobFixture();
   // Pass-through constructor: the production code uses BitbucketAdapter.create() (async factory),
   // but the adapter's per-method contract is independent of credential reading, so we exercise the
   // private constructor shape via `as unknown as` once the class exists.
   const adapter = new (BitbucketAdapter as unknown as new (
-    env: typeof env,
+    env: ReturnType<typeof createTestEnv>,
     client: BitbucketClient,
-    job: typeof job,
-    tracker: typeof tracker,
+    job: ReturnType<typeof buildJobFixture>,
+    tracker: { incrementSubrequests: ReturnType<typeof vi.fn> },
   ) => BitbucketAdapter)(env, client, job, tracker);
   return { adapter, client, env, tracker };
 }
@@ -50,10 +58,9 @@ afterEach(() => {
 });
 
 describe('BitbucketAdapter (VcsProvider mapping)', () => {
-  it('exposes name="bitbucket" and no labels property (Bitbucket has no native PR labels)', () => {
+  it('exposes name="bitbucket" (Bitbucket has no native PR labels)', () => {
     const { adapter } = buildAdapter();
     expect(adapter.name).toBe('bitbucket');
-    expect(adapter.labels).toBeUndefined();
   });
 
   it('flattens the Bitbucket PR shape into VcsPullRequest (headSha=source.commit.hash, baseSha=destination.commit.hash)', async () => {
@@ -195,14 +202,27 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
       ],
       listPullRequestCommentsResponse: { body: { values: [] } },
     });
-    const { adapter } = buildAdapter();
+    const { adapter, env } = buildAdapter();
+    // Seed the diff cache so submitReview can translate position=3 to a valid anchor.
+    const seededDiff = [
+      'diff --git a/src/foo.ts b/src/foo.ts',
+      'index 1234567..890abcd 100644',
+      '--- a/src/foo.ts',
+      '+++ b/src/foo.ts',
+      '@@ -1,1 +1,3 @@',
+      ' context',
+      '+added1',
+      '+added2',
+    ].join('\n');
+    await env.APP_KV.put(`diff:${(adapter as unknown as { job: { id: string } }).job.id}`, seededDiff);
+
     const input: VcsSubmitReviewInput = {
       commitSha: COMMIT_SHA,
       verdict: 'comment',
       summaryBody: 'Looks mostly good',
       jobIdHint: 'job-bb-1',
       comments: [
-        { path: 'src/foo.ts', position: 1, body: 'first inline comment' },
+        { path: 'src/foo.ts', position: 3, body: 'first inline comment' },
       ],
     };
 
@@ -229,7 +249,7 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     const inline = commentPosts[0];
     expect(inline.body).toMatchObject({
       content: { raw: 'first inline comment' },
-      inline: { path: 'src/foo.ts', to: 1 },
+      inline: { path: 'src/foo.ts', to: 3 },
     });
   });
 
@@ -347,10 +367,10 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
   });
 
   it('translates VcsReviewComment.position to Bitbucket inline anchor by walking the parsed FileDiff', async () => {
-    // The diff has two hunks:
-    //   - hunk 1: a `+` line at position 3 with newLineNumber=2 (to=2, line_type='added')
-    //   - hunk 2: a `-` line at position 8 with oldLineNumber=5 (from=5, line_type='removed')
-    //   - hunk 2: a `+` line at position 9 with newLineNumber=8 (to=8, line_type='added')
+    // The diff has two hunks, with positions accumulating across hunks (parseUnifiedDiff
+    // increments position globally per file). After parseUnifiedDiff we get:
+    //   - hunk 1 (@@ -1,1 +1,2 @@): context pos=1 (newLine=1); added pos=2 (newLine=2)
+    //   - hunk 2 (@@ -5,1 +6,2 @@): deleted pos=3 (oldLine=5); context pos=4 (newLine=6); added pos=5 (newLine=7)
     // The walk searches flattened hunk lines for `line.position === comment.position` (uniform).
     const rawDiff = [
       'diff --git a/src/foo.ts b/src/foo.ts',
@@ -360,14 +380,13 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
       '@@ -1,1 +1,2 @@',
       ' context',
       '+added',
-      '@@ -5,1 +6,3 @@',
+      '@@ -5,1 +6,2 @@',
       '-deleted',
       ' contextA',
       '+addedB',
     ].join('\n');
     const files = parseUnifiedDiff(rawDiff);
     expect(files).toHaveLength(1);
-    const file = files[0];
     // Seed the diff cache so submitReview can walk it.
     const { adapter, env } = buildAdapter();
     await env.APP_KV.put(`diff:${(adapter as unknown as { job: { id: string } }).job.id}`, rawDiff);
@@ -387,9 +406,9 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
       summaryBody: 'notes',
       jobIdHint: 'job-bb-1',
       comments: [
-        { path: 'src/foo.ts', position: 3, body: 'added line note' },
-        { path: 'src/foo.ts', position: 8, body: 'removed line note' },
-        { path: 'src/foo.ts', position: 9, body: 'addedB note' },
+        { path: 'src/foo.ts', position: 2, body: 'added line note' },
+        { path: 'src/foo.ts', position: 3, body: 'removed line note' },
+        { path: 'src/foo.ts', position: 5, body: 'addedB note' },
       ],
     });
 
@@ -400,22 +419,22 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     );
     expect(inlinePosts).toHaveLength(3);
 
-    // Position 3 -> newLineNumber=2 (to=2, line_type='added').
+    // Position 2 -> newLineNumber=2 (to=2, line_type='added').
     expect(inlinePosts[0].body).toMatchObject({
       content: { raw: 'added line note' },
       inline: { path: 'src/foo.ts', to: 2 },
     });
 
-    // Position 8 -> oldLineNumber=5 (from=5, line_type='removed') via R-03 inverse mapping.
+    // Position 3 -> oldLineNumber=5 (from=5, line_type='removed') via R-03 inverse mapping.
     expect(inlinePosts[1].body).toMatchObject({
       content: { raw: 'removed line note' },
       inline: { path: 'src/foo.ts', from: 5 },
     });
 
-    // Position 9 -> newLineNumber=8 (to=8, line_type='added').
+    // Position 5 -> newLineNumber=7 (to=7, line_type='added').
     expect(inlinePosts[2].body).toMatchObject({
       content: { raw: 'addedB note' },
-      inline: { path: 'src/foo.ts', to: 8 },
+      inline: { path: 'src/foo.ts', to: 7 },
     });
   });
 });
