@@ -38,8 +38,11 @@ const STATUS_PRESENTATION: Record<
   missing: { variant: 'neutral', icon: CircleDashed, label: 'Not configured' },
 };
 
-function credentialKey(c: Pick<VcsCredentialStatus, 'workspace' | 'repoSlug'>) {
-  return `${c.workspace}/${c.repoSlug}`;
+// The storage key is the full (vcs_provider, workspace, repo_slug) triple, so the client key
+// includes the provider too (IN-04). Omitting it is safe today (bitbucket-only) but would collide
+// two providers sharing a workspace/slug as the same React key and in the post-save filter/replace.
+function credentialKey(c: Pick<VcsCredentialStatus, 'vcsProvider' | 'workspace' | 'repoSlug'>) {
+  return `${c.vcsProvider}/${c.workspace}/${c.repoSlug}`;
 }
 
 function formatExpiry(tokenExpiresAt: string | null): string {
@@ -367,6 +370,9 @@ export function VcsCredentialsPage() {
         <div className="flex min-w-0 flex-col gap-2.5">
           {credentials.map((credential) => {
             const key = credentialKey(credential);
+            // Displayed identity stays provider-free (workspace/repoSlug); the provider only
+            // participates in the collision-safe `key` (IN-04).
+            const identity = `${credential.workspace}/${credential.repoSlug}`;
             const isEditing = editingKey === key;
             return (
               <Card key={key}>
@@ -374,7 +380,7 @@ export function VcsCredentialsPage() {
                   <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate font-mono text-sm text-foreground">{key}</span>
+                        <span className="truncate font-mono text-sm text-foreground">{identity}</span>
                         <StatusBadge status={credential.status} />
                         {credential.label && (
                           <span className="text-xs text-muted-foreground">{credential.label}</span>
