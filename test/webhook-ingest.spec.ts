@@ -1,11 +1,12 @@
-// Unit tests for the provider-agnostic webhook ingest helper (Phase 3, Plan 1).
+// Unit tests for the provider-agnostic webhook ingest helper (Phase 3, Plan 1; extended in 05-04).
 //
 // These tests drive `ingestReviewWebhookEvent` directly with a hand-built `ReviewRequest`
 // fixture -- no GitHub payload, no HTTP layer, no `extractReviewRequest` call. That is the
-// point: this helper is provider-agnostic (criterion 2), and Phase 5 will add a second
+// point: this helper is provider-agnostic (criterion 2), and Phase 5 adds a second
 // (Bitbucket) caller. `test/webhook-handling.spec.ts` remains the byte-identical HTTP-level
 // regression gate for the GitHub route; this file proves the helper's contract in isolation.
 
+import { vi } from 'vitest';
 import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
 import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 import { insertJob, getJobForProcessing } from '@server/db/jobs';
@@ -122,12 +123,10 @@ dbDescribe('ingestReviewWebhookEvent (webhook-ingest helper)', () => {
   });
 
   it('Test 4: explicit provider passthrough on the null-fallback (event-only) path', async () => {
-    // REVIEW finding 3 / <deferred_to_phase_5>: this test only proves the helper attaches an
-    // explicitly-passed `provider` value onto the event-only (null-fallback) queue message. It
-    // is driven on the null-fallback path deliberately -- it does NOT prove concrete Bitbucket
-    // JOB identity is safe. insertJob/findExistingJobForHead/supersedeOlderJobs/repo-config
-    // lookup are not yet provider-aware; making the concrete-job path Bitbucket-safe is Phase 5
-    // work (see 03-01-PLAN.md's <deferred_to_phase_5> section).
+    // 05-04 widening: this test exercises the null-fallback path with provider: 'bitbucket'
+    // explicit. The Phase-3 deferred-item test now passes because the helper attaches
+    // provider onto the queue message -- the `findExistingJobForHead` / `supersedeOlderJobs`
+    // path is also provider-aware (Test 6 + Test 7 below cover the concrete-job path).
     const deliveryId = `delivery-t4-${Date.now()}`;
 
     const result = await ingestReviewWebhookEvent(env, {
@@ -192,5 +191,102 @@ dbDescribe('ingestReviewWebhookEvent (webhook-ingest helper)', () => {
 
     const olderAfter = await getJobForProcessing(env, olderJob.id);
     expect(olderAfter?.status).toBe('superseded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 05-04 widening: the Bitbucket concrete-job path (Phase-3 deferred-item closure).
+// Spy on @server/db/jobs to assert the vcsProvider threads through findExistingJobForHead +
+// supersedeOlderJobs. Tests 1-5 above are UNCHANGED -- GitHub path byte-identical (NREG-02).
+// ---------------------------------------------------------------------------
+dbDescribe('ingestReviewWebhookEvent (Bitbucket concrete-job path - 05-04 widening)', () => {
+  const env = createTestEnv();
+
+  // vi.mock is hoisted to the top of the file by Vitest, so the factory must use vi.hoisted
+  // to see the spy references. Mirrors the test/review-resilience.spec.ts:16-20 pattern.
+  const { findExistingJobForHeadSpy, supersedeOlderJobsSpy } = vi.hoisted(() => ({
+    findExistingJobForHeadSpy: vi.fn(),
+    supersedeOlderJobsSpy: vi.fn(),
+  }));
+
+  vi.mock('@server/db/jobs', async (importOriginal) => {
+    const actual = await importOriginal() as any;
+    return {
+      ...actual,
+      findExistingJobForHead: (...args: any[]) => {
+        findExistingJobForHeadSpy(...args);
+        return actual.findExistingJobForHead(...args);
+      },
+      supersedeOlderJobs: (...args: any[]) => {
+        supersedeOlderJobsSpy(...args);
+        return actual.supersedeOlderJobs(...args);
+      },
+    };
+  });
+
+  beforeEach(() => {
+    (env.REVIEW_QUEUE as any).sent.length = 0;
+    findExistingJobForHeadSpy.mockClear();
+    supersedeOlderJobsSpy.mockClear();
+  });
+
+  it('Test 6 (Bitbucket concrete-job path): threads provider:bitbucket through findExistingJobForHead + supersedeOlderJobs', async () => {
+    const owner = `owner-bb-c-${Date.now()}`;
+    const repo = `repo-bb-c-${Date.now()}`;
+    const reviewRequest = buildReviewRequest({
+      owner,
+      repo,
+      // Bitbucket has no installation_id; the route passes '' (mirrors the Task 2 route
+      // construction site which uses an empty-string placeholder).
+      installationId: '',
+      commitSha: sha('7'),
+      baseSha: sha('8'),
+      repositoryVcsProvider: 'bitbucket',
+      repositoryWorkspace: 'ws-bitbucket',
+    });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest,
+      configSnapshot: defaultRepoConfig,
+      deliveryId: `delivery-bb-c-${Date.now()}`,
+      requestId: 'req-bb-c',
+      eventName: 'pullrequest:created',
+    });
+
+    expect(result.outcome).toBe('queued');
+
+    // findExistingJobForHead receives vcsProvider='bitbucket' (NOT the default 'github').
+    expect(findExistingJobForHeadSpy).toHaveBeenCalledTimes(1);
+    const dedupCall = findExistingJobForHeadSpy.mock.calls[0][1];
+    expect(dedupCall.vcsProvider).toBe('bitbucket');
+
+    // supersedeOlderJobs receives vcsProvider='bitbucket' (the chain threads provider through).
+    expect(supersedeOlderJobsSpy).toHaveBeenCalledTimes(1);
+    const supersedeCall = supersedeOlderJobsSpy.mock.calls[0][1];
+    expect(supersedeCall.vcsProvider).toBe('bitbucket');
+
+    // Queue message carries provider: 'bitbucket' (the explicit effectiveProvider path).
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].provider).toBe('bitbucket');
+  });
+
+  it('Test 7 (provider passthrough on queued-event path with bitbucket explicit): reviewRequest:null + provider:bitbucket', async () => {
+    const deliveryId = `delivery-bb-e-${Date.now()}`;
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: null,
+      configSnapshot: defaultRepoConfig,
+      deliveryId,
+      requestId: 'req-bb-e',
+      eventName: 'issue_comment',
+      provider: 'bitbucket',
+    });
+
+    expect(result).toEqual({ outcome: 'queued_event' });
+
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].provider).toBe('bitbucket');
   });
 });

@@ -6,6 +6,7 @@ import { requireCsrfHeader } from '@server/middleware/csrf';
 import { observability } from '@server/middleware/observability';
 import { createAuthRouter } from '@server/routes/auth';
 import { createWebhookRouter } from '@server/routes/webhook';
+import { createBitbucketWebhookRouter } from '@server/routes/webhook-bitbucket';
 import { createAuthApiRouter } from '@server/routes/api/auth';
 import { createJobsRouter } from '@server/routes/api/jobs';
 import { createReposRouter } from '@server/routes/api/repos';
@@ -27,6 +28,7 @@ export function createApp() {
 
   app.route('/auth', createAuthRouter());
   app.route('/webhook', createWebhookRouter());
+  app.route('/webhook/bitbucket', createBitbucketWebhookRouter());
 
   app.use('/api/*', requireSession);
   app.use('/api/*', requireCsrfHeader);
