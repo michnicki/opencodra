@@ -1,9 +1,30 @@
 import type { ParsedReviewComment } from '@shared/schema';
 
+// Provider discriminator consumed by `severityIcon` and forwarded by `formatInlineComment`. The
+// formatter-level branch keeps the Bitbucket-specific emoji rendering isolated from the GitHub
+// path so reviewers can see at a glance that the GitHub <img> output is byte-identical (D-13).
+export type FormatterProvider = 'github' | 'bitbucket';
+export type FormatterOptions = { provider?: FormatterProvider };
+
 export class FormatterService {
   constructor(private baseUrl: string) {}
 
-  severityIcon(severity: ParsedReviewComment['severity']) {
+  severityIcon(severity: ParsedReviewComment['severity'], options?: FormatterOptions) {
+    // D-13: Bitbucket has no native PR-label-style icon assets; emoji is the supported inline
+    // rendering. The switch remains the same; only the per-case output changes when provider is
+    // 'bitbucket'. Any other provider value (including the default 'github' / undefined path) uses
+    // the existing <img> shape byte-identically.
+    if (options?.provider === 'bitbucket') {
+      switch (severity) {
+        case 'P0':  return '🚨 P0';
+        case 'P1':  return '⚠️ P1';
+        case 'P2':  return '⚠️ P2';
+        case 'P3':  return 'ℹ️ P3';
+        case 'nit': return '💬 nit';
+        default:    return '⚪';
+      }
+    }
+
     const iconBase = `${this.baseUrl}/icons`;
     const img = (name: string, alt: string) =>
       `<img src="${iconBase}/${name}-icon.svg" width="20" height="20" alt="${alt}" style="vertical-align:middle" />`;
@@ -30,7 +51,7 @@ export class FormatterService {
     return current;
   }
 
-  formatInlineComment(comment: ParsedReviewComment) {
+  formatInlineComment(comment: ParsedReviewComment, options?: FormatterOptions) {
     // Clean the body: strip any residual prefix tags, then remove a leading line
     // that duplicates the title (can happen with stale DB records).
     let body = this.stripLeadingTags(comment.body);
@@ -43,7 +64,7 @@ export class FormatterService {
       body = body.slice(firstLine.length).replace(/^[\n\r]+/, '');
     }
 
-    return `${this.severityIcon(comment.severity)} <strong>${comment.title}</strong>\n\n${body}`;
+    return `${this.severityIcon(comment.severity, options)} <strong>${comment.title}</strong>\n\n${body}`;
   }
 
   summarizeVerdict(comments: ParsedReviewComment[], hasFailures: boolean) {
