@@ -6,7 +6,7 @@ import { loadRepoConfig } from '@server/core/config';
 import { extractReviewRequest } from '@server/core/review';
 import { verifyGitHubWebhookSignature } from '@server/core/verify';
 import { jsonError } from '@server/core/http';
-import { findExistingJobForHead, insertJob, supersedeOlderJobs } from '@server/db/jobs';
+import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 
 export async function handleGitHubWebhook(c: Context<AppEnv>) {
@@ -69,64 +69,26 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
       config: repoConfig.parsedJson,
     });
 
-    if (extracted?.commitSha && extracted.baseSha) {
-      const existingJob = await findExistingJobForHead(c.env, {
-        owner: extracted.owner,
-        repo: extracted.repo,
-        prNumber: extracted.prNumber,
-        commitSha: extracted.commitSha,
-        trigger: extracted.trigger,
-      });
+    const result = await ingestReviewWebhookEvent(c.env, {
+      reviewRequest: extracted,
+      configSnapshot: repoConfig.parsedJson,
+      deliveryId,
+      requestId: c.get('requestId'),
+      eventName,
+    });
 
-      if (existingJob) {
-        return c.json({
-          ok: true,
-          duplicate: true,
-          message: existingJob.status === 'queued' ? 'queued' : 'duplicate',
-          job: existingJob,
-        }, 202);
-      }
-
-      const job = await insertJob(c.env, {
-        installationId: extracted.installationId,
-        owner: extracted.owner,
-        repo: extracted.repo,
-        prNumber: extracted.prNumber,
-        prTitle: extracted.prTitle,
-        prAuthor: extracted.prAuthor,
-        commitSha: extracted.commitSha,
-        baseSha: extracted.baseSha,
-        trigger: extracted.trigger,
-        headRef: extracted.headRef,
-        baseRef: extracted.baseRef,
-        configSnapshot: repoConfig.parsedJson,
-      });
-
-      await supersedeOlderJobs(c.env, {
-        installationId: extracted.installationId,
-        owner: extracted.owner,
-        repo: extracted.repo,
-        prNumber: extracted.prNumber,
-        newJobId: job.id,
-      });
-
-      await c.env.REVIEW_QUEUE.send({
-        jobId: job.id,
-        deliveryId,
-        phase: 'prepare',
-        requestId: c.get('requestId'),
-      });
-
-      return c.json({ ok: true, message: 'queued', job }, 202);
+    if (result.outcome === 'duplicate') {
+      return c.json({
+        ok: true,
+        duplicate: true,
+        message: result.job.status === 'queued' ? 'queued' : 'duplicate',
+        job: result.job,
+      }, 202);
     }
 
-    // Events that do not produce a concrete job, such as PR close cleanup or
-    // mention events that need PR lookup, are still handled by the worker.
-    await c.env.REVIEW_QUEUE.send({
-      deliveryId,
-      eventName,
-      requestId: c.get('requestId'),
-    });
+    if (result.outcome === 'queued') {
+      return c.json({ ok: true, message: 'queued', job: result.job }, 202);
+    }
 
     return c.json({ ok: true, message: 'queued' }, 202);
 }
