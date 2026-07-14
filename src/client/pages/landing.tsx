@@ -1,4 +1,7 @@
+import { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Sun, Moon, ArrowRight, ExternalLink } from 'lucide-react';
+import { api } from '@client/lib/api';
 import { useTheme } from '@client/lib/theme';
 import { GithubMark } from '@client/components/shared/github-mark';
 import codraDark from '@/assets/codra-fullicon-dark.svg';
@@ -21,6 +24,23 @@ const FEATURES = [
 
 export function LandingPage() {
   const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
+
+  // Forward an already-authenticated visitor straight to the dashboard instead of
+  // showing the marketing/Sign-In page. Uses a side-effect-free probe so anonymous
+  // visitors are never bounced. See LoginPage for the post-OAuth KV-consistency
+  // rationale this also guards against.
+  useEffect(() => {
+    let cancelled = false;
+    api.probeSession().then((user) => {
+      if (!cancelled && user) {
+        navigate('/dashboard', { replace: true });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
 
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground">

@@ -1,5 +1,6 @@
 import type {
   AuthSessionResponse,
+  AuthSessionUser,
   JobDetailResponse,
   JobsResponse,
   ModelConfigsResponse,
@@ -125,6 +126,29 @@ async function requestWithMeta<T>(input: string, init?: RequestInit) {
 export const api = {
   getSession() {
     return request<AuthSessionResponse>('/api/auth/session');
+  },
+  /**
+   * Side-effect-free session probe for unauthenticated pages (landing/login).
+   * Unlike `getSession`, a missing/invalid session resolves to `null` instead of
+   * redirecting to /login — so calling it from `/` never bounces an anonymous
+   * visitor. Used to auto-forward an already-authenticated user to the dashboard,
+   * which also recovers the post-OAuth case where the immediate server-side
+   * /dashboard session read lost the Cloudflare KV read-after-write race.
+   */
+  async probeSession(): Promise<AuthSessionUser | null> {
+    try {
+      const response = await fetch('/api/auth/session', {
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const data = (await response.json()) as AuthSessionResponse;
+      return data.user ?? null;
+    } catch {
+      return null;
+    }
   },
   logout() {
     return request<{ ok: boolean }>('/auth/logout', {
