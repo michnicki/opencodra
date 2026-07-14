@@ -36,7 +36,6 @@ import { FormatterService } from '../services/formatter';
 import { TokenTracker } from './token-tracker';
 import { loadRepoConfig } from './config';
 import { getWebhookDelivery } from '@server/db/webhook-deliveries';
-import { sendTelemetryEvent } from './telemetry';
 import { getReviewSettings } from '@server/db/app-settings';
 import { REVIEW_CONCURRENCY_LIMITS } from '@shared/schema';
 
@@ -1259,38 +1258,6 @@ async function reviewAndPersistFile(
   }
 }
 
-/**
- * Assemble and fire the anonymous per-review telemetry event. The shared aggregate fields
- * (line/token counts, models, file extensions, duration) are computed once here; the three fields
- * that differ between the success and all-failed paths are passed as `overrides`. Never throws.
- */
-async function sendReviewTelemetry(
-  env: AppBindings,
-  job: PersistedReviewJob,
-  files: Array<{ path: string; lineCount: number }>,
-  reviews: Array<{ input_tokens: number | null; output_tokens: number | null; model_used: string }>,
-  overrides: { findingsReported: number; verdict: string; severityDistribution: Record<string, number> },
-) {
-  try {
-    await sendTelemetryEvent(env, {
-      linesReviewed: files.reduce((sum, file) => sum + file.lineCount, 0),
-      inputTokens: reviews.reduce((sum, r) => sum + (r.input_tokens ?? 0), 0),
-      outputTokens: reviews.reduce((sum, r) => sum + (r.output_tokens ?? 0), 0),
-      modelsUsed: Array.from(new Set(reviews.map((r) => r.model_used).filter(Boolean))),
-      fileExtensions: Array.from(new Set(files.map((f) => {
-        const parts = f.path.split('.');
-        return parts.length > 1 ? parts.pop() || '' : '';
-      }).filter(Boolean))),
-      triggerType: job.trigger,
-      reviewDurationMs: Math.max(0, Date.now() - new Date(job.createdAt).getTime()),
-      filesReviewed: files.length,
-      ...overrides,
-    });
-  } catch (e) {
-    logger.error('Failed to send telemetry', e instanceof Error ? e : new Error(String(e)));
-  }
-}
-
 async function runFinalizePhase(
   env: AppBindings,
   job: PersistedReviewJob,
@@ -1351,12 +1318,6 @@ async function runFinalizePhase(
   if (fileSummaries.length > 0 && fileSummaries.every((file) => file.verdict === 'failed')) {
     await updateJobStep(env, job.id, 'Generating Summary', { status: 'failed', error: 'All files failed to review' });
 
-    await sendReviewTelemetry(env, job, files, reviews, {
-      findingsReported: 0,
-      verdict: 'failed',
-      severityDistribution: {},
-    });
-
     throw new Error('All files failed to review');
   }
 
@@ -1411,12 +1372,6 @@ async function runFinalizePhase(
 
   const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
   const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
-
-  const severityDistribution: Record<string, number> = {};
-  for (const comment of finalComments) {
-    const sev = comment.severity || 'unknown';
-    severityDistribution[sev] = (severityDistribution[sev] || 0) + 1;
-  }
 
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed.`
@@ -1509,12 +1464,6 @@ async function runFinalizePhase(
   } catch (error) {
     logger.warn(`Post-review labels/check-run update failed for job ${job.id}; review is posted and job is completed, so leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
   }
-
-  await sendReviewTelemetry(env, job, files, reviews, {
-    findingsReported: finalComments.length,
-    verdict: verdictSummary.verdict,
-    severityDistribution,
-  });
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {

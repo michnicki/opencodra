@@ -47,12 +47,6 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
     const rawUrl = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
     const url = new URL(rawUrl);
 
-    if (url.hostname !== 'api.github.com') {
-      // core/telemetry.ts fires a real POST to codra.run on every finalize; return a fast synthetic
-      // response instead of letting it reach the real network from a test run.
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-
     const method = (init?.method ?? 'GET').toUpperCase();
     const headers = new Headers(init?.headers);
     const accept = headers.get('Accept');
