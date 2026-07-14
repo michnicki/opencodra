@@ -267,6 +267,18 @@ export const api = {
       body: JSON.stringify(input),
     });
   },
+  addBitbucketRepo(input: {
+    workspace: string;
+    repoSlug: string;
+    accessToken: string;
+    webhookSecret: string;
+    tokenExpiresAt?: string | null;
+  }) {
+    return request<{ credential: VcsCredentialStatus }>('/api/repos/bitbucket', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
   deleteVcsCredential(key: { vcsProvider: string; workspace: string; repoSlug: string }) {
     return request<{ ok: boolean }>(
       `/api/vcs-credentials/${pathSegment(key.vcsProvider)}/${pathSegment(key.workspace)}/${pathSegment(key.repoSlug)}`,

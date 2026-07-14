@@ -11,6 +11,7 @@ const JobsPage = React.lazy(() => import('./pages/jobs').then(m => ({ default: m
 const JobDetailPage = React.lazy(() => import('./pages/job-detail').then(m => ({ default: m.JobDetailPage })));
 const JobLogsPage = React.lazy(() => import('./pages/job-logs').then(m => ({ default: m.JobLogsPage })));
 const ReposPage = React.lazy(() => import('./pages/repos').then(m => ({ default: m.ReposPage })));
+const AddBitbucketRepoPage = React.lazy(() => import('./pages/repos/add-bitbucket').then(m => ({ default: m.AddBitbucketRepoPage })));
 const StatsPage = React.lazy(() => import('./pages/stats').then(m => ({ default: m.StatsPage })));
 const SettingsPage = React.lazy(() => import('./pages/settings').then(m => ({ default: m.SettingsPage })));
 const VcsCredentialsPage = React.lazy(() => import('./pages/vcs-credentials').then(m => ({ default: m.VcsCredentialsPage })));
@@ -100,6 +101,7 @@ const router = createBrowserRouter([
       { path: 'jobs/:id', element: withSuspense(JobDetailPage) },
       { path: 'jobs/:id/logs', element: withSuspense(JobLogsPage) },
       { path: 'repos', element: withSuspense(ReposPage) },
+      { path: 'repos/add/bitbucket', element: withSuspense(AddBitbucketRepoPage) },
       { path: 'stats', element: withSuspense(StatsPage) },
       { path: 'credentials', element: withSuspense(VcsCredentialsPage) },
       { path: 'settings', element: withSuspense(SettingsPage) },
