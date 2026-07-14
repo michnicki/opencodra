@@ -1,4 +1,5 @@
 import type { ReviewJobMessage } from '@shared/schema';
+import { authSessionUserSchema, type AuthSessionUser } from '@shared/api';
 
 export interface WorkersAiBinding {
   run(model: string, input: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<any>;
@@ -16,14 +17,11 @@ export interface HyperdriveBinding {
   connectionString: string;
 }
 
-export interface DashboardSessionUser {
-  githubUserId: number;
-  login: string;
-  name: string | null;
-  avatarUrl: string | null;
-  email: string | null;
-  signedInAt: string;
-}
+// D-26: re-export of the SINGLE canonical schema defined in @shared/api — NOT a second
+// Zod definition. The server and client sides share one schema object via two import
+// paths, eliminating the client/server schema drift risk (06-REVIEWS.md HIGH finding).
+export const dashboardSessionUserSchema = authSessionUserSchema;
+export type DashboardSessionUser = AuthSessionUser;
 
 export interface AppBindings {
   AI: WorkersAiBinding;
@@ -42,6 +40,9 @@ export interface AppBindings {
   APP_URL: string;
   DASHBOARD_ALLOWED_USERS: string;
   LLM_CONFIG_ENCRYPTION_KEY: string;
+  BITBUCKET_CLIENT_ID: string;
+  BITBUCKET_CLIENT_SECRET: string;
+  BITBUCKET_AUTH_CALLBACK_URL: string;
   BOT_USERNAME: string;
   ENVIRONMENT: string;
   CF_API_TOKEN: string;

@@ -213,20 +213,51 @@ function getIsDesktop(): boolean {
   return window.matchMedia('(min-width: 1024px)').matches;
 }
 
+/**
+ * Narrows the discriminated-union `AuthSessionUser` (D-26) into a provider-agnostic
+ * display shape. Landed in Phase 6 Wave 1 (06-02-PLAN.md) as a minimal compile-safety
+ * change — for the GitHub variant it returns EXACTLY the same values as the previous
+ * direct field reads, so GitHub rendering stays byte-identical. Wave 3 (06-04-PLAN.md)
+ * extends this helper with Bitbucket-specific profile-menu UX polish.
+ */
+function sessionDisplay(sessionUser: AuthSessionUser | null): {
+  displayName: string;
+  handle: string;
+  avatarUrl: string | null;
+  profileHref: string | null;
+} {
+  if (!sessionUser) return { displayName: 'User', handle: '', avatarUrl: null, profileHref: null };
+  if (sessionUser.provider === 'github') {
+    return {
+      displayName: sessionUser.name?.trim() || sessionUser.login,
+      handle: sessionUser.login,
+      avatarUrl: sessionUser.avatarUrl,
+      profileHref: 'https://github.com/' + sessionUser.login,
+    };
+  }
+  return {
+    displayName: sessionUser.displayName?.trim() || sessionUser.username,
+    handle: sessionUser.username,
+    avatarUrl: sessionUser.avatarUrl,
+    profileHref: null,
+  };
+}
+
 export function AppShell() {
   const { theme, toggleTheme } = useTheme();
   const [sessionUser, setSessionUser] = useState<AuthSessionUser | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => getStoredSidebarCollapsed());
   const [isDesktop, setIsDesktop] = useState<boolean>(() => getIsDesktop());
+  const account = sessionUser ? sessionDisplay(sessionUser) : null;
 
   const shellStyle = {
     '--app-sidebar-width': sidebarCollapsed
       ? 'var(--sidebar-collapsed-width)'
       : 'var(--sidebar-width)',
   } as CSSProperties;
-  const githubProfileHref = sessionUser ? `https://github.com/${sessionUser.login}` : 'https://github.com';
-  const accountName = sessionUser?.name?.trim() || sessionUser?.login || 'GitHub';
+  const githubProfileHref = account?.profileHref ?? 'https://github.com';
+  const accountName = account?.displayName ?? 'User';
   const accountInitial = accountName.charAt(0).toUpperCase();
   const accountMenuBesideSidebar = sidebarCollapsed && isDesktop;
 
@@ -465,9 +496,9 @@ export function AppShell() {
                   )}
                 >
                   <span className="relative shrink-0">
-                    {sessionUser.avatarUrl ? (
+                    {account?.avatarUrl ? (
                       <img
-                        src={sessionUser.avatarUrl}
+                        src={account.avatarUrl}
                         alt=""
                         className={cn(
                           'h-9 w-9 rounded-full object-cover ring-1 ring-border/70 transition-transform duration-200 ease-[var(--ease-out-quart)] group-hover:scale-105 lg:group-hover:scale-110',
@@ -488,7 +519,7 @@ export function AppShell() {
                       {accountName}
                     </span>
                     <span className="dashboard-sidebar-username mt-0.5 block truncate text-[11px] font-semibold leading-tight text-zinc-200">
-                      @{sessionUser.login}
+                      @{account?.handle}
                     </span>
                   </span>
                 </button>
@@ -501,9 +532,9 @@ export function AppShell() {
                 className="w-60"
               >
                 <div className="mb-1 flex min-w-0 items-center gap-3 rounded-md px-2 py-2">
-                  {sessionUser.avatarUrl ? (
+                  {account?.avatarUrl ? (
                     <img
-                      src={sessionUser.avatarUrl}
+                      src={account.avatarUrl}
                       alt=""
                       className="h-9 w-9 rounded-full object-cover ring-1 ring-border"
                     />
@@ -517,7 +548,7 @@ export function AppShell() {
                       {accountName}
                     </p>
                     <p className="mt-0.5 truncate text-xs font-semibold text-muted-foreground">
-                      @{sessionUser.login}
+                      @{account?.handle}
                     </p>
                   </div>
                 </div>
