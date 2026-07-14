@@ -95,7 +95,8 @@
       "CF_API_TOKEN",
       "CF_ACCOUNT_ID",
       "BITBUCKET_CLIENT_ID",
-      "BITBUCKET_CLIENT_SECRET"
+      "BITBUCKET_CLIENT_SECRET",
+      "DASHBOARD_ALLOWED_USERS"
     ]
   },
   "vars": {
@@ -104,7 +105,6 @@
     "BITBUCKET_AUTH_CALLBACK_URL": "https://codra.tmichnicki.workers.dev/auth/bitbucket/callback",
     "BOT_USERNAME": "codraapp",
     "GITHUB_APP_SLUG": "CodraApp",
-    "DASHBOARD_ALLOWED_USERS": "{\"github\":[\"michnicki\"]}",
     "ENVIRONMENT": "production"
   }
 }
