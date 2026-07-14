@@ -234,16 +234,16 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     );
     expect(commentPosts).toHaveLength(2);
 
-    // The LAST post is the combined marker+summary (REV-R-A).
+    // The LAST post is the summary with the clean Bitbucket dedup footer (Thread C): no
+    // GitHub-flavored HTML marker (`<!-- ... -->`) and no `<sub>` — both render as junk on Bitbucket.
     const combined = commentPosts[commentPosts.length - 1];
-    expect(combined.body).toMatchObject({
-      content: {
-        raw: expect.stringContaining('<!-- codra:job=job-bb-1 commit=head123 -->'),
-      },
-    });
     const raw = (combined.body as { content: { raw: string } }).content.raw;
-    expect(raw).toContain('<sub>codra-review</sub>');
+    expect(raw).toContain('codra-review · reviewed commit `head123`');
+    expect(raw).not.toContain('<!--');
+    expect(raw).not.toContain('<sub>');
     expect(raw).toContain('Looks mostly good');
+    // The summary body comes first; the dedup footer is appended last.
+    expect(raw.indexOf('Looks mostly good')).toBeLessThan(raw.indexOf('codra-review · reviewed commit'));
 
     // The first post is the inline comment, with the file/line anchor.
     const inline = commentPosts[0];
@@ -329,7 +329,7 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     expect(approve2).toBeDefined();
   });
 
-  it('findExistingReviewForCommit lists comments and filters for the marker prefix with the commitSha substring', async () => {
+  it('findExistingReviewForCommit lists comments and filters for the codra-review footer with the commit substring', async () => {
     const matchingId = 555;
     const mock = installBitbucketFetchMock({
       listPullRequestCommentsResponse: {
@@ -339,7 +339,7 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
             {
               id: matchingId,
               content: {
-                raw: `<!-- codra:job=job-bb-1 commit=${COMMIT_SHA} -->\n\n<sub>codra-review</sub>\n\nLooks good`,
+                raw: `Looks good\n\n---\n\ncodra-review · reviewed commit \`${COMMIT_SHA}\``,
               },
               inline: undefined,
             },
