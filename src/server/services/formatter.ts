@@ -79,9 +79,23 @@ export class FormatterService {
     return { verdict: 'approve' as const, errors: 0, warnings: 0 };
   }
 
-  formatReviewOverview(commitSha: string, botUsername: string) {
+  formatReviewOverview(commitSha: string, botUsername: string, options?: FormatterOptions) {
     const shortSha = commitSha.slice(0, 10);
-    
+
+    // D-13 (Thread C): Bitbucket Cloud does not render GitHub-flavored HTML — <details>/<summary>/
+    // <br/> are sanitized to junk, and the "in GitHub" copy plus @mention / draft / 👍 semantics
+    // are GitHub-only. Emit clean CommonMark with Bitbucket-accurate trigger copy instead. The
+    // GitHub branch below is byte-identical to the pre-Thread-C output (regression-guarded).
+    if (options?.provider === 'bitbucket') {
+      return `### Codra Review
+
+Here are some automated review suggestions for this pull request.
+
+**Reviewed commit:** \`${shortSha}\`
+
+[Codra](${this.baseUrl}/repos) automatically reviews pull requests in this repository. A review runs when you open a pull request or push new commits to it.`;
+    }
+
     return `### Codra Review
 
 Here are some automated review suggestions for this pull request.
@@ -104,5 +118,19 @@ If Codra has suggestions, it will comment; otherwise it will react with 👍.
 Codra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
 
 </details>`;
+  }
+
+  /**
+   * The "N comments were omitted" note appended to the review overview when max_comments trims the
+   * finding list. GitHub renders `> [!NOTE]` as a callout; Bitbucket renders that syntax literally,
+   * so the Bitbucket branch emits a plain bold note. The GitHub branch is byte-identical to the
+   * pre-Thread-C inline string in core/review.ts (regression-guarded).
+   */
+  formatOmittedCommentsNote(omittedCount: number, maxComments: number, options?: FormatterOptions) {
+    if (options?.provider === 'bitbucket') {
+      return `**Note:** ${omittedCount} comments were omitted from this review to reduce noise and respect the configured \`max_comments\` limit (${maxComments}). Showing the most critical issues.`;
+    }
+
+    return `> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${maxComments}). Showing the most critical issues.`;
   }
 }
