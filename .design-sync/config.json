@@ -1,0 +1,26 @@
+{
+  "pkg": "codra",
+  "globalName": "CodraUI",
+  "projectId": "0804ef43-4a61-4815-a419-d67262171cf9",
+  "shape": "package",
+  "srcDir": "src/client/components/ui",
+  "tsconfig": "tsconfig.json",
+  "readmeHeader": ".design-sync/conventions.md",
+  "buildCmd": "npx vite build && cp \"$(ls -1t dist/client/assets/*.css | head -1)\" .design-sync/codra-compiled.css",
+  "cssEntry": ".design-sync/codra-compiled.css",
+  "componentSrcMap": {
+    "Alert": "src/client/components/ui/alert.tsx",
+    "Badge": "src/client/components/ui/badge.tsx",
+    "Button": "src/client/components/ui/button.tsx",
+    "Card": "src/client/components/ui/card.tsx",
+    "ConfirmDialog": "src/client/components/ui/confirm-dialog.tsx",
+    "DropdownMenu": "src/client/components/ui/dropdown-menu.tsx",
+    "Input": "src/client/components/ui/input.tsx",
+    "Select": "src/client/components/ui/select.tsx",
+    "Switch": "src/client/components/ui/switch.tsx"
+  },
+  "overrides": {
+    "ConfirmDialog": { "cardMode": "single", "viewport": "480x360" },
+    "Select": { "cardMode": "single", "viewport": "340x300" }
+  }
+}

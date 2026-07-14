@@ -147,3 +147,13 @@ vite.config.ts.timestamp-*
 # Vitest browser mode failure screenshots and attachments
 test/browser/__screenshots__/
 .vitest-attachments/
+
+# design-sync (claude.ai/design) — staged scripts, build output, machine state.
+# The durable set under .design-sync/ (config.json, NOTES.md, conventions.md,
+# bundle-entry.tsx, previews/, overrides/) IS committed; everything below is not.
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+.design-sync/codra-compiled.css
