@@ -90,7 +90,6 @@ export class BitbucketAdapter implements VcsProvider {
     private env: AppBindings,
     private readonly client: BitbucketClient,
     private readonly job: BitbucketJob,
-    private readonly tracker?: TrackerLike,
   ) {}
 
   /**
@@ -126,7 +125,7 @@ export class BitbucketAdapter implements VcsProvider {
     const token = await decryptSecret(env, secrets.encryptedAccessToken);
 
     const client = new BitbucketClient(env, token, tracker);
-    const adapter = new BitbucketAdapter(env, client, { ...job, repositoryWorkspace: workspace }, tracker);
+    const adapter = new BitbucketAdapter(env, client, { ...job, repositoryWorkspace: workspace });
     return adapter;
   }
 
