@@ -98,15 +98,18 @@
       "GITHUB_CLIENT_SECRET",
       "LLM_CONFIG_ENCRYPTION_KEY",
       "CF_API_TOKEN",
-      "CF_ACCOUNT_ID"
+      "CF_ACCOUNT_ID",
+      "BITBUCKET_CLIENT_ID",
+      "BITBUCKET_CLIENT_SECRET"
     ]
   },
   "vars": {
     "APP_URL": "https://app.codra.devarshi.dev",
     "AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/github/callback",
+    "BITBUCKET_AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/bitbucket/callback",
     "BOT_USERNAME": "codra-app",
     "GITHUB_APP_SLUG": "codra-app-personal",
-    "DASHBOARD_ALLOWED_USERS": "devarshishimpi",
+    "DASHBOARD_ALLOWED_USERS": "{\"github\":[\"devarshishimpi\"]}",
     "ENVIRONMENT": "production"
   }
 }
