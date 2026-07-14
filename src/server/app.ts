@@ -49,6 +49,7 @@ export function createApp() {
   app.get('/jobs', requireSession, serveIndex);
   app.get('/jobs/*', requireSession, serveIndex);
   app.get('/repos', requireSession, serveIndex);
+  app.get('/repos/*', requireSession, serveIndex);
   app.get('/stats', requireSession, serveIndex);
   app.get('/health', requireSession, serveIndex);
   app.get('/settings', requireSession, serveIndex);

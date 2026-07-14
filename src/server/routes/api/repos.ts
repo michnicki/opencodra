@@ -6,6 +6,11 @@ import { jsonError } from '@server/core/http';
 import { GitHubClient, type GitHubRepository } from '@server/core/github';
 import { invalidateRepoConfigCache } from '@server/core/config';
 import { repoConfigSchema } from '@shared/schema';
+import { getOrCreateRepository } from '@server/db/repositories';
+import { upsertVcsCredential } from '@server/db/vcs-credentials';
+import { encryptSecret } from '@server/core/crypto';
+import { queryTransaction } from '@server/db/client';
+import { addBitbucketRepoInputSchema } from '@shared/bitbucket';
 
 const repoConfigPatchSchema = z
   .object({
@@ -163,8 +168,65 @@ export function createReposRouter() {
       enabled: patch.enabled,
     });
     await invalidateRepoConfigCache(c.env, owner, repo);
-    
+
     return c.json({ ok: true });
+  });
+
+  // POST /bitbucket -- D-32 transactional add-repo endpoint. Reuses getOrCreateRepository's
+  // existing bitbucket branch (installationId is ignored there and installation_id is bound NULL
+  // implicitly) + encryptSecret + upsertVcsCredential inside a single queryTransaction, so the
+  // repository row and the encrypted credential row commit atomically or not at all.
+  app.post('/bitbucket', async (c) => {
+    const sessionUser = c.get('sessionUser');
+    if (!sessionUser) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    const raw = await c.req.json().catch(() => null);
+    const parsed = addBitbucketRepoInputSchema.safeParse(raw);
+    if (!parsed.success) {
+      return jsonError('Invalid Bitbucket repository payload.', 400);
+    }
+
+    const { workspace, repoSlug, accessToken, webhookSecret, tokenExpiresAt } = parsed.data;
+
+    try {
+      // Encrypt-at-boundary before the transaction (Phase 4 D-06). `c.env` is passed as the
+      // env-like object encryptSecret expects, NOT the raw LLM_CONFIG_ENCRYPTION_KEY string.
+      const encryptedAccessToken = await encryptSecret(c.env, accessToken);
+      const encryptedWebhookSecret = await encryptSecret(c.env, webhookSecret);
+
+      const credential = await queryTransaction(c.env, async () => {
+        // Defensive guard: vcsProvider MUST be the literal 'bitbucket' here. If a future refactor
+        // accidentally routes a Bitbucket call through the GitHub branch (which USES installationId),
+        // the empty-string placeholder below would be stored as a non-NULL installation_id, breaking
+        // Phase 5's findRepositoryByBitbucketIdentity NULL-installation_id assumption.
+        await getOrCreateRepository(c.env, {
+          installationId: '',
+          vcsProvider: 'bitbucket',
+          owner: workspace,
+          repo: repoSlug,
+          workspace,
+        });
+
+        return upsertVcsCredential(c.env, {
+          vcsProvider: 'bitbucket',
+          workspace,
+          repoSlug,
+          encryptedAccessToken,
+          encryptedWebhookSecret,
+          tokenExpiresAt: tokenExpiresAt ?? null,
+        });
+      });
+
+      return c.json({ credential }, 201);
+    } catch (error) {
+      console.error('Failed to add Bitbucket repository:', error);
+      return jsonError(
+        error instanceof Error ? error.message : 'Failed to add Bitbucket repository.',
+        500,
+      );
+    }
   });
 
   return app;
