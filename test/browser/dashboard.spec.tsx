@@ -9,8 +9,6 @@ import { renderPage } from './render';
 vi.mock('@client/lib/api', () => ({
   api: {
     getSession: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
     getStats: vi.fn(),
     getJobs: vi.fn(),
   }
@@ -20,11 +18,6 @@ describe('Frontend UI Flows', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders the GitHub sign-in flow', async () => {

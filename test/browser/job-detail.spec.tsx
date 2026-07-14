@@ -11,8 +11,6 @@ vi.mock('@client/lib/api', () => ({
   api: {
     getJob: vi.fn(),
     rerunJob: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -114,11 +112,6 @@ describe('JobDetailPage findings and retry', () => {
       lastModified: null,
       notModified: false,
       data: { job: JOB },
-    });
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
     });
   });
 
