@@ -10,7 +10,8 @@ import { findRepositoryByBitbucketIdentity } from '@server/db/repositories';
 import { mostRecentJobForPullRequest } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
-import { defaultRepoConfig } from '@shared/schema';
+import { getGlobalConfig } from '@server/core/config';
+import { defaultRepoConfig, type RepoConfig } from '@shared/schema';
 import { bytesToHex } from '@server/db/jobs';
 import { pullRequestWebhookPayloadSchema } from '@shared/bitbucket';
 
@@ -228,12 +229,26 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
     repositoryWorkspace: workspace,
   };
 
+  // Step 13b: resolve the review model strategy. defaultRepoConfig's model section is empty
+  // ({ main: null, fallbacks: [], size_overrides: [] }), so snapshotting it verbatim makes
+  // ModelService.selectModel throw "No review model strategy is configured" and fail every
+  // Bitbucket review before finalize (no comments posted, job 'failed'). Merge the GLOBAL model
+  // strategy — the same source loadRepoConfig uses for a repo with no per-repo override
+  // (KV key config:global_model, set from the Settings dashboard) — so Bitbucket jobs resolve a
+  // model chain exactly like GitHub jobs. We intentionally do NOT call loadRepoConfig here: its
+  // syncRepoConfig -> getOrCreateRepository side effect is GitHub-shaped (installationId='' and no
+  // vcs_provider/workspace) and would create a spurious vcs_provider='github' row for this
+  // Bitbucket repo. (Per-repo Bitbucket model overrides need a provider-aware getter and are out
+  // of scope for this fix.)
+  const globalModel = await getGlobalConfig(c.env);
+  const configSnapshot: RepoConfig = { ...defaultRepoConfig, model: globalModel };
+
   // Step 14: hand off to the provider-aware ingest helper (05-04 widening closes the
   // Phase-3 deferred item — reviewRequest.repositoryVcsProvider + input.provider both
   // resolve through effectiveProvider = 'bitbucket').
   const result = await ingestReviewWebhookEvent(c.env, {
     reviewRequest,
-    configSnapshot: defaultRepoConfig,
+    configSnapshot,
     deliveryId: xRequestUUID,
     requestId: c.get('requestId'),
     eventName: xEventKey,
