@@ -21,10 +21,10 @@ current_phase_name: bitbucket-dashboard-login-repo-onboarding-ux
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-12)
+See: .planning/PROJECT.md (updated 2026-07-14)
 
 **Core value:** A Bitbucket Cloud PR receives the same automated AI review (inline findings posted back) that a GitHub PR already gets, from one Codra instance, without breaking existing GitHub support.
-**Current focus:** Phase 06 — bitbucket-dashboard-login-repo-onboarding-ux
+**Current focus:** Planning next milestone — run `/gsd-new-milestone`
 
 ## Current Position
 
