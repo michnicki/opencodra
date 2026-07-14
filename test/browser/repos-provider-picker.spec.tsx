@@ -20,8 +20,6 @@ vi.mock('@client/lib/api', () => ({
     getModelConfigs: vi.fn(),
     updateRepoConfig: vi.fn(),
     syncRepos: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -45,11 +43,6 @@ describe('ReposPage provider picker (D-30 / D-38)', () => {
     vi.mocked(api.getRepos).mockResolvedValue({ repos: [REPO] });
     vi.mocked(api.getGlobalConfig).mockResolvedValue({ config: { main: null, fallbacks: [], size_overrides: [] } });
     vi.mocked(api.getModelConfigs).mockResolvedValue({ providers: [], configs: [], syncErrors: [] });
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders an "Add Repositories" dropdown trigger button', async () => {

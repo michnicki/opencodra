@@ -15,8 +15,6 @@ vi.mock('react-router-dom', async (importOriginal) => {
 vi.mock('@client/lib/api', () => ({
   api: {
     addBitbucketRepo: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -33,11 +31,6 @@ vi.mock('sonner', () => ({
 describe('AddBitbucketRepoPage (D-31)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders all 5 fields with correct labels and input types', () => {

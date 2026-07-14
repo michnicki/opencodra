@@ -17,8 +17,6 @@ vi.mock('@client/lib/api', () => ({
     createProvider: vi.fn(),
     deleteProvider: vi.fn(),
     updateGlobalConfig: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -58,11 +56,6 @@ describe('SettingsPage provider management', () => {
     vi.mocked(api.refreshModelCatalog).mockResolvedValue(modelConfigsResponse());
     vi.mocked(api.getGlobalConfig).mockResolvedValue({ config: { main: null, fallbacks: [], size_overrides: [] } });
     vi.mocked(api.getReviewSettings).mockResolvedValue({ settings: { concurrencyLevel: 'medium', maxComments: 10 } });
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders providers and models loaded from the API', async () => {

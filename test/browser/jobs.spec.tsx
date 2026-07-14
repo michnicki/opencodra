@@ -9,8 +9,6 @@ import type { JobSummary } from '@shared/schema';
 vi.mock('@client/lib/api', () => ({
   api: {
     getJobs: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -33,11 +31,6 @@ describe('JobsPage filters and pagination', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getJobs).mockResolvedValue({ jobs: [makeJob()], total: 1 });
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders jobs from the initial load', async () => {

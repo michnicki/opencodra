@@ -10,8 +10,6 @@ vi.mock('@client/lib/api', () => ({
     getVcsCredentials: vi.fn(),
     storeVcsCredential: vi.fn(),
     deleteVcsCredential: vi.fn(),
-    getUpdatesEmailStatus: vi.fn(),
-    subscribeUpdates: vi.fn(),
   },
 }));
 
@@ -38,11 +36,6 @@ describe('VcsCredentialsPage redaction guardrail', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getVcsCredentials).mockResolvedValue({ credentials: [REDACTED_CREDENTIAL] });
-    vi.mocked(api.getUpdatesEmailStatus).mockResolvedValue({
-      status: 'subscribed',
-      email: 'user@example.com',
-      updatedAt: new Date().toISOString(),
-    });
   });
 
   it('renders identity + server status but never a secret string', async () => {
