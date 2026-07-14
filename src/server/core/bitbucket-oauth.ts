@@ -1,14 +1,7 @@
 import type { AppBindings, DashboardSessionUser } from '@server/env';
+import { bitbucketOAuthProfileSchema, type BitbucketOAuthProfile } from '@shared/bitbucket';
 
-export type BitbucketOAuthProfile = {
-  account_id: string;
-  uuid: string;
-  username: string;
-  display_name: string | null;
-  avatar?: string | null;
-  links?: { avatar?: { href: string } };
-  email: string | null;
-};
+export type { BitbucketOAuthProfile };
 
 function bitbucketHeaders(token?: string) {
   return {
@@ -52,7 +45,7 @@ export async function exchangeBitbucketOAuthCode(
   return payload.access_token;
 }
 
-export async function fetchBitbucketOAuthProfile(token: string) {
+export async function fetchBitbucketOAuthProfile(token: string): Promise<BitbucketOAuthProfile> {
   const response = await fetch('https://api.bitbucket.org/2.0/user', {
     headers: bitbucketHeaders(token),
   });
@@ -61,10 +54,15 @@ export async function fetchBitbucketOAuthProfile(token: string) {
     throw new Error(`Bitbucket user lookup failed with ${response.status}`);
   }
 
-  return (await response.json()) as BitbucketOAuthProfile;
+  const parsed = bitbucketOAuthProfileSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new Error(`Bitbucket user lookup returned an unexpected shape: ${parsed.error.message}`);
+  }
+
+  return parsed.data;
 }
 
-export function toDashboardSessionUser(profile: BitbucketOAuthProfile) {
+export function toDashboardSessionUser(profile: BitbucketOAuthProfile): DashboardSessionUser {
   return {
     provider: 'bitbucket' as const,
     accountId: profile.account_id,

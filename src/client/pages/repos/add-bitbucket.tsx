@@ -36,8 +36,8 @@ export function AddBitbucketRepoPage() {
       await api.addBitbucketRepo({
         workspace: workspace.trim(),
         repoSlug: repoSlug.trim(),
-        accessToken,
-        webhookSecret,
+        accessToken: accessToken.trim(),
+        webhookSecret: webhookSecret.trim(),
         tokenExpiresAt: tokenExpiresAt || null,
       });
       toast.success('Bitbucket repository added', {
