@@ -6,12 +6,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "routes": [
-    {
-      "pattern": "app.codra.devarshi.dev",
-      "custom_domain": true
-    }
-  ],
+  "workers_dev": true,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
@@ -30,14 +25,14 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "35b282fa80f24e67adfda063c3a839d1"
+      "id": "a3cc90fd536c4a7cb0eb6b2cb395074c"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "APP_KV",
-      "id": "f5f88c23f1f14342b2ec2c733470921b",
-      "preview_id": "9f2cdc0fdf8d4c868ae2754f66b839b8"
+      "id": "b017309688664981ae1a8c6a8eb6da27",
+      "preview_id": "004863e3ee7c4e07b65e516f90bc93dd"
     }
   ],
   "queues": {
@@ -104,12 +99,12 @@
     ]
   },
   "vars": {
-    "APP_URL": "https://app.codra.devarshi.dev",
-    "AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/github/callback",
-    "BITBUCKET_AUTH_CALLBACK_URL": "https://app.codra.devarshi.dev/auth/bitbucket/callback",
-    "BOT_USERNAME": "codra-app",
-    "GITHUB_APP_SLUG": "codra-app-personal",
-    "DASHBOARD_ALLOWED_USERS": "{\"github\":[\"devarshishimpi\"]}",
+    "APP_URL": "https://codra.tmichnicki.workers.dev",
+    "AUTH_CALLBACK_URL": "https://codra.tmichnicki.workers.dev/auth/github/callback",
+    "BITBUCKET_AUTH_CALLBACK_URL": "https://codra.tmichnicki.workers.dev/auth/bitbucket/callback",
+    "BOT_USERNAME": "codraapp",
+    "GITHUB_APP_SLUG": "codraapp",
+    "DASHBOARD_ALLOWED_USERS": "{\"github\":[\"michnicki\"]}",
     "ENVIRONMENT": "production"
   }
 }
