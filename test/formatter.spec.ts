@@ -168,4 +168,53 @@ describe('FormatterService.formatReviewOverview', () => {
     const output = formatter.formatReviewOverview('abc', 'codra-app');
     expect(output).toContain('**Reviewed commit:** `abc`');
   });
+
+  // Thread C: the GitHub output must stay byte-identical whether provider is omitted or explicit.
+  it('is byte-identical for the default path and explicit provider:"github"', () => {
+    const def = formatter.formatReviewOverview('abcdef1234567890', 'codra-app');
+    const gh = formatter.formatReviewOverview('abcdef1234567890', 'codra-app', { provider: 'github' });
+    expect(gh).toBe(def);
+    // Pin the GitHub-flavored surface so a future edit that drops it is caught.
+    expect(gh).toContain('<details>');
+    expect(gh).toContain('About Codra in GitHub');
+    expect(gh).toContain('<br/>');
+    expect(gh).toContain('react with 👍');
+  });
+
+  // Thread C: Bitbucket Cloud does not render GitHub-flavored HTML — emit clean CommonMark with
+  // Bitbucket-accurate trigger copy (no <details>/<summary>/<br/>, no "in GitHub", no @mention/👍).
+  it('emits clean Bitbucket markdown when provider is "bitbucket"', () => {
+    const output = formatter.formatReviewOverview('abcdef1234567890', 'codra-app', { provider: 'bitbucket' });
+
+    expect(output).toContain('### Codra Review');
+    expect(output).toContain('**Reviewed commit:** `abcdef1234`');
+    expect(output).toContain(`${BASE_URL}/repos`);
+
+    // None of the GitHub-only HTML / copy leaks into the Bitbucket comment.
+    expect(output).not.toContain('<details>');
+    expect(output).not.toContain('<summary>');
+    expect(output).not.toContain('<br/>');
+    expect(output).not.toContain('in GitHub');
+    expect(output).not.toContain('👍');
+    expect(output).not.toContain('@codra-app');
+  });
+});
+
+describe('FormatterService.formatOmittedCommentsNote', () => {
+  it('emits a GitHub [!NOTE] callout for the default/github path (byte-identical)', () => {
+    const def = formatter.formatOmittedCommentsNote(107, 10);
+    const gh = formatter.formatOmittedCommentsNote(107, 10, { provider: 'github' });
+    expect(gh).toBe(def);
+    expect(gh).toBe(
+      '> [!NOTE]\n> **107 comments were omitted** from this review to reduce noise and respect the configured `max_comments` limit (10). Showing the most critical issues.',
+    );
+  });
+
+  it('emits a plain bold note for Bitbucket (no [!NOTE] callout syntax)', () => {
+    const output = formatter.formatOmittedCommentsNote(107, 10, { provider: 'bitbucket' });
+    expect(output).not.toContain('[!NOTE]');
+    expect(output).toContain('**Note:**');
+    expect(output).toContain('107 comments were omitted');
+    expect(output).toContain('`max_comments` limit (10)');
+  });
 });
