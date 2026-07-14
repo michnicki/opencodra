@@ -141,8 +141,8 @@ export const bitbucketOAuthProfileSchema = z.object({
 export const addBitbucketRepoInputSchema = z.object({
   workspace: z.string().trim().toLowerCase().min(1).max(100),
   repoSlug: z.string().trim().toLowerCase().min(1).max(100),
-  accessToken: z.string().min(1).max(4096),
-  webhookSecret: z.string().min(1).max(4096),
+  accessToken: z.string().trim().min(1).max(4096),
+  webhookSecret: z.string().trim().min(1).max(4096),
   tokenExpiresAt: z.union([z.iso.date(), z.iso.datetime({ offset: true })]).nullable().optional(),
 }).strict();
 

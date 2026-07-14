@@ -12,9 +12,15 @@ type UpdatesEmailProvider = 'github' | 'bitbucket';
 
 // D-29 LOCKED: KV key format widened from `updates-email:${githubUserId}` to
 // `updates-email:${provider}:${id}` so a GitHub numeric id and a Bitbucket account_id can
-// never collide under the same key namespace. Legacy 3-arg GitHub-only callers (numeric first
-// arg) emit the SAME key shape under the `github` provider segment, so their runtime semantics
-// stay byte-identical (test/api.spec.ts:323-324, NREG-02).
+// never collide under the same key namespace. Legacy 2/3-arg GitHub-only callers (numeric
+// first arg) resolve to the SAME key shape as the widened (provider, id) call style, so both
+// call styles stay mutually consistent (test/api.spec.ts:323-324, NREG-02).
+//
+// This does NOT preserve already-persisted KV data: any key written before this phase under the
+// old `updates-email:${githubUserId}` format (no provider segment) is orphaned and unreachable
+// under the new format. That is an intentional, accepted tradeoff (06-RESEARCH.md Pitfall 4 /
+// Open Question 4) — no migration or dual-read fallback is written. Affected users see
+// `status: 'pending'` once and simply re-subscribe on next login.
 function updatesEmailKey(providerOrGithubUserId: UpdatesEmailProvider | number, idOrUndefined?: string | number) {
   if (typeof providerOrGithubUserId === 'number') {
     const githubUserId = providerOrGithubUserId;
