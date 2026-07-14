@@ -55,7 +55,7 @@ export function LandingPage() {
           />
           <div className="flex items-center gap-2 sm:gap-3">
             <a
-              href="https://github.com/devarshishimpi/codra"
+              href="https://github.com/michnicki/codra"
               target="_blank"
               rel="noopener noreferrer"
               className="hidden h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-secondary dark:border-white/10 dark:bg-white/[0.06] dark:shadow-[0_1px_2px_oklch(0%_0_0/0.4),inset_0_1px_0_oklch(100%_0_0/0.06)] dark:hover:bg-white/[0.1] sm:flex"
@@ -108,7 +108,7 @@ export function LandingPage() {
                 <ArrowRight size={15} />
               </a>
               <a
-                href="https://github.com/devarshishimpi/codra#readme"
+                href="https://github.com/michnicki/codra#readme"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-5 text-sm font-semibold text-foreground shadow-sm transition-colors hover:bg-secondary dark:border-white/10 dark:bg-white/[0.06] dark:shadow-[0_1px_2px_oklch(0%_0_0/0.4),inset_0_1px_0_oklch(100%_0_0/0.06)] dark:hover:bg-white/[0.1]"
@@ -121,16 +121,16 @@ export function LandingPage() {
           {/* Footer links */}
           <div className="mt-12 flex items-center gap-5 border-t border-border pt-14 text-xs text-muted-foreground">
             <a
-              href="https://codra.run"
+              href="https://github.com/michnicki/codra"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1.5 transition-colors hover:text-foreground"
             >
               <ExternalLink size={11} />
-              codra.run
+              github.com/michnicki/codra
             </a>
             <a
-              href="https://github.com/devarshishimpi/codra"
+              href="https://github.com/michnicki/codra"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1.5 transition-colors hover:text-foreground"
