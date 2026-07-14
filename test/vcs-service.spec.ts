@@ -3,6 +3,7 @@ import { NotImplementedError, VcsService } from '@server/services/vcs';
 import { BitbucketAdapter } from '@server/vcs/bitbucket';
 import { GithubAdapter } from '@server/vcs/github';
 import { createTestEnv } from './helpers';
+import { installBitbucketFetchMock } from './bitbucket-fetch-mock';
 
 // Mock the credential-read + decrypt path so we don't depend on Postgres or the encryption key.
 const getVcsCredentialSecretsMock = vi.fn();
@@ -16,6 +17,7 @@ vi.mock('@server/core/crypto', () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('VcsService.forRepo', () => {
@@ -128,6 +130,85 @@ describe('VcsService.forRepo', () => {
         },
       ),
     ).rejects.toThrow(/Bitbucket credential not configured/);
+  });
+});
+
+describe('VcsService.forRepo — Bitbucket headSha population (empty-commit 404 regression)', () => {
+  // Regression for the BitbucketError 404 on `PUT .../commit//reports/codra-review`: the adapter's
+  // updateStatusCheck reads `this.job.headSha ?? ''`, but neither caller supplied headSha. The
+  // mapped PersistedReviewJob exposes it as `commitSha` (hex); the maintenance sweep passes it as an
+  // explicit `headSha` (hex-decoded from the commit_sha bytea). forRepo normalizes both so the Code
+  // Insights PUT + build-status POST always target a non-empty commit segment.
+  function mockValidBitbucketCredential() {
+    getVcsCredentialSecretsMock.mockResolvedValue({ encryptedAccessToken: 'v1:iv:ct' });
+    decryptSecretMock.mockResolvedValue('plaintext-token');
+  }
+
+  it('derives headSha from the mapped job commitSha so updateStatusCheck targets the real commit (not /commit//)', async () => {
+    const env = createTestEnv();
+    mockValidBitbucketCredential();
+    const mock = installBitbucketFetchMock();
+
+    const adapter = await VcsService.forRepo(env, {
+      id: 'job-live',
+      owner: 'ws-foo',
+      repo: 'repo-bar',
+      prNumber: 7,
+      installationId: null,
+      repositoryVcsProvider: 'bitbucket',
+      repositoryWorkspace: 'ws-foo',
+      // The mapped PersistedReviewJob carries commitSha (hex), NOT headSha.
+      commitSha: 'deadbeefcafe0001',
+    } as Parameters<typeof VcsService.forRepo>[1]);
+
+    await adapter.updateStatusCheck('ws-foo', 'repo-bar', 'codra-review', {
+      title: 'Comments posted',
+      summary: '2 inline comments across 1 file.',
+      status: 'completed',
+      conclusion: 'neutral',
+    });
+
+    // The Code Insights PUT must carry the real commit hash (non-empty segment). Note: the fetch
+    // mock's route regex requires `/commit/[^/]+/` — an empty segment would fall through to a 404,
+    // exactly reproducing the pre-fix BitbucketError.
+    const put = mock.calls.find((c) => c.method === 'PUT' && c.path.includes('/reports/codra-review'));
+    expect(put?.path).toBe('/2.0/repositories/ws-foo/repo-bar/commit/deadbeefcafe0001/reports/codra-review');
+
+    // The build-status POST likewise targets the real commit.
+    const post = mock.calls.find((c) => c.method === 'POST' && c.path.includes('/statuses/build'));
+    expect(post?.path).toBe('/2.0/repositories/ws-foo/repo-bar/commit/deadbeefcafe0001/statuses/build');
+
+    // Regression guard: NO request went to an empty /commit// segment (the pre-fix 404 route).
+    expect(mock.calls.some((c) => c.path.includes('/commit//'))).toBe(false);
+  });
+
+  it('prefers an explicit headSha over commitSha (the maintenance sweep passes the hex-decoded commit_sha)', async () => {
+    const env = createTestEnv();
+    mockValidBitbucketCredential();
+    const mock = installBitbucketFetchMock();
+
+    const adapter = await VcsService.forRepo(env, {
+      id: 'job-maint',
+      owner: 'ws-foo',
+      repo: 'repo-bar',
+      prNumber: 7,
+      installationId: null,
+      repositoryVcsProvider: 'bitbucket',
+      repositoryWorkspace: 'ws-foo',
+      headSha: 'explicitsha99',
+      commitSha: 'shouldnotwin',
+    } as Parameters<typeof VcsService.forRepo>[1]);
+
+    await adapter.updateStatusCheck('ws-foo', 'repo-bar', 'codra-review', {
+      title: 'LGTM',
+      summary: 'ok',
+      status: 'completed',
+      conclusion: 'success',
+    });
+
+    const put = mock.calls.find((c) => c.method === 'PUT' && c.path.includes('/reports/codra-review'));
+    expect(put?.path).toContain('/commit/explicitsha99/reports/');
+    expect(put?.path).not.toContain('shouldnotwin');
   });
 });
 
