@@ -3,6 +3,7 @@ import { useSearchParams, Link } from 'react-router-dom';
 import { Sun, Moon, ShieldCheck, ArrowLeft, AlertCircle } from 'lucide-react';
 import { useTheme } from '@client/lib/theme';
 import { GithubMark } from '@client/components/shared/github-mark';
+import { BitbucketMark } from '@client/components/shared/bitbucket-mark';
 import codraDark from '@/assets/codra-fullicon-dark.svg';
 import codraLight from '@/assets/codra-fullicon-light.svg';
 
@@ -18,6 +19,10 @@ function getErrorMessage(error: string | null) {
       return 'GitHub did not return a valid callback. Please try again.';
     case 'oauth_failed':
       return 'GitHub sign-in failed while completing the OAuth flow.';
+    case 'invalid_grant':
+      return 'Bitbucket rejected the sign-in code (it may have expired or been used already). Please try again.';
+    case 'bitbucket_not_allowed':
+      return 'This Bitbucket account is not allowed to access the Codra dashboard. Ask an operator to add your Bitbucket account_id to the allow-list.';
     default:
       return null;
   }
@@ -74,7 +79,7 @@ export function LoginPage() {
                 Welcome back
               </h1>
               <p className="mx-auto max-w-xs text-sm leading-relaxed text-muted-foreground">
-                Sign in with your approved GitHub account to access the PR review dashboard.
+                Sign in with your approved GitHub or Bitbucket account to access the PR review dashboard.
               </p>
             </div>
 
@@ -86,15 +91,24 @@ export function LoginPage() {
               </div>
             )}
 
-            {/* CTA */}
-            <a
-              href="/auth/github"
-              id="login-submit"
-              className="inline-flex h-12 w-full items-center justify-center gap-2.5 rounded-xl bg-foreground text-[0.95rem] font-semibold text-background shadow-md transition-all hover:bg-foreground/90 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <GithubMark size={17} />
-              Sign in with GitHub
-            </a>
+            {/* CTAs */}
+            <div className="flex w-full flex-col gap-3">
+              <a
+                href="/auth/github"
+                id="login-submit"
+                className="inline-flex h-12 w-full items-center justify-center gap-2.5 rounded-xl bg-foreground text-[0.95rem] font-semibold text-background shadow-md transition-all hover:bg-foreground/90 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                <GithubMark size={17} />
+                Sign in with GitHub
+              </a>
+              <a
+                href="/auth/bitbucket"
+                className="inline-flex h-12 w-full items-center justify-center gap-2.5 rounded-xl border border-zinc-200 bg-white text-[0.95rem] font-semibold text-foreground shadow-sm transition-all hover:bg-zinc-50 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/[0.1]"
+              >
+                <BitbucketMark size={17} />
+                Sign in with Bitbucket
+              </a>
+            </div>
           </div>
         </div>
 
@@ -102,7 +116,7 @@ export function LoginPage() {
         <div className="mt-6 flex items-center gap-2.5 px-2 text-muted-foreground">
           <ShieldCheck size={16} className="shrink-0 text-success" />
           <p className="text-xs leading-snug">
-            Only authorized GitHub users can access this instance.
+            Only authorized users can access this instance.
           </p>
         </div>
       </div>
