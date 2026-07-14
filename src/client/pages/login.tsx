@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useEffect, useMemo } from 'react';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { Sun, Moon, ShieldCheck, ArrowLeft, AlertCircle } from 'lucide-react';
+import { api } from '@client/lib/api';
 import { useTheme } from '@client/lib/theme';
 import { GithubMark } from '@client/components/shared/github-mark';
 import { BitbucketMark } from '@client/components/shared/bitbucket-mark';
@@ -30,8 +31,27 @@ function getErrorMessage(error: string | null) {
 
 export function LoginPage() {
   const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const error = useMemo(() => getErrorMessage(searchParams.get('error')), [searchParams]);
+
+  // Auto-redirect an already-authenticated visitor to the dashboard. This recovers
+  // the post-OAuth flow: the callback sets the session cookie and redirects to
+  // /dashboard, but the immediate server-side session read can miss (Cloudflare KV
+  // read-after-write is eventually consistent), bouncing the user here. By the time
+  // this same-origin probe runs, the session is readable — so we forward instead of
+  // stranding the user on the Sign-In page.
+  useEffect(() => {
+    let cancelled = false;
+    api.probeSession().then((user) => {
+      if (!cancelled && user) {
+        navigate('/dashboard', { replace: true });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
 
   return (
     <div className="relative flex min-h-svh flex-col items-center justify-center bg-background px-4 py-8">
