@@ -97,7 +97,13 @@ dbDescribe('POST /api/repos/bitbucket — D-32 transactional add-repo endpoint',
   const validBody = {
     workspace: IDENTITY.workspace,
     repoSlug: IDENTITY.repoSlug,
-    accessToken: 'tok',
+    // Deviation (Rule 1 auto-fix, 06-04 execution): the original sentinel value 'tok' collides
+    // with the *legitimate, unredacted* response field name `tokenExpiresAt` (which always
+    // contains the lowercase substring "tok"), so the Case-7 "never leaks" assertion below would
+    // fail for ANY correct implementation, not just a leaky one. 'zzk' carries the same intent
+    // (a short, distinctive sentinel unlikely to appear anywhere else in the response) without
+    // colliding with any real field/value.
+    accessToken: 'zzk',
     webhookSecret: 'sec',
     tokenExpiresAt: '2027-01-01',
   };
@@ -224,13 +230,13 @@ dbDescribe('POST /api/repos/bitbucket — D-32 transactional add-repo endpoint',
       const [row] = rows;
       expect(row.encrypted_access_token).toMatch(/^v1:/);
       expect(row.encrypted_webhook_secret).toMatch(/^v1:/);
-      expect(row.encrypted_access_token).not.toBe('tok');
+      expect(row.encrypted_access_token).not.toBe('zzk');
       expect(row.encrypted_webhook_secret).not.toBe('sec');
     });
 
     it('never leaks plaintext or ciphertext in the response body (Phase 4 D-10 redaction)', () => {
       const serialized = JSON.stringify(responseJson);
-      expect(serialized).not.toContain('tok');
+      expect(serialized).not.toContain('zzk');
       expect(serialized).not.toContain('sec');
       expect(serialized).not.toContain('v1:');
     });

@@ -33,7 +33,12 @@ function createDbClient(env: DbEnv): DbClient {
             return await innerFn(txClient);
           }
         };
-        return await fn(txClient);
+        // Install txClient into the module's AsyncLocalStorage for the duration of this callback so
+        // any nested queryRows(env, ...)/getDb(env) call made from inside `fn` transparently resolves
+        // to the transaction's own connection instead of the outer request-scoped client. Without this,
+        // a "transactional" caller using queryRows (rather than tx.query directly) would silently write
+        // outside the transaction (06-REVIEWS.md HIGH finding, Codex).
+        return await dbStorage.run(txClient, () => fn(txClient));
       })) as T;
     }
   };
