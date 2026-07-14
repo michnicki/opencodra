@@ -67,6 +67,19 @@ type TrackerLike = { incrementSubrequests(count?: number): void };
 // share the same lookup within a single submitReview invocation.
 type CommentListingItem = { id: number; body: string; inline?: { path: string; to?: number; from?: number } };
 
+// Stable machine token for the review summary comment's dedup anchor. Bitbucket Cloud has no hidden
+// HTML comments (a GitHub-style `<!-- ... -->` renders visibly and its inner HTML is sanitized), so
+// the anchor is a clean, human-readable footer instead. Bitbucket preserves the submitted markdown
+// verbatim in `content.raw` (what listPullRequestComments reads), so this footer round-trips for
+// findExistingReviewForCommit's idempotency check even though it also renders cleanly in the PR.
+const BITBUCKET_REVIEW_MARKER = 'codra-review';
+// 12 hex chars uniquely identify a commit within a single PR while keeping the footer tidy.
+const BITBUCKET_MARKER_SHA_LENGTH = 12;
+
+function bitbucketReviewFooter(commitSha: string): string {
+  return `${BITBUCKET_REVIEW_MARKER} · reviewed commit \`${commitSha.slice(0, BITBUCKET_MARKER_SHA_LENGTH)}\``;
+}
+
 export class BitbucketAdapter implements VcsProvider {
   readonly name = 'bitbucket' as const;
   // Bitbucket Cloud has no native PR-labels feature (Pattern 2). The interface marks `labels`
@@ -77,7 +90,6 @@ export class BitbucketAdapter implements VcsProvider {
     private env: AppBindings,
     private readonly client: BitbucketClient,
     private readonly job: BitbucketJob,
-    private readonly tracker?: TrackerLike,
   ) {}
 
   /**
@@ -113,7 +125,7 @@ export class BitbucketAdapter implements VcsProvider {
     const token = await decryptSecret(env, secrets.encryptedAccessToken);
 
     const client = new BitbucketClient(env, token, tracker);
-    const adapter = new BitbucketAdapter(env, client, { ...job, repositoryWorkspace: workspace }, tracker);
+    const adapter = new BitbucketAdapter(env, client, { ...job, repositoryWorkspace: workspace });
     return adapter;
   }
 
@@ -237,9 +249,12 @@ export class BitbucketAdapter implements VcsProvider {
       dedup.add(deDupKey(comment.path, anchor, comment.body));
     }
 
-    // REV-R-A step 3: combined marker+summary as the SINGLE final post.
-    const marker = `<!-- codra:job=${input.jobIdHint ?? 'unknown'} commit=${input.commitSha} -->`;
-    const combinedBody = `${marker}\n\n<sub>codra-review</sub>\n\n${input.summaryBody}`;
+    // REV-R-A step 3: the summary as the SINGLE final post. The dedup anchor is a clean Bitbucket
+    // footer (see BITBUCKET_REVIEW_MARKER) appended AFTER the summary — no GitHub-flavored HTML
+    // (`<!-- ... -->` / `<sub>`), both of which render as junk on Bitbucket Cloud (Thread C).
+    // `input.summaryBody` is already Bitbucket-formatted by formatReviewOverview({ provider }).
+    const combinedBody = `${input.summaryBody}\n\n---\n\n${bitbucketReviewFooter(input.commitSha)}`;
+    void input.jobIdHint;
     const posted = await this.client.postPullRequestComment(workspace, repo, prNumber, {
       content: { raw: combinedBody },
     });
@@ -260,8 +275,13 @@ export class BitbucketAdapter implements VcsProvider {
   ): Promise<{ ref: string } | null> {
     const workspace = this.job.repositoryWorkspace;
     const items = await this.client.listPullRequestComments(workspace, repo, prNumber, 100);
+    // Match the Bitbucket review-summary footer (BITBUCKET_REVIEW_MARKER) for this commit. Bitbucket
+    // returns the raw submitted markdown in `content.raw`, so the footer is present verbatim even
+    // though it also renders in the PR. Both submitReview and this matcher slice the sha to the same
+    // length so the anchor is symmetric.
+    const shortSha = commitSha.slice(0, BITBUCKET_MARKER_SHA_LENGTH);
     const matched = items.find(
-      (item) => item.body.startsWith('<!-- codra:job=') && item.body.includes(`commit=${commitSha}`),
+      (item) => item.body.includes(BITBUCKET_REVIEW_MARKER) && item.body.includes(shortSha),
     );
     void owner;
     return matched ? { ref: String(matched.id) } : null;
