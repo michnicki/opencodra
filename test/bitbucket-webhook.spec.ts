@@ -234,7 +234,7 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     await seedCredential(workspace, repoSlug);
 
     // Seed a global model strategy — the KV key getGlobalConfig reads (Settings → global model).
-Define a typed interface for the KV store, e.g., `interface Env { APP_KV: KVNamespace }` and cast `env` as `Env` or use a typed binding. Alternatively, use a mock with typed methods in tests.
+    await env.APP_KV.put(
       'config:global_model',
       JSON.stringify({ main: 'openai/gpt-4o', fallbacks: ['anthropic/claude-3-5-sonnet'], size_overrides: [] }),
     );
