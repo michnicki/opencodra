@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '@client/lib/api';
 import { Skeleton } from '@client/components/shared/skeleton';
@@ -9,10 +10,18 @@ import { Alert } from '@client/components/ui/alert';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Switch } from '@client/components/ui/switch';
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@client/components/ui/dropdown-menu';
+import { GithubMark } from '@client/components/shared/github-mark';
+import { BitbucketMark } from '@client/components/shared/bitbucket-mark';
+import {
   GitBranch,
   RefreshCw,
   Save,
-  ArrowUpRight,
+  Plus,
   RotateCcw,
   Settings2,
   X,
@@ -364,6 +373,7 @@ function RepoModelModal({
 }
 
 export function ReposPage() {
+  const navigate = useNavigate();
   const [repos, setRepos] = useState<RepoConfigRecord[]>([]);
   const [globalConfig, setGlobalConfig] = useState<ModelRouteConfig>(EMPTY_MODEL_ROUTE);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
@@ -510,16 +520,30 @@ export function ReposPage() {
               <RefreshCw size={13} className={cn(syncing && 'animate-spin')} />
               Sync Repositories
             </Button>
-            <Button asChild size="sm" className="gap-2">
-              <a
-                href="/api/repos/install"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <ArrowUpRight size={13} />
-                Add Repositories
-              </a>
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" className="gap-2">
+                  <Plus size={13} />
+                  Add Repositories
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={6}>
+                <DropdownMenuItem
+                  className="py-2"
+                  onClick={() => window.open('/api/repos/install', '_blank', 'noopener,noreferrer')}
+                >
+                  <GithubMark size={14} />
+                  Install via GitHub App
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="py-2"
+                  onClick={() => navigate('/repos/add/bitbucket')}
+                >
+                  <BitbucketMark size={14} />
+                  Add Bitbucket repository
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         }
       />
