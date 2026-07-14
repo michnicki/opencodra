@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '@server/env';
-import { createOAuthState, consumeOAuthState, parseAllowedUsers } from '@server/core/oauth';
+import { createOAuthState, consumeOAuthState, parseAllowedUsersByProvider } from '@server/core/oauth';
 import { createSession, destroySession } from '@server/core/sessions';
 import { exchangeGitHubOAuthCode, fetchGitHubOAuthProfile, toDashboardSessionUser } from '@server/core/github-oauth';
 
@@ -43,9 +43,9 @@ export function createAuthRouter() {
     try {
       const token = await exchangeGitHubOAuthCode(c.env, code);
       const profile = await fetchGitHubOAuthProfile(token);
-      const allowedUsers = parseAllowedUsers(c.env.DASHBOARD_ALLOWED_USERS);
+      const allowedUsers = parseAllowedUsersByProvider(c.env.DASHBOARD_ALLOWED_USERS);
 
-      if (!allowedUsers.has(profile.login.toLowerCase())) {
+      if (!allowedUsers.github.has(profile.login.toLowerCase())) {
         return c.redirect(redirectToLogin('not_allowed'), 302);
       }
 
