@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { cn } from '@client/lib/utils';
-import { UpdatesEmailPrompt } from '@client/components/features/dashboard/updates-email-prompt';
 
 interface PageHeaderProps extends React.HTMLAttributes<HTMLElement> {
   category?: string;
@@ -48,7 +47,6 @@ export function PageHeader({
           </div>
         )}
       </header>
-      <UpdatesEmailPrompt />
     </>
   );
 }

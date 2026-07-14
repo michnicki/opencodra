@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 import { Button } from '@client/components/ui/button';
 import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
-import { UpdatesEmailPrompt } from '@client/components/features/dashboard/updates-email-prompt';
 import type { JobDetail } from '@shared/schema';
 
 /* Stop icon: outlined circle with a solid square inside. Lucide's CircleStop strokes the inner
@@ -154,8 +153,6 @@ export function JobHeader({
         confirmVariant="destructive"
         onConfirm={onDelete}
       />
-
-      <UpdatesEmailPrompt />
     </>
   );
 }
