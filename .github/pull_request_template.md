@@ -28,4 +28,3 @@ Please describe the tests that you ran to verify your changes. Provide instructi
 - [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] My changes generate no new warnings
 - [ ] New and existing unit tests pass locally with my changes
-- [ ] I have signed the [CLA](https://codra.run/cla)
