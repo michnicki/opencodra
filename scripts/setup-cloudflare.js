@@ -426,6 +426,9 @@ async function main() {
   const callbackUrlRegex = /"AUTH_CALLBACK_URL":\s*"[^"]+"/;
   wranglerConfig = wranglerConfig.replace(callbackUrlRegex, `"AUTH_CALLBACK_URL": "${escapeJson(appUrl)}/auth/github/callback"`);
 
+  const bitbucketCallbackUrlRegex = /"BITBUCKET_AUTH_CALLBACK_URL":\s*"[^"]+"/;
+  wranglerConfig = wranglerConfig.replace(bitbucketCallbackUrlRegex, `"BITBUCKET_AUTH_CALLBACK_URL": "${escapeJson(appUrl)}/auth/bitbucket/callback"`);
+
   const botUsernameRegex = /"BOT_USERNAME":\s*"[^"]+"/;
   wranglerConfig = wranglerConfig.replace(botUsernameRegex, `"BOT_USERNAME": "${escapeJson(botUsername)}"`);
 
@@ -471,7 +474,9 @@ async function main() {
     "GITHUB_CLIENT_SECRET",
     "LLM_CONFIG_ENCRYPTION_KEY",
     "CF_API_TOKEN",
-    "CF_ACCOUNT_ID"
+    "CF_ACCOUNT_ID",
+    "BITBUCKET_CLIENT_ID",
+    "BITBUCKET_CLIENT_SECRET"
   ];
 
   const { confirmSecrets } = await prompts({
