@@ -120,3 +120,31 @@ export type PullRequestWebhookPayload = z.infer<typeof pullRequestWebhookPayload
 export type PrComment = z.infer<typeof prCommentSchema>;
 export type CodeInsightsReport = z.infer<typeof codeInsightsReportSchema>;
 export type CommitBuildStatus = z.infer<typeof commitBuildStatusSchema>;
+
+// Phase 6 (D-33/D-34): inbound Bitbucket OAuth /2.0/user profile response. `.passthrough()`
+// preserves documented provider fields Codra does not consume, mirroring the webhook-inbound
+// convention above.
+export const bitbucketOAuthProfileSchema = z.object({
+  account_id: z.string().min(1),
+  uuid: z.string().min(1),
+  username: z.string().min(1),
+  display_name: z.string().nullable(),
+  avatar: z.string().nullable().optional(),
+  links: z.object({
+    avatar: z.object({ href: z.string().url() }).optional(),
+  }).passthrough().optional(),
+  email: z.string().nullable().optional(),
+}).passthrough();
+
+// Phase 6 (D-32): outbound add-repo form input. `.strict()` rejects unknown keys so malformed
+// API writes fail at the boundary, mirroring vcsCredentialStoreSchema (src/shared/schema.ts).
+export const addBitbucketRepoInputSchema = z.object({
+  workspace: z.string().trim().toLowerCase().min(1).max(100),
+  repoSlug: z.string().trim().toLowerCase().min(1).max(100),
+  accessToken: z.string().min(1).max(4096),
+  webhookSecret: z.string().min(1).max(4096),
+  tokenExpiresAt: z.union([z.iso.date(), z.iso.datetime({ offset: true })]).nullable().optional(),
+}).strict();
+
+export type BitbucketOAuthProfile = z.infer<typeof bitbucketOAuthProfileSchema>;
+export type AddBitbucketRepoInput = z.infer<typeof addBitbucketRepoInputSchema>;
