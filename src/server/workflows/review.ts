@@ -52,34 +52,13 @@ export class ReviewWorkflow extends WorkflowEntrypoint<AppBindings, ReviewJobMes
       }
 
       const currentPhase = phase;
-      
-      let result;
-      try {
-        result = await step.do(`run-${currentPhase}-${attempt}`, {
-          retries: { limit: 5, delay: '60 seconds', backoff: 'exponential' },
-          timeout: '15 minutes'
-        }, async () => {
-          return await runReviewJob(env, { ...params, phase: currentPhase, workflowInstanceId: event.instanceId });
-        });
-      } catch (error) {
-        await step.do(`telemetry-failure-${currentPhase}-${attempt}`, async () => {
-          const { sendTelemetryEvent } = await import('@server/core/telemetry');
-          await sendTelemetryEvent(env, {
-            linesReviewed: 0,
-            findingsReported: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            modelsUsed: [],
-            fileExtensions: [],
-            triggerType: params.eventName === 'pull_request' ? 'auto' : 'mention',
-            reviewDurationMs: 0,
-            filesReviewed: 0,
-            verdict: 'failed',
-            severityDistribution: {},
-          });
-        });
-        throw error;
-      }
+
+      const result = await step.do(`run-${currentPhase}-${attempt}`, {
+        retries: { limit: 5, delay: '60 seconds', backoff: 'exponential' },
+        timeout: '15 minutes'
+      }, async () => {
+        return await runReviewJob(env, { ...params, phase: currentPhase, workflowInstanceId: event.instanceId });
+      });
 
       if (result.action === 'next_phase') {
         // Hand the next phase to a BRAND-NEW workflow instance when this one can no longer get a
