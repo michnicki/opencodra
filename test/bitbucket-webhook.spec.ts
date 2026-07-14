@@ -221,6 +221,49 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     expect(ingestInput.deliveryId).toBe('delivery-created-1');
   });
 
+  // 1b. Regression (Thread B — "no inline comments"): the route must snapshot the GLOBAL model
+  //     strategy into configSnapshot, not the empty defaultRepoConfig. A job snapshotted with an
+  //     empty model ({ main: null, fallbacks: [] }) makes ModelService.selectModel throw
+  //     "No review model strategy is configured", which fails every Bitbucket review before
+  //     finalize (no comments posted, job 'failed'). The GitHub route already resolves this via
+  //     loadRepoConfig's global fallback; this pins the Bitbucket route to the same behavior.
+  it('snapshots the global model strategy into configSnapshot (not the empty default)', async () => {
+    const workspace = `ws-bb-model-${Date.now()}`;
+    const repoSlug = `repo-bb-model-${Date.now()}`;
+    await seedRepository(workspace, repoSlug);
+    await seedCredential(workspace, repoSlug);
+
+    // Seed a global model strategy — the KV key getGlobalConfig reads (Settings → global model).
+Define a typed interface for the KV store, e.g., `interface Env { APP_KV: KVNamespace }` and cast `env` as `Env` or use a typed binding. Alternatively, use a mock with typed methods in tests.
+      'config:global_model',
+      JSON.stringify({ main: 'openai/gpt-4o', fallbacks: ['anthropic/claude-3-5-sonnet'], size_overrides: [] }),
+    );
+
+    try {
+      const payload = buildPayload({
+        repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-model}' },
+      });
+      const body = JSON.stringify(payload);
+      const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
+
+      const response = await postWebhook(body, {
+        'x-event-key': 'pullrequest:created',
+        'x-request-uuid': 'delivery-model-1',
+      }, signature);
+
+      expect([200, 202]).toContain(response.status);
+      expect(ingestSpy).toHaveBeenCalledTimes(1);
+
+      const ingestInput = ingestSpy.mock.calls[0][1];
+      // The snapshot carries the global strategy, so selectModel resolves a non-empty chain.
+      expect(ingestInput.configSnapshot.model.main).toBe('openai/gpt-4o');
+      expect(ingestInput.configSnapshot.model.fallbacks).toEqual(['anthropic/claude-3-5-sonnet']);
+    } finally {
+      // Isolate: the env (and its MemoryKV) is shared across tests in this file.
+      await env.APP_KV.delete('config:global_model');
+    }
+  });
+
   // 2. pullrequest:updated with a DIFFERENT commit hash than any existing job → ingest called,
   //    eventName echoed.
   it('accepts a signed pullrequest:updated with a new commit hash and calls ingest', async () => {

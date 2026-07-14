@@ -1,5 +1,5 @@
 import type { AppBindings } from '@server/env';
-import { getTerminalJobsNeedingCheckRunCompletion, markJobCheckRunCompleted, recoverExpiredJobLeases } from '@server/db/jobs';
+import { bytesToHex, getTerminalJobsNeedingCheckRunCompletion, markJobCheckRunCompleted, recoverExpiredJobLeases } from '@server/db/jobs';
 import { logger } from '@server/core/logger';
 import { VcsService } from '@server/services/vcs';
 
@@ -50,7 +50,16 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
       // native call: GitHub -> updateCheckRun(numeric id, ...); Bitbucket -> PUT Code Insights
       // report + POST commit build status (REV-M-9 verdict mapping baked in). This replaces
       // the previous GitHub-only path so the maintenance sweep is no longer GitHub-blind.
-      const vcs = await VcsService.forRepo(env, job, undefined);
+      // getTerminalJobsNeedingCheckRunCompletion returns the raw job row (SELECT j.*), whose head
+      // commit lives in the bytea `commit_sha` column — NOT the `headSha`/`commitSha` field the
+      // Bitbucket adapter's updateStatusCheck needs. Hex-decode and pass it explicitly so the Code
+      // Insights PUT + build-status POST target the real commit instead of an empty `/commit//`
+      // segment (the recurring BitbucketError 404 in the ~2-min sweep). GitHub jobs ignore headSha.
+      const vcs = await VcsService.forRepo(
+        env,
+        { ...job, headSha: bytesToHex(job.commit_sha) },
+        undefined,
+      );
 
       let conclusion: 'success' | 'neutral' | 'failure' | 'cancelled';
       let title: string;

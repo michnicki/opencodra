@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { completeTerminalCheckRuns } from '@server/core/job-recovery';
 import { createTestEnv } from './helpers';
 
@@ -102,6 +102,44 @@ describe('completeTerminalCheckRuns (REV-M-8 widening)', () => {
       expect.objectContaining({ status: 'completed', conclusion: 'neutral', title: 'Comments posted' }),
     );
     expect(markJobCheckRunCompletedMock).toHaveBeenCalledWith(expect.anything(), 'job-bb-1');
+  });
+
+  it('passes the hex-decoded commit_sha to forRepo as headSha (empty-commit 404 fix)', async () => {
+    // The raw job row from getTerminalJobsNeedingCheckRunCompletion (SELECT j.*) exposes the head
+    // commit ONLY as the bytea `commit_sha` column — not the headSha/commitSha field the Bitbucket
+    // adapter's updateStatusCheck reads. Without hex-decoding it here, the adapter posts to an empty
+    // `/commit//` segment (the recurring BitbucketError 404). This pins the mapping.
+    const env = createTestEnv();
+    const updateStatusCheckMock = vi.fn().mockResolvedValue(undefined);
+    forRepoMock.mockResolvedValue({ name: 'bitbucket', updateStatusCheck: updateStatusCheckMock });
+    getTerminalJobsNeedingCheckRunCompletionMock.mockResolvedValue([
+      {
+        id: 'job-bb-2',
+        status: 'done',
+        verdict: 'comment',
+        error_msg: null,
+        comment_count: 1,
+        file_count: 1,
+        owner: 'acme',
+        repo: 'backend',
+        check_run_id: null,
+        status_check_ref: 'codra-review',
+        installation_id: null,
+        repositoryVcsProvider: 'bitbucket',
+        repositoryWorkspace: 'acme',
+        // postgres.js returns bytea as a `\x`-prefixed hex string; bytesToHex normalizes it.
+        commit_sha: '\\xdeadbeef',
+      },
+    ]);
+
+    await completeTerminalCheckRuns(env);
+
+    expect(forRepoMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: 'job-bb-2', headSha: 'deadbeef' }),
+      undefined,
+    );
+    expect(markJobCheckRunCompletedMock).toHaveBeenCalledWith(expect.anything(), 'job-bb-2');
   });
 
   it('skips rows where both check_run_id AND status_check_ref are null (defensive)', async () => {

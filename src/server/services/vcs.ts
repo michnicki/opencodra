@@ -50,11 +50,27 @@ export class VcsService {
       installationId?: string | null;
       repositoryVcsProvider?: string | null;
       repositoryWorkspace?: string | null;
+      // The head commit SHA the Bitbucket adapter needs for the Code Insights PUT + build-status
+      // POST (updateStatusCheck). It is NOT carried under a single field name across callers: the
+      // mapped PersistedReviewJob exposes it as `commitSha` (hex), while callers holding a raw job
+      // row must hex-decode `commit_sha` and pass `headSha` explicitly. Normalize both below so the
+      // adapter never posts to an empty `/commit//...` segment (BitbucketError 404).
+      headSha?: string | null;
+      commitSha?: string | null;
     },
     tracker?: { incrementSubrequests(count?: number): void },
   ): Promise<VcsProvider> {
     if (job.repositoryVcsProvider === 'bitbucket') {
-      return BitbucketAdapter.create(env as AppBindings, job as Parameters<typeof BitbucketAdapter.create>[1], tracker);
+      // Prefer an explicit headSha; fall back to the mapped job's commitSha (both are the PR head
+      // commit — see webhook-bitbucket.ts:165/221 and core/bitbucket.ts:168). Without this the
+      // adapter reads `this.job.headSha ?? ''` and posts Code Insights / build status to an empty
+      // commit, which 404s in both the live finalize cosmetics path and the maintenance sweep.
+      const headSha = job.headSha ?? job.commitSha ?? null;
+      return BitbucketAdapter.create(
+        env as AppBindings,
+        { ...job, headSha } as Parameters<typeof BitbucketAdapter.create>[1],
+        tracker,
+      );
     }
     return new GithubAdapter(env, job.installationId ?? '', tracker);
   }

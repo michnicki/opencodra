@@ -1379,10 +1379,10 @@ async function runFinalizePhase(
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
-  let formattedSummary = formatter.formatReviewOverview(pr.headSha, env.BOT_USERNAME);
+  let formattedSummary = formatter.formatReviewOverview(pr.headSha, env.BOT_USERNAME, { provider: vcs.name });
 
   if (omittedCount > 0) {
-    formattedSummary += `\n\n> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${effectiveMaxComments}). Showing the most critical issues.`;
+    formattedSummary += `\n\n${formatter.formatOmittedCommentsNote(omittedCount, effectiveMaxComments, { provider: vcs.name })}`;
   }
 
   // If a prior finalize attempt already reached the posting stage (the 'Completing' step was
