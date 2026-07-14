@@ -65,6 +65,7 @@ export async function fetchGitHubOAuthProfile(token: string) {
 
 export function toDashboardSessionUser(profile: GitHubOAuthProfile): DashboardSessionUser {
   return {
+    provider: 'github' as const,
     githubUserId: profile.id,
     login: profile.login,
     name: profile.name,
