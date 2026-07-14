@@ -435,8 +435,10 @@ async function main() {
   const githubAppSlugRegex = /"GITHUB_APP_SLUG":\s*"[^"]+"/;
   wranglerConfig = wranglerConfig.replace(githubAppSlugRegex, `"GITHUB_APP_SLUG": "${escapeJson(githubAppSlug)}"`);
 
-  const allowedUsersRegex = /"DASHBOARD_ALLOWED_USERS":\s*"[^"]+"/;
-  wranglerConfig = wranglerConfig.replace(allowedUsersRegex, `"DASHBOARD_ALLOWED_USERS": "${escapeJson(allowedUsers)}"`);
+  const allowedUsersRegex = /"DASHBOARD_ALLOWED_USERS":\s*"(?:[^"\\]|\\.)*"/;
+  const allowedUsersArray = allowedUsers.split(',').map(u => u.trim()).filter(Boolean);
+  const allowedUsersValue = JSON.stringify({ github: allowedUsersArray });
+  wranglerConfig = wranglerConfig.replace(allowedUsersRegex, `"DASHBOARD_ALLOWED_USERS": "${escapeJson(allowedUsersValue)}"`);
 
   configChanged = true;
 
