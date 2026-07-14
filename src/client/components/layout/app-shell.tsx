@@ -553,12 +553,14 @@ export function AppShell() {
                   </div>
                 </div>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem asChild className="cursor-pointer font-semibold">
-                  <a href={githubProfileHref} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3">
-                    <span>GitHub profile</span>
-                    <ChevronRight size={13} strokeWidth={2.35} className="opacity-60" />
-                  </a>
-                </DropdownMenuItem>
+                {sessionUser?.provider === 'github' && (
+                  <DropdownMenuItem asChild className="cursor-pointer font-semibold">
+                    <a href={githubProfileHref} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3">
+                      <span>GitHub profile</span>
+                      <ChevronRight size={13} strokeWidth={2.35} className="opacity-60" />
+                    </a>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="cursor-pointer gap-2 font-semibold"
                   onClick={async () => {
