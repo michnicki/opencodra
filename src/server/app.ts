@@ -5,6 +5,7 @@ import { requireSession } from '@server/middleware/auth';
 import { requireCsrfHeader } from '@server/middleware/csrf';
 import { observability } from '@server/middleware/observability';
 import { createAuthRouter } from '@server/routes/auth';
+import { createAuthBitbucketRouter } from '@server/routes/auth-bitbucket';
 import { createWebhookRouter } from '@server/routes/webhook';
 import { createBitbucketWebhookRouter } from '@server/routes/webhook-bitbucket';
 import { createAuthApiRouter } from '@server/routes/api/auth';
@@ -27,6 +28,7 @@ export function createApp() {
   app.use('/auth/logout', requireCsrfHeader);
 
   app.route('/auth', createAuthRouter());
+  app.route('/auth', createAuthBitbucketRouter());
   app.route('/webhook', createWebhookRouter());
   app.route('/webhook/bitbucket', createBitbucketWebhookRouter());
 
