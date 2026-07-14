@@ -117,6 +117,7 @@ describe('core/bitbucket-oauth — D-33 / D-34 / Pitfall 3', () => {
     const mapped = toDashboardSessionUser(profile);
 
     expect(mapped.provider).toBe('bitbucket');
+    if (mapped.provider !== 'bitbucket') throw new Error('expected bitbucket variant');
     expect(mapped.accountId).toBe(profile.account_id);
     expect(mapped.uuid).toBe(profile.uuid);
     expect(mapped.username).toBe(profile.username);
