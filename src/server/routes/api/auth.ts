@@ -8,6 +8,10 @@ const emailSchema = z.object({
   email: z.string().trim().email().max(254),
 }).strict();
 
+// D-29: identifies the session user's provider-scoped id for the updates-email KV key.
+const identity = (u: { provider: 'github'; githubUserId: number } | { provider: 'bitbucket'; accountId: string }) =>
+  u.provider === 'github' ? u.githubUserId : u.accountId;
+
 export function createAuthApiRouter() {
   const app = new Hono<AppEnv>();
 
@@ -26,7 +30,7 @@ export function createAuthApiRouter() {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const preference = await getUpdatesEmailPreference(c.env, sessionUser.githubUserId);
+    const preference = await getUpdatesEmailPreference(c.env, sessionUser.provider, identity(sessionUser));
     return c.json({
       status: preference?.status ?? 'pending',
       email: preference?.email ?? null,
@@ -46,7 +50,7 @@ export function createAuthApiRouter() {
       return jsonError('Enter a valid email address.', 400);
     }
 
-    const existingPreference = await getUpdatesEmailPreference(c.env, sessionUser.githubUserId);
+    const existingPreference = await getUpdatesEmailPreference(c.env, sessionUser.provider, identity(sessionUser));
     if (existingPreference) {
       return c.json({
         status: existingPreference.status,
@@ -55,12 +59,12 @@ export function createAuthApiRouter() {
       });
     }
 
-    const synced = await syncUpdatesEmail(c.env, sessionUser.githubUserId, parsed.data.email);
+    const synced = await syncUpdatesEmail(c.env, sessionUser.provider, identity(sessionUser), parsed.data.email);
     if (!synced) {
       return jsonError('Could not save updates email right now.', 502);
     }
 
-    const preference = await getUpdatesEmailPreference(c.env, sessionUser.githubUserId);
+    const preference = await getUpdatesEmailPreference(c.env, sessionUser.provider, identity(sessionUser));
 
     return c.json({
       status: preference?.status ?? 'pending',
