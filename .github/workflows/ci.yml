@@ -44,6 +44,8 @@ jobs:
       GITHUB_CLIENT_SECRET: fake-dashboard-client-secret
       AUTH_CALLBACK_URL: https://codra.test/auth/github/callback
       APP_URL: https://codra.test
+      # Must match the mock GitHub login ('devarshishimpi') in test/api.spec.ts;
+      # changing this value breaks the auth happy-path tests.
       DASHBOARD_ALLOWED_USERS: devarshishimpi
       BOT_USERNAME: codra-test-app
     

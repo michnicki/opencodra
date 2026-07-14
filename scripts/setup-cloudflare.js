@@ -419,7 +419,7 @@ async function main() {
       type: 'text',
       name: 'customDomain',
       message: 'Enter your custom domain:',
-      initial: 'app.codra.devarshi.dev'
+      initial: 'your-worker.example.workers.dev'
     }, { onCancel: () => process.exit(1) });
     
     appUrl = `https://${customDomain}`;
@@ -452,7 +452,7 @@ async function main() {
     type: 'text',
     name: 'allowedUsers',
     message: 'Enter comma-separated GitHub usernames allowed to access the dashboard:',
-    initial: 'devarshishimpi'
+    initial: 'your-github-username'
   }, { onCancel: () => process.exit(1) });
   console.log('');
 
