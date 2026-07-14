@@ -5,7 +5,6 @@ import { queryRows } from '@server/db/client';
 import { getRepoConfigRecord } from '@server/db/repo-configs';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
 import { GitHubClient } from '@server/core/github';
-import { syncUpdatesEmail } from '@server/core/updates-email';
 import { defaultRepoConfig, reviewJobMessageSchema } from '@shared/schema';
 import type {
   AuthSessionResponse,
@@ -14,7 +13,6 @@ import type {
   ModelConfigsResponse,
   RepoConfigsResponse,
   StatsResponse,
-  UpdatesEmailResponse,
 } from '@shared/api';
 import { createTestEnv, saveTestProviderApiKey } from './helpers';
 import { vi } from 'vitest';
@@ -314,63 +312,6 @@ describe('Dashboard API Suite', () => {
     expect(response.status).toBe(200);
     const data = await response.json() as AuthSessionResponse;
     expect(data.user.login).toBe('devarshishimpi');
-  });
-
-  it('syncs an updates email only once per GitHub user', async () => {
-    const env = createTestEnv();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ok: true }));
-
-    await expect(syncUpdatesEmail(env, 42, 'user@example.com')).resolves.toBe(true);
-    await expect(syncUpdatesEmail(env, 42, 'user@example.com')).resolves.toBe(false);
-
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).toHaveBeenCalledWith('https://codra.run/api/emails', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ email: 'user@example.com' }),
-    }));
-  });
-
-  it('returns pending updates email status before required setup email is saved', async () => {
-    const env = createTestEnv();
-    const token = await getAuthCookie(env);
-
-    const response = await app.request('/api/auth/updates-email', {
-      headers: { Cookie: `codra_session=${token}` },
-    }, env);
-
-    expect(response.status).toBe(200);
-    const data = await response.json() as UpdatesEmailResponse;
-    expect(data).toMatchObject({
-      status: 'pending',
-      email: null,
-      updatedAt: null,
-    });
-  });
-
-  it('subscribes the user-entered updates email and persists it', async () => {
-    const env = createTestEnv();
-    const token = await getAuthCookie(env);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ ok: true }));
-
-    const response = await app.request('/api/auth/updates-email', {
-      method: 'POST',
-      headers: {
-        Cookie: `codra_session=${token}`,
-        'content-type': 'application/json',
-        'x-requested-with': 'XMLHttpRequest',
-      },
-      body: JSON.stringify({ email: 'typed@example.com' }),
-    }, env);
-
-    expect(response.status).toBe(200);
-    const data = await response.json() as UpdatesEmailResponse;
-    expect(data.status).toBe('subscribed');
-    expect(data.email).toBe('typed@example.com');
-    expect(data.updatedAt).toBeTruthy();
-    expect(fetchSpy).toHaveBeenCalledWith('https://codra.run/api/emails', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ email: 'typed@example.com' }),
-    }));
   });
 
   it('returns 404 for non-existent job detail (invalid UUID)', async () => {

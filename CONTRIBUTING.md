@@ -4,14 +4,6 @@ Thank you for your interest in contributing to Codra! We are building a high-per
 
 ---
 
-## ⚖️ Contributor License Agreement (CLA)
-
-Before we can merge your pull request, you must sign our Contributor License Agreement. This is a quick process that takes about 10 seconds and ensures that your contributions can be included under our dual-licensing model (AGPL-3.0 for the core).
-
-- **How to sign:** Visit [codra.run/cla](https://codra.run/cla) or follow the link provided by the automated GitHub check on your PR.
-
----
-
 ## 🛠️ Local Development Setup
 
 Codra is a monorepo-style project built with **Hono** (Worker), **React** (Vite), and **Cloudflare Workers**.
@@ -77,10 +69,9 @@ npm run typecheck
 3.  **Sync**: Ensure your branch is up to date with `dev`.
 4.  **Target Branch**: Open pull requests against `dev`.
 5.  **PR Description**: Use the provided template (if available) or clearly explain the *what* and *why* of your changes.
-6.  **CLA Check**: Once you open the PR, an automated check will verify your CLA status. If you haven't signed yet, follow the link in the check output.
 
 ---
 
 ## 📜 Licensing
 
-Codra is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. By contributing, you agree that your work will be licensed under the same terms, plus the additional grants specified in the CLA.
+Codra is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. By contributing, you agree that your work will be licensed under the same terms.
