@@ -103,7 +103,7 @@
     "AUTH_CALLBACK_URL": "https://codra.tmichnicki.workers.dev/auth/github/callback",
     "BITBUCKET_AUTH_CALLBACK_URL": "https://codra.tmichnicki.workers.dev/auth/bitbucket/callback",
     "BOT_USERNAME": "codraapp",
-    "GITHUB_APP_SLUG": "codraapp",
+    "GITHUB_APP_SLUG": "CodraApp",
     "DASHBOARD_ALLOWED_USERS": "{\"github\":[\"michnicki\"]}",
     "ENVIRONMENT": "production"
   }
