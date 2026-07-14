@@ -163,6 +163,7 @@ async function handleHyperdrive(dbUrl) {
             { title: 'Auto-fetch existing ID', value: 'fetch' },
             { title: 'Manually enter ID', value: 'manual' },
             { title: 'Create new with different name', value: 'new' },
+            { title: 'Update connection string (point this config at a different database)', value: 'update' },
             { title: 'Skip', value: 'skip' }
           ]
         }, { onCancel: () => process.exit(1) });
@@ -219,6 +220,52 @@ async function handleHyperdrive(dbUrl) {
             continue;
           }
           return null;
+        } else if (action === 'update') {
+          const updateFetchSpinner = ora('Fetching existing Hyperdrive configs...').start();
+          let resolvedId = null;
+
+          try {
+            const { stdout: listOut } = await execAsync('npx wrangler hyperdrive list');
+            updateFetchSpinner.succeed();
+
+            let parsed = null;
+            try {
+              const jsonStr = listOut.substring(listOut.indexOf('['), listOut.lastIndexOf(']') + 1);
+              parsed = JSON.parse(jsonStr);
+            } catch(e) {}
+
+            if (parsed && Array.isArray(parsed)) {
+              const found = parsed.find(hd => hd.name === currentBinding);
+              if (found) {
+                console.log(chalk.green(`  ✅ Found existing ID: ${found.id}`));
+                resolvedId = found.id;
+              }
+            }
+
+            if (!resolvedId) {
+              console.log(chalk.yellow(`  ⚠️ Could not automatically find an ID matching ${currentBinding}.`));
+              const { manualId } = await prompts({ type: 'text', name: 'manualId', message: 'Enter the Hyperdrive ID manually:'}, { onCancel: () => process.exit(1) });
+              if (manualId) resolvedId = manualId;
+            }
+          } catch(e) {
+            updateFetchSpinner.fail('Failed to fetch Hyperdrive configs.');
+            const { manualId } = await prompts({ type: 'text', name: 'manualId', message: 'Enter the Hyperdrive ID manually:'}, { onCancel: () => process.exit(1) });
+            if (manualId) resolvedId = manualId;
+          }
+
+          if (!resolvedId) return null;
+
+          const updateSpinner = ora('Updating Hyperdrive connection string...').start();
+          try {
+            await spawnAsync('npx', ['wrangler', 'hyperdrive', 'update', resolvedId, `--connection-string=${dbUrl}`]);
+            updateSpinner.succeed();
+            return resolvedId;
+          } catch (updateError) {
+            updateSpinner.fail();
+            console.error(chalk.red(`\n❌ Error executing Hyperdrive update.`));
+            console.error(chalk.red(updateError.stderr || updateError.message));
+            process.exit(1);
+          }
         } else {
           return null;
         }
