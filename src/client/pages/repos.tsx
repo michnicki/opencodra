@@ -561,7 +561,7 @@ export function ReposPage() {
           ]}
           linkAction={{
             label: 'See how to interact with Codra',
-            href: 'https://github.com/devarshishimpi/codra#readme',
+            href: 'https://github.com/michnicki/codra#readme',
           }}
         />
       ) : (

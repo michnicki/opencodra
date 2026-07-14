@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devarshishimpi/codra.git"
+    "url": "https://github.com/michnicki/codra"
   },
-  "homepage": "https://codra.run",
+  "homepage": "https://github.com/michnicki/codra",
   "bugs": {
-    "url": "https://github.com/devarshishimpi/codra/issues"
+    "url": "https://github.com/michnicki/codra"
   },
   "scripts": {
     "build": "vite build && npm run cf-typegen",

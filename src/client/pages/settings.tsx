@@ -1032,7 +1032,7 @@ export function SettingsPage() {
         <div className="grid grid-cols-1 divide-y divide-border/50 border-t border-border/50 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
           {[
             { href: `${pkg.repository.url.replace(/\.git$/, '')}/releases/`, label: 'Releases', sub: 'Version history & notes' },
-            { href: pkg.homepage, label: 'Homepage', sub: 'codra.run' },
+            { href: pkg.homepage, label: 'Homepage', sub: 'github.com/michnicki/codra' },
             { href: pkg.bugs.url, label: 'Report an issue', sub: 'GitHub issue tracker' },
           ].map(({ href, label, sub }) => (
             <a

@@ -454,7 +454,7 @@ export function AppShell() {
 
           {/* GitHub star */}
           <a
-            href="https://github.com/devarshishimpi/codra"
+            href="https://github.com/michnicki/codra"
             target="_blank"
             rel="noopener noreferrer"
             title="Star on GitHub"
