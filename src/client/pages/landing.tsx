@@ -4,8 +4,7 @@ import { Sun, Moon, ArrowRight, ExternalLink } from 'lucide-react';
 import { api } from '@client/lib/api';
 import { useTheme } from '@client/lib/theme';
 import { GithubMark } from '@client/components/shared/github-mark';
-import codraDark from '@/assets/codra-fullicon-dark.svg';
-import codraLight from '@/assets/codra-fullicon-light.svg';
+import { OpenCodraLogo } from '@client/components/shared/opencodra-logo';
 
 const FEATURES = [
   {
@@ -48,11 +47,7 @@ export function LandingPage() {
       {/* ── Header ── */}
       <header className="sticky top-0 z-40 border-b border-border bg-card">
         <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6 lg:px-8">
-          <img
-            src={theme === 'dark' ? codraDark : codraLight}
-            className="h-6 w-auto sm:h-7"
-            alt="Codra"
-          />
+          <OpenCodraLogo className="text-lg sm:text-xl" />
           <div className="flex items-center gap-2 sm:gap-3">
             <a
               href="https://github.com/michnicki/codra"

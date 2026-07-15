@@ -27,7 +27,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@client/components/ui/dropdown-menu';
-import codraDark from '@/assets/codra-fullicon-dark.svg';
+import { OpenCodraLogo } from '@client/components/shared/opencodra-logo';
 import type { AuthSessionUser } from '@shared/api';
 
 const links = [
@@ -336,18 +336,14 @@ export function AppShell() {
             onClick={() => setMobileMenuOpen(false)}
           >
             <img
-              src="/icons/codra-icon-dark.svg"
+              src="/icons/opencodra-icon-dark.svg"
               alt=""
               className={cn(
                 'hidden h-8 w-8 shrink-0 rounded-lg lg:block',
                 !sidebarCollapsed && 'lg:hidden',
               )}
             />
-            <img
-              src={codraDark}
-              alt="Codra"
-              className={cn('h-6 w-auto', sidebarCollapsed && 'lg:hidden')}
-            />
+            <OpenCodraLogo className={cn('text-lg', sidebarCollapsed && 'lg:hidden')} />
           </Link>
 
           {/* Expand button (collapsed desktop) */}

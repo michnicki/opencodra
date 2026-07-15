@@ -5,8 +5,7 @@ import { api } from '@client/lib/api';
 import { useTheme } from '@client/lib/theme';
 import { GithubMark } from '@client/components/shared/github-mark';
 import { BitbucketMark } from '@client/components/shared/bitbucket-mark';
-import codraDark from '@/assets/codra-fullicon-dark.svg';
-import codraLight from '@/assets/codra-fullicon-light.svg';
+import { OpenCodraLogo } from '@client/components/shared/opencodra-logo';
 
 function getErrorMessage(error: string | null) {
   switch (error) {
@@ -87,11 +86,7 @@ export function LoginPage() {
           <div className="relative flex flex-col items-center gap-7 px-6 py-10 sm:px-12 sm:py-12">
 
             {/* Logo */}
-            <img
-              src={theme === 'dark' ? codraDark : codraLight}
-              alt="Codra"
-              className="h-10 w-auto sm:h-11"
-            />
+            <OpenCodraLogo className="text-2xl sm:text-3xl" />
 
             {/* Heading + sub */}
             <div className="space-y-2 text-center">
