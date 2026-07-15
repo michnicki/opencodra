@@ -2,7 +2,7 @@
   "name": "opencodra",
   "version": "0.9.4",
   "description": "Open-source code review engine",
-  "author": "Devarshi Shimpi",
+  "author": "Thomas Michnicki",
   "license": "AGPL-3.0-only",
   "type": "module",
   "repository": {

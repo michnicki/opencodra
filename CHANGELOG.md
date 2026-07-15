@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **OpenCodra rebrand (brand-only):** Renamed the fork from Codra to OpenCodra across all user-facing and in-repo surfaces (UI, PR-comment/check-run text, package identity, repo links, docs). New open-ring logo lockup and icon assets. Security reporting now routes to GitHub Security Advisories. No CLA is required. All operational identities (Cloudflare worker/queue/workflow, GitHub App slug, `@codra-app` trigger, internal identifiers) are unchanged.
+
 ## v0.9.4
 
 ### What's New

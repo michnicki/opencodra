@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Only the latest version of Codra is currently supported with security updates. If you discover a vulnerability, please ensure you are running the latest version before reporting.
+Only the latest version of OpenCodra is currently supported with security updates. If you discover a vulnerability, please ensure you are running the latest version before reporting.
 
 | Version | Supported          |
 | ------- | ------------------ |
@@ -11,10 +11,9 @@ Only the latest version of Codra is currently supported with security updates. I
 
 ## Reporting a Vulnerability
 
-We take the security of Codra seriously. If you believe you have found a security vulnerability, please do **not** open a public issue. Instead, please report it via one of the following methods:
+We take the security of OpenCodra seriously. If you believe you have found a security vulnerability, please do **not** open a public issue. Instead, please report it privately through GitHub Security Advisories:
 
-1.  **Email**: Send a detailed report to [me@devarshi.dev](mailto:me@devarshi.dev).
-2.  **GitHub Private Reporting**: Use the "Report a vulnerability" feature on GitHub if available.
+- Go to the [Security tab of the `michnicki/opencodra` repository](https://github.com/michnicki/opencodra/security/advisories/new) and use the **"Report a vulnerability"** feature to open a private advisory.
 
 ### What to include in your report:
 
