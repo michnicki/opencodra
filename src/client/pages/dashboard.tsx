@@ -97,7 +97,7 @@ export function DashboardPage() {
               ]}
               linkAction={{
                 label: 'See how to interact with OpenCodra',
-                href: 'https://github.com/michnicki/codra#readme',
+                href: 'https://github.com/michnicki/opencodra#readme',
               }}
               className="rounded-none border-0"
             />

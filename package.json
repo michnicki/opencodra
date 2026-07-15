@@ -1,5 +1,5 @@
 {
-  "name": "codra",
+  "name": "opencodra",
   "version": "0.9.4",
   "description": "Open-source code review engine",
   "author": "Devarshi Shimpi",
@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/michnicki/codra"
+    "url": "https://github.com/michnicki/opencodra"
   },
-  "homepage": "https://github.com/michnicki/codra",
+  "homepage": "https://github.com/michnicki/opencodra",
   "bugs": {
-    "url": "https://github.com/michnicki/codra"
+    "url": "https://github.com/michnicki/opencodra"
   },
   "scripts": {
     "build": "vite build && npm run cf-typegen",
