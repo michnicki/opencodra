@@ -454,7 +454,7 @@ export class GitHubClient {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          name: 'Codra',
+          name: 'OpenCodra',
           head_sha: input.headSha,
           status: 'in_progress',
           details_url: input.detailsUrl,

@@ -173,7 +173,7 @@ dbDescribe('PR review pipeline (real GitHubClient + real ModelService)', () => {
       expect(finalJob?.status).toBe('done');
 
       const checkRunCreate = calls.find((c) => c.method === 'POST' && c.path.endsWith('/check-runs'));
-      expect(checkRunCreate?.body).toMatchObject({ name: 'Codra', head_sha: headSha });
+      expect(checkRunCreate?.body).toMatchObject({ name: 'OpenCodra', head_sha: headSha });
 
       const checkRunUpdates = calls.filter((c) => c.method === 'PATCH' && /\/check-runs\/\d+$/.test(c.path));
       expect(checkRunUpdates.length).toBeGreaterThan(0);
