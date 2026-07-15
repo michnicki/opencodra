@@ -708,7 +708,7 @@ async function runPreparePhase(
     const checkRun = await vcs.createStatusCheck(job.owner, job.repo, {
       headSha: pr.headSha,
       title: 'Review queued',
-      summary: 'Codra has started reviewing this pull request.',
+      summary: 'OpenCodra has started reviewing this pull request.',
     });
     // REV-C-2 (provider-aware ref persistence): the `ref` returned by `createStatusCheck` is
     // PROVIDER-OPAQUE (REV-M-10). Two paths, branched on `vcs.name`:
@@ -750,7 +750,7 @@ async function runPreparePhase(
     try {
       await vcs.updateStatusCheck(job.owner, job.repo, String(checkRunId), {
         title: `Reviewing (0/${files.length})`,
-        summary: 'Codra is analyzing changed files.',
+        summary: 'OpenCodra is analyzing changed files.',
       });
     } catch (error) {
       logger.warn(`Failed to update initial progress check run for job ${job.id}; continuing to the review phase anyway`, error instanceof Error ? error : new Error(String(error)));
@@ -1034,7 +1034,7 @@ async function runReviewPhase(
     try {
       await vcs.updateStatusCheck(job.owner, job.repo, String(job.checkRunId), {
         title: `Reviewing (${completedCount}/${files.length})`,
-        summary: 'Codra is continuing this review in the next queue chunk.',
+        summary: 'OpenCodra is continuing this review in the next queue chunk.',
       });
     } catch (error) {
       logger.warn(`Failed to update progress check run for job ${job.id}; continuing to the next chunk anyway`, error instanceof Error ? error : new Error(String(error)));

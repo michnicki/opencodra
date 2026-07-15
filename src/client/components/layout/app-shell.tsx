@@ -332,7 +332,7 @@ export function AppShell() {
               !sidebarCollapsed && 'lg:ml-1.5',
               sidebarCollapsed && 'lg:justify-center',
             )}
-            aria-label="Codra dashboard"
+            aria-label="OpenCodra dashboard"
             onClick={() => setMobileMenuOpen(false)}
           >
             <img

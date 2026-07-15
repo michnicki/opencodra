@@ -176,7 +176,7 @@ describe('FormatterService.formatReviewOverview', () => {
     expect(gh).toBe(def);
     // Pin the GitHub-flavored surface so a future edit that drops it is caught.
     expect(gh).toContain('<details>');
-    expect(gh).toContain('About Codra in GitHub');
+    expect(gh).toContain('About OpenCodra');
     expect(gh).toContain('<br/>');
     expect(gh).toContain('react with 👍');
   });
@@ -186,7 +186,7 @@ describe('FormatterService.formatReviewOverview', () => {
   it('emits clean Bitbucket markdown when provider is "bitbucket"', () => {
     const output = formatter.formatReviewOverview('abcdef1234567890', 'codra-app', { provider: 'bitbucket' });
 
-    expect(output).toContain('### Codra Review');
+    expect(output).toContain('### OpenCodra Review');
     expect(output).toContain('**Reviewed commit:** `abcdef1234`');
     expect(output).toContain(`${BASE_URL}/repos`);
 

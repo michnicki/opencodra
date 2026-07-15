@@ -1003,7 +1003,7 @@ export function SettingsPage() {
       {/* ── About ──────────────────────────────────────────────────────────── */}
       <SectionCard
         title="About"
-        description="Version, license, and links for this Codra instance"
+        description="Version, license, and links for this OpenCodra instance"
       >
         <div className="divide-y divide-border/50">
 

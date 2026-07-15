@@ -87,35 +87,35 @@ export class FormatterService {
     // are GitHub-only. Emit clean CommonMark with Bitbucket-accurate trigger copy instead. The
     // GitHub branch below is byte-identical to the pre-Thread-C output (regression-guarded).
     if (options?.provider === 'bitbucket') {
-      return `### Codra Review
+      return `### OpenCodra Review
 
 Here are some automated review suggestions for this pull request.
 
 **Reviewed commit:** \`${shortSha}\`
 
-[Codra](${this.baseUrl}/repos) automatically reviews pull requests in this repository. A review runs when you open a pull request or push new commits to it.`;
+[OpenCodra](${this.baseUrl}/repos) automatically reviews pull requests in this repository. A review runs when you open a pull request or push new commits to it.`;
     }
 
-    return `### Codra Review
+    return `### OpenCodra Review
 
 Here are some automated review suggestions for this pull request.
 
 **Reviewed commit:** \`${shortSha}\`
 
 <details>
-<summary>ℹ️ About Codra in GitHub</summary>
+<summary>ℹ️ About OpenCodra</summary>
 
 <br/>
 
-[Your team has set up Codra to review pull requests in this repo](${this.baseUrl}/repos). Reviews are triggered when you:
+[Your team has set up OpenCodra to review pull requests in this repo](${this.baseUrl}/repos). Reviews are triggered when you:
 
 - **Open** a pull request for review
 - **Mark** a draft as ready
 - **Comment** "@${botUsername} review"
 
-If Codra has suggestions, it will comment; otherwise it will react with 👍.
+If OpenCodra has suggestions, it will comment; otherwise it will react with 👍.
 
-Codra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
+OpenCodra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
 
 </details>`;
   }

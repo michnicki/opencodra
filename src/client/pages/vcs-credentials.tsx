@@ -365,7 +365,7 @@ export function VcsCredentialsPage() {
         <EmptyState
           icon={<KeyRound />}
           title="No Bitbucket credentials yet"
-          description="Add a Repository or Workspace Access Token and webhook secret so Codra can review this repo's pull requests. Nothing is sent to Bitbucket until a review runs."
+          description="Add a Repository or Workspace Access Token and webhook secret so OpenCodra can review this repo's pull requests. Nothing is sent to Bitbucket until a review runs."
           action={{ label: 'Add credential', onClick: () => setAdding(true) }}
         />
       ) : (
@@ -451,7 +451,7 @@ export function VcsCredentialsPage() {
         title="Delete credential"
         description={
           deleteTarget
-            ? `Remove the stored access token and webhook secret for ${deleteTarget.workspace}/${deleteTarget.repoSlug}? Codra will stop authenticating for this repo until you add them again. This cannot be undone.`
+            ? `Remove the stored access token and webhook secret for ${deleteTarget.workspace}/${deleteTarget.repoSlug}? OpenCodra will stop authenticating for this repo until you add them again. This cannot be undone.`
             : ''
         }
         confirmLabel="Delete"
