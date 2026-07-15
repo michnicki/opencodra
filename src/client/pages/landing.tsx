@@ -59,7 +59,7 @@ export function LandingPage() {
               target="_blank"
               rel="noopener noreferrer"
               className="hidden h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-secondary dark:border-white/10 dark:bg-white/[0.06] dark:shadow-[0_1px_2px_oklch(0%_0_0/0.4),inset_0_1px_0_oklch(100%_0_0/0.06)] dark:hover:bg-white/[0.1] sm:flex"
-              aria-label="Codra on GitHub"
+              aria-label="OpenCodra on GitHub"
             >
               <GithubMark size={14} />
             </a>
@@ -94,7 +94,7 @@ export function LandingPage() {
             </h1>
 
             <p className="max-w-md text-[0.95rem] leading-relaxed text-muted-foreground">
-              Codra reviews pull requests automatically, checking for bugs,
+              OpenCodra reviews pull requests automatically, checking for bugs,
               security issues, and code patterns specific to your repository.
             </p>
 

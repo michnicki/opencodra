@@ -41,7 +41,7 @@ export function AddBitbucketRepoPage() {
         tokenExpiresAt: tokenExpiresAt || null,
       });
       toast.success('Bitbucket repository added', {
-        description: 'Codra will review pull requests on this repo as soon as webhooks arrive.',
+        description: 'OpenCodra will review pull requests on this repo as soon as webhooks arrive.',
       });
       navigate('/repos');
     } catch (err) {
@@ -58,7 +58,7 @@ export function AddBitbucketRepoPage() {
       <PageHeader
         category="Repositories"
         title="Add Bitbucket repository"
-        description="Store a Bitbucket access token and webhook secret so Codra can review pull requests on this repository."
+        description="Store a Bitbucket access token and webhook secret so OpenCodra can review pull requests on this repository."
       />
 
       {error && <Alert variant="destructive">{error}</Alert>}

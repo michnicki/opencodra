@@ -554,13 +554,13 @@ export function ReposPage() {
         <EmptyState
           icon={<GitBranch />}
           title="No Repositories Added"
-          description="Add your repositories to get started with Codra"
+          description="Add your repositories to get started with OpenCodra"
           hints={[
             'Add repositories here to automatically enable PR analysis',
             'You can enable/disable PR analysis for each repo from its settings',
           ]}
           linkAction={{
-            label: 'See how to interact with Codra',
+            label: 'See how to interact with OpenCodra',
             href: 'https://github.com/michnicki/codra#readme',
           }}
         />

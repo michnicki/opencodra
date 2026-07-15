@@ -96,7 +96,7 @@ export function DashboardPage() {
                 'To trigger manually, comment @codra on any PR',
               ]}
               linkAction={{
-                label: 'See how to interact with Codra',
+                label: 'See how to interact with OpenCodra',
                 href: 'https://github.com/michnicki/codra#readme',
               }}
               className="rounded-none border-0"

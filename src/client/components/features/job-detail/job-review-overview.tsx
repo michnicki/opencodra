@@ -25,19 +25,21 @@ export function JobReviewOverview({ job }: JobReviewOverviewProps) {
     if (!job.summaryMarkdown) return '';
     let content = job.summaryMarkdown.replace(/^(✅ \*\*Approved\*\*|💬 \*\*Comments posted\*\*)\n\n/, '').trim();
 
-    // Strip only the "### ... Codra Review" heading, keep the intro sentence
+    // Strip only the "### ... (Open)Codra Review" heading, keep the intro sentence.
+    // Matches both new "OpenCodra Review" and legacy "Codra Review" headings so
+    // comments posted before the rebrand still render correctly.
     const stripHeader = (md: string) => md
-      .replace(/^###\s*(<picture>[\s\S]*?<\/picture>|💡)\s*Codra Review\s*\n+/, '')
+      .replace(/^###\s*(<picture>[\s\S]*?<\/picture>|💡)\s*(?:Open)?Codra Review\s*\n+/, '')
       .trim();
 
-    if (content.startsWith('### 💡 Codra Review') || content.includes('Codra Review')) {
+    if (content.startsWith('### 💡 OpenCodra Review') || content.startsWith('### 💡 Codra Review') || content.includes('OpenCodra Review') || content.includes('Codra Review')) {
       return stripHeader(content);
     }
 
     const shortSha = job.commitSha.slice(0, 10);
     const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
 
-    return `Here are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About Codra</summary>\n\n<br/>\n\n[Your team has set up Codra to review pull requests in this repo](${baseUrl}/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf Codra has suggestions, it will comment; otherwise it will react with 👍.\n\nCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
+    return `Here are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${shortSha}\`\n\n<details>\n<summary>ℹ️ About OpenCodra</summary>\n\n<br/>\n\n[Your team has set up OpenCodra to review pull requests in this repo](${baseUrl}/repos). Reviews are triggered when you:\n\n- **Open** a pull request for review\n- **Mark** a draft as ready\n- **Comment** "@codra-app review"\n\nIf OpenCodra has suggestions, it will comment; otherwise it will react with 👍.\n\nOpenCodra can also answer questions or update the PR. Try commenting "@codra-app address that feedback".\n\n</details>\n\n---\n\n${content}`;
   };
 
   return (

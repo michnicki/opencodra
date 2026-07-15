@@ -11,7 +11,7 @@ import codraLight from '@/assets/codra-fullicon-light.svg';
 function getErrorMessage(error: string | null) {
   switch (error) {
     case 'not_allowed':
-      return 'This GitHub account is not allowed to access the Codra dashboard.';
+      return 'This GitHub account is not allowed to access the OpenCodra dashboard.';
     case 'access_denied':
       return 'GitHub sign-in was cancelled before authorization completed.';
     case 'invalid_state':
@@ -23,7 +23,7 @@ function getErrorMessage(error: string | null) {
     case 'invalid_grant':
       return 'Bitbucket rejected the sign-in code (it may have expired or been used already). Please try again.';
     case 'bitbucket_not_allowed':
-      return 'This Bitbucket account is not allowed to access the Codra dashboard. Ask an operator to add your Bitbucket account_id to the allow-list.';
+      return 'This Bitbucket account is not allowed to access the OpenCodra dashboard. Ask an operator to add your Bitbucket account_id to the allow-list.';
     default:
       return null;
   }

@@ -822,7 +822,7 @@ dbDescribe('Review Flow Lifecycle', () => {
     expect(finalJob?.error_msg).toContain('Partial review: 1 of 2 files');
     const steps = typeof finalJob?.steps === 'string' ? JSON.parse(finalJob.steps) : finalJob?.steps;
     expect(steps?.find((step: { name: string }) => step.name === 'Completing')?.status).toBe('done');
-    expect(finalJob?.summary_markdown).toMatch(/^### Codra Review/);
+    expect(finalJob?.summary_markdown).toMatch(/^### OpenCodra Review/);
     expect(finalJob?.summary_model).toBeNull();
     expect(summarySpy).not.toHaveBeenCalled();
     summarySpy.mockRestore();
