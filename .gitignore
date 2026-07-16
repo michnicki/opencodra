@@ -156,4 +156,4 @@ ds-bundle/
 .design-sync/.cache/
 .design-sync/learnings/
 .design-sync/node_modules
-.design-sync/codra-compiled.css
+.design-sync/opencodra-compiled.css

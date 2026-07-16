@@ -1,7 +1,22 @@
-# design-sync notes — Codra
+# design-sync notes — OpenCodra
+
+## OpenCodra rebrand (2026-07-16)
+- This DS was rebranded **Codra → OpenCodra**. Identity now: `pkg: opencodra`,
+  `globalName: OpenCodraUI` (the design agent imports `window.OpenCodraUI` /
+  `from 'opencodra'`), synced to a **fresh project "OpenCodra Design System"**
+  (`fc2aa3e1-0cd1-4461-b1e5-6e560ff12c7f`).
+- The old **"Codra Design System"** project (`0804ef43-4a61-4815-a419-d67262171cf9`)
+  is **retired** — the sync tool can't delete projects, so delete it from the
+  claude.ai/design UI when ready.
+- The 9 UI primitives are brand-neutral and were **unchanged** by the app rebrand
+  (`src/client/components/ui/` untouched) — only DS metadata + preview brand
+  strings changed. Preview imports are `from 'opencodra'`; example copy is
+  OpenCodra-branded (Alert/ConfirmDialog body text, Input webhook placeholder).
+- `cssEntry`/`buildCmd` compiled-CSS artifact renamed `codra-compiled.css` →
+  `opencodra-compiled.css` (gitignored, regenerated each sync).
 
 ## Repo shape
-- **codra is an application, not a packaged design system.** No library build, no
+- **OpenCodra is an application, not a packaged design system.** No library build, no
   `dist/` component entry, no `.d.ts` exports. It's synced via a hand-written
   **barrel entry** (`.design-sync/bundle-entry.tsx`) passed as `--entry`, which
   re-exports the 9 UI primitives from `src/client/components/ui/`.
@@ -20,7 +35,7 @@
 ## CSS / theme
 - No component-library stylesheet exists. `cssEntry` points at the app's
   **compiled Tailwind CSS** — `cfg.buildCmd` runs `npx vite build` then copies the
-  hashed `dist/client/assets/*.css` to `.design-sync/codra-compiled.css`
+  hashed `dist/client/assets/*.css` to `.design-sync/opencodra-compiled.css`
   (gitignored, regenerated every sync). That file is the whole-app CSS superset:
   it contains every materialized utility + the oklch light/dark theme tokens, so
   the primitives are fully styled. Larger than a component-scoped build, but

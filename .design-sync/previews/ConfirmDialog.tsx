@@ -1,4 +1,4 @@
-import { ConfirmDialog } from 'codra';
+import { ConfirmDialog } from 'opencodra';
 
 // ConfirmDialog is an overlay (Radix dialog portaled to <body>). It takes an
 // `open` prop, so it renders open statically. cfg.overrides pins cardMode
@@ -8,7 +8,7 @@ export const DestructiveConfirm = () => (
     open
     onOpenChange={() => {}}
     title="Remove repository?"
-    description="Codra will stop reviewing pull requests for acme/web-app and delete its stored model configuration. This can't be undone."
+    description="OpenCodra will stop reviewing pull requests for acme/web-app and delete its stored model configuration. This can't be undone."
     confirmLabel="Remove repository"
     cancelLabel="Keep it"
     confirmVariant="destructive"

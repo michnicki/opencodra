@@ -1,6 +1,6 @@
-# Building with Codra UI
+# Building with OpenCodra UI
 
-Codra UI is codra's own React component library (the real components from
+OpenCodra UI is OpenCodra's own React component library (the real components from
 `src/client/components/ui`, bundled unchanged). Compose apps from these
 components; for your own layout glue, use the **same Tailwind token utilities**
 the components use so custom markup matches the design system exactly.
@@ -40,7 +40,7 @@ brand changes flow through):
 | Surfaces | `bg-background`, `bg-card`, `bg-secondary`, `bg-muted`, `bg-popover` |
 | Text | `text-foreground`, `text-muted-foreground`, `text-primary`, `text-card-foreground` |
 | Borders / focus | `border-border`, `border-input`, `ring-ring` |
-| Brand accent | `bg-primary` / `text-primary` (codra's signature lime) |
+| Brand accent | `bg-primary` / `text-primary` (OpenCodra's signature lime) |
 | Semantic | `text-success` `bg-success-bg` `border-success-border` (and `info` / `warning` / `danger`) |
 | Radius / fonts | `rounded-md` `rounded-lg` (via `--radius`), `font-sans`, `font-mono` |
 
@@ -57,7 +57,7 @@ shadow) — use `<Card>` rather than re-deriving it.
 ## Idiomatic example
 
 ```tsx
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, Button, Badge } from 'codra';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, Button, Badge } from 'opencodra';
 
 <Card style={{ maxWidth: 380 }}>
   <CardHeader>

@@ -1,4 +1,4 @@
-import { Badge } from 'codra';
+import { Badge } from 'opencodra';
 
 const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' };
 

@@ -1,4 +1,4 @@
-import { Alert } from 'codra';
+import { Alert } from 'opencodra';
 
 const title: React.CSSProperties = { margin: 0, fontWeight: 600 };
 const body: React.CSSProperties = { margin: '2px 0 0', opacity: 0.85 };
@@ -6,7 +6,7 @@ const body: React.CSSProperties = { margin: '2px 0 0', opacity: 0.85 };
 export const Info = () => (
   <Alert>
     <p style={title}>Automatic reviews enabled</p>
-    <p style={body}>Codra will review new pushes to this pull request as they arrive.</p>
+    <p style={body}>OpenCodra will review new pushes to this pull request as they arrive.</p>
   </Alert>
 );
 

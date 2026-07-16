@@ -1,4 +1,4 @@
-import { Input } from 'codra';
+import { Input } from 'opencodra';
 
 const col: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 320 };
 const field: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4 };
@@ -16,7 +16,7 @@ export const Fields = () => (
     </div>
     <div style={field}>
       <span style={label}>Webhook URL</span>
-      <Input defaultValue="https://codra.run/webhook" />
+      <Input defaultValue="https://opencodra.example.com/webhook" />
     </div>
     <div style={field}>
       <span style={label}>Read only</span>

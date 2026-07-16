@@ -7,7 +7,7 @@ import {
   CardFooter,
   Button,
   Badge,
-} from 'codra';
+} from 'opencodra';
 
 export const RepositoryCard = () => (
   <Card style={{ maxWidth: 380 }}>

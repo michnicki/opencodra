@@ -1,13 +1,13 @@
 {
-  "pkg": "codra",
-  "globalName": "CodraUI",
-  "projectId": "0804ef43-4a61-4815-a419-d67262171cf9",
+  "pkg": "opencodra",
+  "globalName": "OpenCodraUI",
+  "projectId": "fc2aa3e1-0cd1-4461-b1e5-6e560ff12c7f",
   "shape": "package",
   "srcDir": "src/client/components/ui",
   "tsconfig": "tsconfig.json",
   "readmeHeader": ".design-sync/conventions.md",
-  "buildCmd": "npx vite build && cp \"$(ls -1t dist/client/assets/*.css | head -1)\" .design-sync/codra-compiled.css",
-  "cssEntry": ".design-sync/codra-compiled.css",
+  "buildCmd": "npx vite build && cp \"$(ls -1t dist/client/assets/*.css | head -1)\" .design-sync/opencodra-compiled.css",
+  "cssEntry": ".design-sync/opencodra-compiled.css",
   "componentSrcMap": {
     "Alert": "src/client/components/ui/alert.tsx",
     "Badge": "src/client/components/ui/badge.tsx",
