@@ -1,4 +1,4 @@
-import { Button } from 'codra';
+import { Button } from 'opencodra';
 
 const row: React.CSSProperties = {
   display: 'flex',

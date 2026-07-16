@@ -1,4 +1,4 @@
-import { Switch } from 'codra';
+import { Switch } from 'opencodra';
 
 const rowItem: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 10 };
 const text: React.CSSProperties = { fontSize: 14, color: 'var(--foreground)' };

@@ -5,7 +5,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   Button,
-} from 'codra';
+} from 'opencodra';
 import { ChevronDown } from 'lucide-react';
 
 // The menu opens on click (open state is internal), so the static card shows

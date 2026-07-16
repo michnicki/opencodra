@@ -1,4 +1,4 @@
-import { Select } from 'codra';
+import { Select } from 'opencodra';
 
 const noop = () => {};
 
