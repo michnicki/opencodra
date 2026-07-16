@@ -22,7 +22,7 @@
   </p>
 </div>
 
-![OpenCodra dashboard](./public/assets/opencodra-dashboard.png)
+![OpenCodra — AI code review on every PR](./public/assets/opencodra-landing.png)
 
 OpenCodra listens to GitHub and Bitbucket pull request events, runs AI-powered review jobs, posts inline findings back to the PR, and gives you a dashboard to inspect jobs, repositories, model routing, review history, and failed queue runs.
 
