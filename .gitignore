@@ -160,3 +160,9 @@ ds-bundle/
 
 # GSD planning artifacts — private to this fork, never committed to the public repo.
 .planning/
+
+# Local working docs — design notes, review worklists, and brainstorming specs kept on-disk
+# only, out of the repo.
+docs/design/
+docs/reviews/
+docs/superpowers/
