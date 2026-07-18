@@ -59,14 +59,14 @@ describe('LoginPage — Bitbucket stacked CTA (D-22/D-23/D-24/D-25/D-35)', () =>
 
     expect(
       screen.getByText(
-        'This Bitbucket account is not allowed to access the Codra dashboard. Ask an operator to add your Bitbucket account_id to the allow-list.',
+        'This Bitbucket account is not allowed to access the OpenCodra dashboard. Ask an operator to add your Bitbucket account_id to the allow-list.',
       ),
     ).toBeInTheDocument();
   });
 
   it('keeps the 5 existing GitHub-specific error reasons byte-identical', () => {
     const cases: Array<[string, string]> = [
-      ['not_allowed', 'This GitHub account is not allowed to access the Codra dashboard.'],
+      ['not_allowed', 'This GitHub account is not allowed to access the OpenCodra dashboard.'],
       ['access_denied', 'GitHub sign-in was cancelled before authorization completed.'],
       ['invalid_state', 'Your sign-in session expired. Please try signing in with GitHub again.'],
       ['invalid_callback', 'GitHub did not return a valid callback. Please try again.'],

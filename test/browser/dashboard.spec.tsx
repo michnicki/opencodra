@@ -9,6 +9,7 @@ import { renderPage } from './render';
 vi.mock('@client/lib/api', () => ({
   api: {
     getSession: vi.fn(),
+    probeSession: vi.fn().mockResolvedValue(null),
     getStats: vi.fn(),
     getJobs: vi.fn(),
   }
