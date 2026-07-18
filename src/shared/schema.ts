@@ -156,7 +156,7 @@ export const repoConfigSchema = z.object({
 });
 
 export const reviewJobMessageSchema = z.object({
-  jobId: z.string().uuid().optional(),
+  jobId: z.uuid().optional(),
   deliveryId: z.string().min(1),
   phase: z.enum(['prepare', 'review', 'finalize']).optional(),
   eventName: z.string().min(1).optional(),
@@ -190,7 +190,7 @@ export const reviewJobMessageSchema = z.object({
 });
 
 export const jobSummarySchema = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   workflowInstanceId: z.string().nullable().optional(),
   owner: z.string(),
   repo: z.string(),
@@ -221,7 +221,7 @@ export const jobSummarySchema = z.object({
   steps: z.array(jobStepSchema).default([]),
   checkRunId: coerceNumberSchema.nullable().optional(),
   configSnapshot: repoConfigSchema.nullable().optional(),
-  retryOfJobId: z.string().uuid().nullable().optional(),
+  retryOfJobId: z.uuid().nullable().optional(),
   // R-01: expose the parent repository's provider + workspace so VcsService.forRepo can branch
   // without a separate query. Optional so pre-widening fixtures still parse.
   repositoryVcsProvider: z.string().optional(),
@@ -246,8 +246,8 @@ export type JobsQuery = z.infer<typeof jobsQuerySchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 
 export const fileReviewRecordSchema = z.object({
-  id: z.string().uuid(),
-  jobId: z.string().uuid(),
+  id: z.uuid(),
+  jobId: z.uuid(),
   filePath: z.string(),
   fileStatus: z.enum(fileStatuses),
   modelUsed: z.string(),
@@ -274,7 +274,7 @@ export const jobDetailSchema = jobSummarySchema.extend({
   summaryMarkdown: z.string().nullable(),
   configSnapshot: repoConfigSchema.nullable(),
   reviewId: coerceNumberSchema.nullable(),
-  retryOfJobId: z.string().uuid().nullable(),
+  retryOfJobId: z.uuid().nullable(),
   summaryModel: z.string().nullable(),
   files: z.array(fileReviewRecordSchema),
 });
@@ -413,10 +413,10 @@ export type FileReviewRecord = z.infer<typeof fileReviewRecordSchema>;
 export type JobDetail = z.infer<typeof jobDetailSchema>;
 export type RepoConfigRecord = z.infer<typeof repoConfigRecordSchema>;
 export const llmProviderSchema = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   name: z.string(),
   apiFormat: z.enum(llmApiFormats),
-  baseUrl: z.string().url().nullable(),
+  baseUrl: z.url().nullable(),
   enabled: z.boolean(),
   hasApiKey: z.boolean(),
   createdAt: dateStringSchema,
@@ -425,7 +425,7 @@ export const llmProviderSchema = z.object({
 
 export const modelConfigSchema = z.object({
   modelId: z.string(),
-  providerId: z.string().uuid(),
+  providerId: z.uuid(),
   providerName: z.string(),
   apiFormat: z.enum(llmApiFormats),
   modelName: z.string(),
