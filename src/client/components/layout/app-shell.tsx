@@ -116,17 +116,6 @@ function SidebarNavItem({
   );
 }
 
-const collapsedTooltipClass = [
-  'lg:pointer-events-none lg:absolute lg:left-[calc(100%+1rem)]',
-  'lg:z-50 lg:w-max lg:max-w-44 lg:rounded-lg',
-  'lg:border lg:border-border lg:bg-white lg:dark:bg-popover',
-  'lg:px-3 lg:py-1.5 lg:text-xs lg:font-semibold lg:text-black lg:dark:text-white',
-  'lg:shadow-lg lg:opacity-0 lg:translate-x-1',
-  'lg:transition-[opacity,transform] lg:duration-150',
-  'lg:group-hover:opacity-100 lg:group-hover:translate-x-0',
-  'lg:group-focus-visible:opacity-100 lg:group-focus-visible:translate-x-0',
-];
-
 /**
  * Collapsed (icon-only) sidebar nav item.
  * Same fixed oklch color tokens as SidebarNavItem — no dark: variants.
@@ -194,7 +183,7 @@ function CollapsedNavItem({
       </span>
 
       {/* Hover tooltip */}
-      <span className={cn('dashboard-sidebar-tooltip', collapsedTooltipClass)}>
+      <span className="dashboard-sidebar-tooltip lg:text-xs lg:font-semibold">
         {label}
       </span>
     </NavLink>
