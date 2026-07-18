@@ -423,6 +423,9 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
         title,
         body: withSuggestion(body, finding.code_suggestion),
         codeSuggestion: finding.code_suggestion,
+        // Already validated/clamped by fileReviewModelOutputSchema + normalizeFinding.
+        // Absent -> undefined, which parsedReviewCommentSchema accepts (fail-open at finalize).
+        confidence: finding.confidence_score,
       });
     })
     .filter((comment): comment is ParsedReviewComment => Boolean(comment));

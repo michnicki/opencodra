@@ -171,4 +171,41 @@ export function nextOwner(owner: string) {
     expect(result.comments).toHaveLength(0);
     expect(result.verdict).toBe('approve');
   });
+
+  it('carries a per-finding confidence_score through to comment.confidence', () => {
+    const rawOutput = `
+{
+  "findings": [{
+    "title": "Potential bug",
+    "body": "This looks wrong.",
+    "priority": 1,
+    "confidence_score": 0.9,
+    "code_location": { "absolute_file_path": "test.ts", "line": 2 }
+  }],
+  "overall_correctness": "patch is incorrect",
+  "overall_explanation": "Found an issue"
+}`;
+
+    const result = parseFileReviewResponse(rawOutput, mockFile);
+    expect(result.comments).toHaveLength(1);
+    expect(result.comments[0].confidence).toBe(0.9);
+  });
+
+  it('preserves missing confidence (undefined/null), never fabricating a score', () => {
+    const rawOutput = `
+{
+  "findings": [{
+    "title": "Potential bug",
+    "body": "This looks wrong.",
+    "priority": 1,
+    "code_location": { "absolute_file_path": "test.ts", "line": 2 }
+  }],
+  "overall_correctness": "patch is incorrect",
+  "overall_explanation": "Found an issue"
+}`;
+
+    const result = parseFileReviewResponse(rawOutput, mockFile);
+    expect(result.comments).toHaveLength(1);
+    expect(result.comments[0].confidence == null).toBe(true);
+  });
 });
