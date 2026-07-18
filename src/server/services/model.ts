@@ -596,7 +596,10 @@ export class ModelService {
       );
     }
 
-    throw lastError;
+    // lastError stays undefined when every model was skipped without throwing (e.g. all Cloudflare
+    // providers were marked unavailable and hit `continue`). `throw undefined` would erase all
+    // context and defeat downstream `instanceof`/message inspection, so surface a real Error.
+    throw lastError ?? new Error(`No review model produced a result for ${params.file.path}; all configured models were skipped or unavailable.`);
   }
 
   async generateSummary(params: {
@@ -661,6 +664,8 @@ export class ModelService {
       );
     }
 
-    throw lastError;
+    // As in reviewFile: guard against `throw undefined` when every summary model was skipped via
+    // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
+    throw lastError ?? new Error('No summary model produced a result; all configured models were skipped or unavailable.');
   }
 }

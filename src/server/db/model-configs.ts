@@ -83,13 +83,26 @@ const MODEL_SELECT = `
 `;
 
 export async function listLlmProviders(env: Pick<AppBindings, 'HYPERDRIVE'>): Promise<LlmProvider[]> {
-  const rows = await queryRows<ProviderRow>(
+  // Never fetch the ciphertext here: the mapped LlmProvider only exposes `hasApiKey`, so derive
+  // that boolean in SQL and leave encrypted_api_key in the database.
+  const rows = await queryRows<Omit<ProviderRow, 'encrypted_api_key'> & { has_api_key: boolean }>(
     env,
-    `SELECT id, name, api_format, base_url, encrypted_api_key, enabled, created_at, updated_at
+    `SELECT id, name, api_format, base_url, (encrypted_api_key IS NOT NULL) AS has_api_key, enabled, created_at, updated_at
      FROM llm_providers
      ORDER BY name ASC`,
   );
-  return rows.map(mapProvider);
+  return rows.map((row) =>
+    llmProviderSchema.parse({
+      id: row.id,
+      name: row.name,
+      apiFormat: row.api_format,
+      baseUrl: row.base_url,
+      enabled: row.enabled,
+      hasApiKey: row.has_api_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }),
+  );
 }
 
 export async function listLlmProviderSecrets(env: Pick<AppBindings, 'HYPERDRIVE'>): Promise<LlmProviderSecret[]> {
@@ -153,14 +166,18 @@ export async function updateLlmProvider(
     name: string;
     apiFormat: LlmApiFormat;
     baseUrl: string | null;
-    encryptedApiKey?: string | null;
+    // Explicit set-vs-clear for the stored ciphertext (no more `null`/`undefined` ambiguity):
+    //   apiKey omitted (undefined) -> leave the existing encrypted_api_key untouched
+    //   { set: <ciphertext> }      -> overwrite the column with the new ciphertext
+    //   { clear: true }            -> null out the column (forget the stored key)
+    apiKey?: { set: string } | { clear: true };
     enabled: boolean;
   },
 ) {
   const params: unknown[] = [id, input.name, input.apiFormat, input.baseUrl, input.enabled];
   let apiKeySql = '';
-  if (input.encryptedApiKey !== undefined) {
-    params.push(input.encryptedApiKey);
+  if (input.apiKey) {
+    params.push('clear' in input.apiKey ? null : input.apiKey.set);
     apiKeySql = `, encrypted_api_key = $${params.length}`;
   }
 

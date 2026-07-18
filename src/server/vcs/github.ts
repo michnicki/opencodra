@@ -66,8 +66,9 @@ export class GithubAdapter implements VcsProvider {
     // casts its response with an unchecked `as { id: number }`, so a body without a numeric `id`
     // (API change, error envelope that still parsed) would otherwise produce `String(undefined)`
     // -> "undefined" -> `Number("undefined")` -> NaN written into check_run_id at the call site.
-    // Fail loudly at the seam instead.
-    if (typeof id !== 'number') {
+    // `typeof NaN === 'number'`, so a NaN slips past a bare typeof check and stringifies to "NaN";
+    // require a finite number to catch that too. Fail loudly at the seam instead.
+    if (typeof id !== 'number' || !Number.isFinite(id)) {
       throw new Error(`createCheckRun returned a non-numeric id for ${owner}/${repo}: ${String(id)}`);
     }
     // id -> ref at the adapter boundary (D-02); the numeric column stays canonical.
@@ -80,8 +81,14 @@ export class GithubAdapter implements VcsProvider {
     ref: string,
     input: VcsUpdateStatusCheckInput,
   ): Promise<void> {
-    // ref -> id at the adapter boundary (D-02).
-    await this.gh.updateCheckRun(owner, repo, Number(ref), {
+    // ref -> id at the adapter boundary (D-02). Mirror the create-side WR-04 guard: a corrupt
+    // check_run_id (e.g. the round-trip of a prior "undefined"/"NaN" stringify) would make
+    // `Number(ref)` NaN and build a `/check-runs/NaN` request. Reject non-finite refs at the seam.
+    const checkRunId = Number(ref);
+    if (!Number.isFinite(checkRunId)) {
+      throw new Error(`updateStatusCheck received a non-numeric ref for ${owner}/${repo}: ${String(ref)}`);
+    }
+    await this.gh.updateCheckRun(owner, repo, checkRunId, {
       title: input.title,
       summary: input.summary,
       status: input.status,
@@ -108,6 +115,11 @@ export class GithubAdapter implements VcsProvider {
       body: input.summaryBody,
       comments: input.comments,
     });
+    // Mirror the createStatusCheck WR-04 guard: `createReview` casts its body with an unchecked
+    // `as { id: number }`, so a non-numeric/NaN id would otherwise stringify into a corrupt ref.
+    if (typeof id !== 'number' || !Number.isFinite(id)) {
+      throw new Error(`createReview returned a non-numeric id for ${owner}/${repo}#${prNumber}: ${String(id)}`);
+    }
     return { ref: String(id) };
   }
 

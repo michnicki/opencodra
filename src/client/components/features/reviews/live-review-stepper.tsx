@@ -2,10 +2,9 @@ import type { JobSummary } from '@shared/schema';
 
 interface LiveReviewStepperProps {
   job: JobSummary;
-  compact?: boolean;
 }
 
-export function LiveReviewStepper({ job, compact = true }: LiveReviewStepperProps) {
+export function LiveReviewStepper({ job }: LiveReviewStepperProps) {
   const { status, steps = [] } = job;
 
   let activeLabel = '';
@@ -38,6 +37,10 @@ export function LiveReviewStepper({ job, compact = true }: LiveReviewStepperProp
     }
   } else if (status === 'superseded') {
     activeLabel = 'Superseded';
+  } else if (status === 'cancelled') {
+    activeLabel = 'Cancelled';
+  } else if (status === 'stopped') {
+    activeLabel = 'Stopped';
   }
 
   const styles: Record<string, string> = {
@@ -46,6 +49,8 @@ export function LiveReviewStepper({ job, compact = true }: LiveReviewStepperProp
     done:       'bg-success/10 text-success border-success/20',
     failed:     'bg-danger/10 text-danger border-danger/20',
     superseded: 'bg-secondary text-muted-foreground border-border/40',
+    cancelled:  'bg-secondary text-muted-foreground border-border/40',
+    stopped:    'bg-secondary text-muted-foreground border-border/40',
   };
 
   const cls = styles[status] ?? styles.queued;

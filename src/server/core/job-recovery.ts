@@ -88,7 +88,10 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
       // provider via `vcs.name`, and `updateStatusCheck` interprets `ref` provider-opaquely
       // (REV-M-10). The `String(...)` cast is necessary for the numeric GitHub case; the
       // Bitbucket string ref is passed through unchanged.
-      const statusRef = job.status_check_ref ?? (job.check_run_id !== null ? String(job.check_run_id) : '');
+      // Use truthiness (not `??`) so an empty-string status_check_ref does not shadow a valid
+      // numeric check_run_id: the skip guard above (`!job.status_check_ref`) is also
+      // truthiness-based, so `''` must fall through to the check_run_id branch, matching it.
+      const statusRef = job.status_check_ref || (job.check_run_id !== null ? String(job.check_run_id) : '');
       await vcs.updateStatusCheck(job.owner, job.repo, statusRef, {
         status: 'completed',
         conclusion,

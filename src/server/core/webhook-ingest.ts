@@ -75,14 +75,16 @@ export async function ingestReviewWebhookEvent(
       headRef: reviewRequest.headRef,
       baseRef: reviewRequest.baseRef,
       configSnapshot: input.configSnapshot,
-      // 05-04 widening: when the Bitbucket route hands us a reviewRequest carrying
-      // repositoryWorkspace + repositoryVcsProvider, forward them so insertJob's
-      // getOrCreateRepository (or bypass, when repositoryId is supplied) carries the
-      // Bitbucket identity. The GitHub path leaves these unset and continues to resolve
-      // through getOrCreateRepository byte-identically.
-      ...(reviewRequest.repositoryVcsProvider
-        ? { vcsProvider: reviewRequest.repositoryVcsProvider, workspace: reviewRequest.repositoryWorkspace ?? null }
-        : {}),
+      // Store the inserted job under the SAME provider used for dedupe/supersede above. Previously
+      // vcsProvider was forwarded only when reviewRequest.repositoryVcsProvider was set, so an
+      // explicit input.provider (with repositoryVcsProvider unset) would dedupe/supersede as one
+      // provider while the row was stored under the default 'github' -- a split-provider row.
+      // Passing effectiveProvider closes that gap. The GitHub path stays byte-identical: passing
+      // vcsProvider: 'github' explicitly is equivalent to leaving it unset, because
+      // getOrCreateRepository does `input.vcsProvider ?? 'github'` and its GitHub branch never
+      // reads workspace (confirmed against db/repositories.ts).
+      vcsProvider: effectiveProvider,
+      workspace: reviewRequest.repositoryWorkspace ?? null,
     });
 
     await supersedeOlderJobs(env, {

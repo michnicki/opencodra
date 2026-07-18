@@ -1,5 +1,6 @@
 import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
+import { isValidPublicUrl } from '@server/core/ssrf';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
 const ANTHROPIC_TIMEOUT_MS = 80_000;
@@ -21,6 +22,11 @@ export async function reviewWithAnthropic(
   tracker?: { incrementSubrequests(count?: number): void },
 ): Promise<ModelResponse> {
   logger.info(`Calling Anthropic model: ${model}`);
+
+  if (config.baseUrl && !isValidPublicUrl(config.baseUrl)) {
+    throw new ProviderRequestError(config.providerName, 400, 'Invalid provider base URL.');
+  }
+
   const baseUrl = (config.baseUrl || DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
   const timeoutMs = config.timeoutMs ?? ANTHROPIC_TIMEOUT_MS;
 

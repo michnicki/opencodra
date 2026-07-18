@@ -5,6 +5,12 @@ export class GitHubService {
   private client: GitHubClient;
 
   constructor(env: AppBindings, installationId: string, tracker?: { incrementSubrequests(count?: number): void }) {
+    // Fail fast on a missing/blank installation id: a misconfigured (empty) value must not
+    // silently reach the GitHub App auth flow and risk authenticating the wrong installation.
+    // Presence-only — installation ids are opaque strings here, not necessarily numeric.
+    if (!installationId || installationId.trim().length === 0) {
+      throw new Error('GitHubService: installationId is required.');
+    }
     this.client = new GitHubClient(env, installationId, tracker);
   }
 

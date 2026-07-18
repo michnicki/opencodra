@@ -54,6 +54,12 @@ function loadEnvFiles() {
 }
 
 function run(command, args) {
+  // The full environment is forwarded intentionally: `migrate.mjs` needs DATABASE_URL and the
+  // Vitest child needs TEST_DATABASE_URL plus every other secret the test setup (`test/setup.ts`,
+  // `test/helpers.ts`) loads to exercise crypto/OAuth/webhook paths. Stripping "sensitive" vars
+  // here would break the suite. This runner is a thin dev/CI wrapper that does not itself log the
+  // environment; secret redaction for anything the code paths *do* log is handled by
+  // `core/logger.ts`'s `redact()`. Do not swap this for a hand-curated allow-list.
   const result = spawnSync(command, args, {
     cwd: rootDir,
     env: process.env,

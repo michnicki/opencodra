@@ -89,7 +89,10 @@ export const reviewConfigSchema = z.object({
   // (fail-open — a finding with null/undefined confidence is always kept). Default 0.7.
   min_confidence: z.number().min(0).max(1).default(0.7),
   focus: z.array(z.enum(reviewCategories)).default([...reviewCategories]),
-  custom_rules: z.array(z.string().min(1)).default([]),
+  // Bounded at the config-write boundary so a malicious/oversized custom rule cannot
+  // dominate the review prompt (prompt-injection hardening, Group D-1): each rule is
+  // capped at 500 chars and the list at 50 entries. Field name/shape unchanged.
+  custom_rules: z.array(z.string().min(1).max(500)).max(50).default([]),
   labels: labelsSchema.default({
     p1: 'review: needs-attention',
     p2: 'review: approved',

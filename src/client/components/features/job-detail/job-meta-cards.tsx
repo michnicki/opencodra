@@ -99,6 +99,9 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
   const isPartialReview = job.status === 'done' && job.errorMessage?.startsWith('Partial review:');
   const steps = job.steps ?? [];
   const shortCommitSha = job.commitSha?.slice(0, 7) ?? 'unknown';
+  // Only link when the helper yields a validated http(s) URL; otherwise fall
+  // back to plain text rather than rendering a broken/dangerous anchor.
+  const commitHref = job.commitSha ? commitUrl(job, job.commitSha) : undefined;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -134,9 +137,9 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
             <div>
               <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">Commit</dt>
               <dd>
-                {job.commitSha ? (
+                {commitHref ? (
                   <a
-                    href={commitUrl(job, job.commitSha)}
+                    href={commitHref}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-foreground hover:text-primary transition-colors"

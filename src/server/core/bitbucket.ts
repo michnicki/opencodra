@@ -28,6 +28,19 @@ export class BitbucketError extends Error {
     super(message);
     this.name = 'BitbucketError';
   }
+
+  // Structured logging and JSON.stringify(err) must never serialize the raw response `body`, which
+  // can carry provider credentials or sensitive detail (T-05-06). `body` stays available to retry
+  // logic internally; only its serialized form is suppressed here.
+  toJSON() {
+    return {
+      name: this.name,
+      status: this.status,
+      path: this.path,
+      message: this.message,
+      retryAfterMs: this.retryAfterMs,
+    };
+  }
 }
 
 function retryAfterMs(response: Response) {

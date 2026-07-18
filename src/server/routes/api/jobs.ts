@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { defaultRepoConfig, jobsQuerySchema } from '@shared/schema';
 import type { AppEnv } from '@server/env';
-import { bytesToHex, cancelJob, deleteJob, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
+import { bytesToHex, cancelJob, claimActiveJobForReplacement, deleteJob, getJobDetail, getJobForProcessing, insertJob, listJobs, mapJob, supersedeOlderJobs } from '@server/db/jobs';
 import { jsonError } from '@server/core/http';
 import { scheduleBestEffortJobMaintenance } from '@server/core/job-recovery';
 import { loadRepoConfig } from '@server/core/config';
@@ -149,6 +149,14 @@ export function createJobsRouter() {
     if (!rawSource) {
       return jsonError('Job not found.', 404);
     }
+    // TOCTOU guard: if the source is still active, atomically claim it so a concurrent retry/rerun
+    // cannot also insert a replacement. A lost claim means another request already replaced it.
+    if (rawSource.status === 'queued' || rawSource.status === 'running') {
+      const claimed = await claimActiveJobForReplacement(c.env, rawSource.id);
+      if (!claimed) {
+        return jsonError('This job is already being re-run.', 409);
+      }
+    }
     const job = await startReplacementJob(c, rawSource, { inherit: true });
     return c.json({ job }, 202);
   });
@@ -162,6 +170,12 @@ export function createJobsRouter() {
     }
     const source = mapJob(rawSource);
     if (source.status === 'queued' || source.status === 'running') {
+      // TOCTOU guard: claim the active source before terminating/replacing so only one of two
+      // concurrent rerun (or retry) requests proceeds; the loser gets 409 and no double workflow.
+      const claimed = await claimActiveJobForReplacement(c.env, rawSource.id);
+      if (!claimed) {
+        return jsonError('This job is already being re-run.', 409);
+      }
       await terminateJobWorkflow(c.env, source);
     }
     const job = await startReplacementJob(c, rawSource, { inherit: false });
@@ -176,11 +190,15 @@ export function createJobsRouter() {
       return jsonError('Job not found.', 404);
     }
     const job = mapJob(raw);
-    if (job.status !== 'queued' && job.status !== 'running') {
+    // Atomically claim the cancel: cancelJob flips queued/running -> cancelled and reports whether
+    // THIS caller won. A concurrent stop (or a job that finished between the read and here) claims
+    // nothing and gets 409, instead of the old read-check-then-cancel TOCTOU where two callers
+    // could both pass the status check and both act.
+    const cancelled = await cancelJob(c.env, id);
+    if (!cancelled) {
       return jsonError('Only a queued or running job can be stopped.', 409);
     }
     await terminateJobWorkflow(c.env, job);
-    await cancelJob(c.env, id);
     const updated = await getJobForProcessing(c.env, id);
     return c.json({ job: updated ? mapJob(updated) : job }, 200);
   });

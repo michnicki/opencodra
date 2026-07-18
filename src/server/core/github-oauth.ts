@@ -51,7 +51,7 @@ export async function exchangeGitHubOAuthCode(
   return payload.access_token;
 }
 
-export async function fetchGitHubOAuthProfile(token: string) {
+export async function fetchGitHubOAuthProfile(token: string): Promise<GitHubOAuthProfile> {
   const response = await fetch('https://api.github.com/user', {
     headers: githubHeaders(token),
   });
@@ -60,7 +60,16 @@ export async function fetchGitHubOAuthProfile(token: string) {
     throw new Error(`GitHub user lookup failed with ${response.status}`);
   }
 
-  return (await response.json()) as GitHubOAuthProfile;
+  // Validate the identity-bearing fields instead of blindly casting: `id`/`login` flow into the
+  // session record and the allow-list check, where an undefined `login` would throw on
+  // `.toLowerCase()` (or, worse, silently authenticate an empty identity). Mirror the runtime
+  // validation the Bitbucket profile path already performs.
+  const profile = (await response.json()) as Partial<GitHubOAuthProfile>;
+  if (typeof profile?.id !== 'number' || typeof profile?.login !== 'string' || profile.login.length === 0) {
+    throw new Error('GitHub user lookup returned an unexpected shape (missing id/login).');
+  }
+
+  return profile as GitHubOAuthProfile;
 }
 
 export function toDashboardSessionUser(profile: GitHubOAuthProfile): DashboardSessionUser {

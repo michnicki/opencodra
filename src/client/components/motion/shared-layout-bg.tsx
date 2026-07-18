@@ -7,7 +7,6 @@ import {
 } from "motion/react";
 import {
   Children,
-  cloneElement,
   isValidElement,
   useId,
   useState,
@@ -70,17 +69,17 @@ export function SharedLayoutBg({
             children?: ReactNode;
           }>;
           const childKey = el.key ? String(el.key) : `item-${index}`;
-          return cloneElement(
-            el,
-            {
-              key: childKey,
-              className: cn("relative z-10", el.props.className),
-              onMouseEnter: (e: any) => {
-                el.props.onMouseEnter?.(e);
-                setActiveId(childKey);
-              },
-            },
-            <>
+          // Wrap each row in a neutral positioned container instead of cloning the child
+          // with replacement children. Cloning re-rendered the element nested inside a clone
+          // of its own type (e.g. <a> inside <a>) and duplicated its props; the wrapper carries
+          // the hover/active tracking while the original child renders untouched (its own
+          // className, props, and children preserved). Its own onMouseEnter still fires on the child.
+          return (
+            <div
+              key={childKey}
+              className="relative z-10"
+              onMouseEnter={() => setActiveId(childKey)}
+            >
               <div className="pointer-events-none absolute inset-0 z-0">
                 <AnimatePresence custom={activeId !== null}>
                   {activeId !== null ? (
@@ -108,7 +107,7 @@ export function SharedLayoutBg({
                 </AnimatePresence>
               </div>
               {el}
-            </>
+            </div>
           );
         })}
     </motion.div>

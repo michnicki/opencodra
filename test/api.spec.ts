@@ -59,7 +59,8 @@ describe('Dashboard API Suite', () => {
     const state = authLocation ? new URL(authLocation).searchParams.get('state') : null;
     expect(state).toBeTruthy();
 
-    const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, {}, env);
+    const stateCookie = (authStart.headers.get('set-cookie') || '').match(/codra_oauth_state=[^;]+/)?.[0] ?? '';
+    const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, { headers: { cookie: stateCookie } }, env);
     const cookieHeader = callback.headers.get('set-cookie') || '';
     const match = cookieHeader.match(/codra_session=([^;]+)/);
 
@@ -109,7 +110,8 @@ describe('Dashboard API Suite', () => {
 
     const authStart = await app.request('/auth/github', {}, env);
     const state = new URL(authStart.headers.get('location')!).searchParams.get('state');
-    const response = await app.request(`/auth/github/callback?code=test-code&state=${state}`, {}, env);
+    const stateCookie = (authStart.headers.get('set-cookie') || '').match(/codra_oauth_state=[^;]+/)?.[0] ?? '';
+    const response = await app.request(`/auth/github/callback?code=test-code&state=${state}`, { headers: { cookie: stateCookie } }, env);
 
     expect(response.status).toBe(302);
     expect(response.headers.get('location')).toBe('/login?error=not_allowed');
@@ -597,11 +599,15 @@ describe('Dashboard API Suite', () => {
 
     expect(response.status).toBe(429);
     const data = await response.json() as { error: string };
-    expect(data.error).toContain('Quota exceeded');
+    // The endpoint preserves the upstream status code (429) but sanitizes the body to a fixed
+    // generic string — provider messages can echo request headers/credentials, so the raw text
+    // ("Quota exceeded", "details", etc.) is logged server-side only, never returned to the client.
+    expect(data.error).toBe('Connection test failed.');
+    expect(data.error).not.toContain('Quota exceeded');
     expect(data.error).not.toContain('"details"');
   });
 
-  it('reports local Cloudflare Workers AI binding limitations clearly', async () => {
+  it('returns a 400 for local Cloudflare Workers AI binding limitations (message sanitized)', async () => {
     const env = createTestEnv({
       AI: {
         async run() {
@@ -619,9 +625,13 @@ describe('Dashboard API Suite', () => {
       },
     }, env);
 
+    // The 400 still distinguishes a local/config binding limitation from an upstream provider
+    // failure (which maps to 502); the detailed "not available in local Wrangler" hint is now
+    // logged server-side only and the client body is the fixed generic sanitized string.
     expect(response.status).toBe(400);
     const data = await response.json() as { error: string };
-    expect(data.error).toContain('Cloudflare Workers AI is not available in local Wrangler');
+    expect(data.error).toBe('Connection test failed.');
+    expect(data.error).not.toContain('Cloudflare Workers AI is not available in local Wrangler');
   });
 
   it('maps upstream provider server errors to bad gateway after retry', async () => {
@@ -648,7 +658,10 @@ describe('Dashboard API Suite', () => {
     // GEMINI_MAX_RETRIES = 2, so a persistent 5xx is attempted 3 times before giving up.
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const data = await response.json() as { error: string };
-    expect(data.error).toContain('Internal error encountered.');
+    // Upstream 5xx maps to 502; the raw provider body ("Internal error encountered.") is
+    // sanitized to the fixed generic string before reaching the client.
+    expect(data.error).toBe('Connection test failed.');
+    expect(data.error).not.toContain('Internal error encountered.');
   });
 
   it('rejects invalid global model config writes', async () => {

@@ -16,6 +16,7 @@ import {
   upsertDiscoveredModelConfigs,
 } from '@server/db/model-configs';
 import { jsonError } from '@server/core/http';
+import { logger } from '@server/core/logger';
 import { getGlobalConfig, updateGlobalConfig } from '@server/core/config';
 import { encryptLlmApiKey, decryptLlmApiKey } from '@server/core/llm-crypto';
 import { llmApiFormats } from '@shared/schema';
@@ -30,7 +31,7 @@ const apiFormatSchema = z.enum(llmApiFormats);
 const positiveIntegerSchema = z.number().int().positive().finite();
 const modelIdSchema = z.string().trim().min(1);
 const optionalUrlSchema = z.string().trim().url().nullable().optional();
-const providerIdSchema = z.string().uuid();
+const providerIdSchema = z.uuid();
 
 const providerCreateSchema = z.object({
   name: z.string().trim().min(1),
@@ -148,10 +149,13 @@ async function syncProviderModelCatalog(env: AppEnv['Bindings']) {
         modelNames,
       });
     } catch (error) {
+      // Log the raw error server-side (the logger redacts) but never reflect provider error
+      // detail — which can echo API keys or upstream credentials — back to the client.
+      logger.error(`Provider model sync failed for ${provider.name}`, error);
       syncErrors.push({
         providerId: provider.id,
         providerName: provider.name,
-        error: error instanceof Error ? error.message : 'Could not refresh provider models.',
+        error: 'Could not refresh provider models.',
       });
     }
   }));
@@ -214,7 +218,8 @@ export function createModelsRouter() {
         : (await encryptedApiKeyFromBody(c.env, input.apiKey)) ?? null;
     } catch (error) {
       if (isEncryptionConfigError(error)) {
-        return jsonError(error instanceof Error ? error.message : 'LLM encryption is not configured.', 400);
+        logger.error('LLM provider create: encryption not configured', error);
+        return jsonError('LLM encryption is not configured.', 400);
       }
       throw error;
     }
@@ -264,7 +269,8 @@ export function createModelsRouter() {
         : await encryptedApiKeyFromBody(c.env, input.apiKey, input.clearApiKey);
     } catch (error) {
       if (isEncryptionConfigError(error)) {
-        return jsonError(error instanceof Error ? error.message : 'LLM encryption is not configured.', 400);
+        logger.error('LLM provider update: encryption not configured', error);
+        return jsonError('LLM encryption is not configured.', 400);
       }
       throw error;
     }
@@ -276,13 +282,21 @@ export function createModelsRouter() {
       return jsonError(`Provider ${input.name} needs an API key before it can be enabled.`, 400);
     }
 
+    // Translate the encrypt-at-boundary result into the explicit set-vs-clear option:
+    //   undefined -> leave the stored key; null -> clear it; string -> set new ciphertext.
+    const apiKeyUpdate = encryptedApiKey === undefined
+      ? undefined
+      : encryptedApiKey === null
+        ? ({ clear: true } as const)
+        : ({ set: encryptedApiKey } as const);
+
     let provider;
     try {
       provider = await updateLlmProvider(c.env, id, {
         name: input.name,
         apiFormat: input.apiFormat,
         baseUrl: normalizedBaseUrl(input.apiFormat, input.baseUrl),
-        ...(encryptedApiKey !== undefined ? { encryptedApiKey } : {}),
+        ...(apiKeyUpdate ? { apiKey: apiKeyUpdate } : {}),
         enabled: input.enabled,
       });
     } catch (error) {
@@ -361,8 +375,11 @@ export function createModelsRouter() {
         outputTokens: response.outputTokens,
       });
     } catch (error) {
+      // Provider errors can echo request headers/credentials in their message — log raw
+      // server-side (redacted) and return a fixed generic string to the client.
+      logger.error('LLM provider connection test failed', error);
       return jsonError(
-        error instanceof Error ? error.message : 'Connection test failed.',
+        'Connection test failed.',
         error instanceof ProviderRequestError ? providerErrorStatus(error) : 502,
       );
     }

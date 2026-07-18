@@ -17,6 +17,28 @@ const SENSITIVE_KEYS = [
 
 const storage = new AsyncLocalStorage<Record<string, any>>();
 
+// Patterns for secrets embedded *inside* an otherwise-ordinary string (e.g. an error message or
+// stack that quotes an Authorization header, or a provider body echoing a key). Each only matches
+// the credential token itself so surrounding log text is preserved. Kept deliberately conservative
+// so normal messages are untouched.
+const EMBEDDED_SECRET_PATTERNS: RegExp[] = [
+  /Bearer\s+[A-Za-z0-9._~+/=-]+/gi, // Authorization: Bearer <token>
+  /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, // JWT (three base64url segments)
+  /sk-[A-Za-z0-9._-]{8,}/g, // OpenAI-style secret keys
+  /gh[pousr]_[A-Za-z0-9]{20,}/g, // GitHub tokens: ghp_/gho_/ghu_/ghs_/ghr_
+  /github_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained PAT
+  /xox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
+  /AKIA[0-9A-Z]{16}/g, // AWS access key id
+];
+
+function scrubEmbeddedSecrets(value: string): string {
+  let result = value;
+  for (const pattern of EMBEDDED_SECRET_PATTERNS) {
+    result = result.replace(pattern, '[REDACTED]');
+  }
+  return result;
+}
+
 function redact(obj: any): any {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj !== 'object') {
@@ -25,6 +47,8 @@ function redact(obj: any): any {
       if (obj.startsWith('Bearer ') || obj.split('.').length === 3) {
         return '[REDACTED]';
       }
+      // Otherwise scrub any secret embedded within an ordinary string in-place.
+      return scrubEmbeddedSecrets(obj);
     }
     return obj;
   }
@@ -55,8 +79,11 @@ export class Logger {
       timestamp: new Date().toISOString(),
       level,
       message,
-      ...store,
-      ...this.context,
+      // Ambient store and logger context are attacker-influenced (they carry request/job values
+      // and withContext/runWithContext data), so they must pass through the same redaction as
+      // `data` — otherwise a Bearer token or key threaded into context would be logged verbatim.
+      ...redact(store),
+      ...redact(this.context),
       ...(data ? { data: redact(data) } : {}),
     };
 

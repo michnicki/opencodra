@@ -7,7 +7,7 @@ import { Select } from '@client/components/ui/select';
 import { Alert } from '@client/components/ui/alert';
 import { PageHeader } from '@client/components/layout/page-header';
 import { usePolling } from '@client/hooks/use-polling';
-import { GitPullRequest, ChevronLeft, ChevronRight, RefreshCw, AlertTriangle, RotateCcw, Trash2, Info, Search } from 'lucide-react';
+import { GitPullRequest, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import type { JobSummary } from '@shared/schema';
 
 export function JobsPage() {

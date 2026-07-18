@@ -20,13 +20,14 @@ describe('core/crypto encryptSecret/decryptSecret', () => {
     expect(await decryptSecret(env, encrypted)).toBe(SECRET);
   });
 
-  it('produces the versioned v1:iv:ciphertext shape (three colon-separated segments starting v1)', async () => {
+  it('produces the versioned v2:salt:iv:ciphertext shape (four colon-separated segments starting v2)', async () => {
     const encrypted = await encryptSecret(env, SECRET);
     const segments = encrypted.split(':');
-    expect(segments).toHaveLength(3);
-    expect(segments[0]).toBe('v1');
-    expect(segments[1].length).toBeGreaterThan(0); // base64 IV
-    expect(segments[2].length).toBeGreaterThan(0); // base64 ciphertext
+    expect(segments).toHaveLength(4);
+    expect(segments[0]).toBe('v2');
+    expect(segments[1].length).toBeGreaterThan(0); // base64 salt
+    expect(segments[2].length).toBeGreaterThan(0); // base64 IV
+    expect(segments[3].length).toBeGreaterThan(0); // base64 ciphertext
   });
 
   it('uses a random IV: two encryptions of the same plaintext differ (mitigates T-04-06)', async () => {
