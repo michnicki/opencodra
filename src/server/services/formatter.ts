@@ -191,7 +191,7 @@ ${bodyBlock}
 ${bodyBlock}
 
 <details>
-<summary>ℹ️ About OpenCodra</summary>
+<summary>About OpenCodra</summary>
 
 <br/>
 

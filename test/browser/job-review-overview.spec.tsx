@@ -59,7 +59,7 @@ This PR tightens input validation across the API layer.
 _2 files reviewed_
 
 <details>
-<summary>ℹ️ About OpenCodra</summary>
+<summary>About OpenCodra</summary>
 
 <br/>
 
