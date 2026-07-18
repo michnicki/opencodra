@@ -21,6 +21,8 @@ const JOB: JobDetail = {
   owner: 'acme',
   repo: 'widgets',
   installationId: '1',
+  repositoryVcsProvider: 'github',
+  repositoryWorkspace: null,
   prNumber: 42,
   prTitle: 'Add retry handling',
   prAuthor: 'octocat',
@@ -147,5 +149,36 @@ describe('JobDetailPage findings and retry', () => {
     await waitFor(() => {
       expect(api.rerunJob).toHaveBeenCalledWith(JOB_ID);
     });
+  });
+
+  it('uses provider-aware repository marks and external links', async () => {
+    vi.mocked(api.getJob).mockResolvedValue({
+      status: 200,
+      etag: null,
+      lastModified: null,
+      notModified: false,
+      data: {
+        job: {
+          ...JOB,
+          installationId: null,
+          repositoryVcsProvider: 'bitbucket',
+          repositoryWorkspace: 'acme-workspace',
+          reviewId: 123,
+        },
+      },
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByRole('img', { name: 'Bitbucket' })).toHaveAttribute('title', 'Bitbucket');
+    expect(screen.getByRole('link', { name: /Add retry handling/i })).toHaveAttribute(
+      'href',
+      'https://bitbucket.org/acme-workspace/widgets/pull-requests/42',
+    );
+    expect(screen.getByRole('link', { name: /abc123d/i })).toHaveAttribute(
+      'href',
+      'https://bitbucket.org/acme-workspace/widgets/commits/abc123def456',
+    );
+    expect(screen.queryByText('Review')).not.toBeInTheDocument();
   });
 });

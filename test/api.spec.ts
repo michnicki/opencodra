@@ -815,6 +815,7 @@ describe('Dashboard API Suite', () => {
     expect(loaded.parsedJson.model.fallbacks).toEqual([]);
 
     const record = await getRepoConfigRecord(env, 'api-test-owner', repo);
+    expect(record?.vcsProvider).toBe('github');
     expect(record?.mainModel).toBeNull();
     expect(record?.fallbackModels).toBeNull();
     expect(record?.sizeOverrides).toBeNull();

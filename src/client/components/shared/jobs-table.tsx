@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { StatusBadge } from '@client/components/ui/badge';
 import { Skeleton } from '@client/components/shared/skeleton';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import { cn, fmtNumber } from '@client/lib/utils';
 
 import type { JobSummary } from '@shared/schema';
@@ -142,8 +143,9 @@ function JobMobileCard({ job, columns }: { job: JobSummary; columns: Column[] })
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {show('repo') && (
-            <p className="truncate text-xs font-semibold text-muted-foreground">
-              {job.owner}/{job.repo}
+            <p className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+              <VcsProviderMark provider={job.repositoryVcsProvider} size={12} />
+              <span className="truncate">{job.owner}/{job.repo}</span>
             </p>
           )}
           {show('pr') && (
@@ -274,8 +276,8 @@ export function JobsTable({ jobs, loading, columns }: JobsTableProps) {
                           )}
                         >
                           <div className="flex min-w-0 items-center gap-2.5">
-                            <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-xs font-bold text-primary shadow-sm", itemBgClass)}>
-                              {job.repo.slice(0, 2).toUpperCase()}
+                            <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground shadow-sm", itemBgClass)}>
+                              <VcsProviderMark provider={job.repositoryVcsProvider} size={16} />
                             </span>
                             <div className="min-w-0">
                               <Link

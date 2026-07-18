@@ -43,6 +43,7 @@ describe('VcsCredentialsPage redaction guardrail', () => {
 
     // Identity string (workspace/repo_slug) and the server-precomputed status label render.
     expect(await screen.findByText('acme/widgets')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Bitbucket' })).toHaveAttribute('title', 'Bitbucket');
     expect(screen.getByText('Active')).toBeInTheDocument();
     // Presence affordance shows the secret is stored WITHOUT rendering it.
     expect(screen.getByText(/Token stored/)).toBeInTheDocument();

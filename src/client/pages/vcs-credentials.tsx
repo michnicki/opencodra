@@ -23,6 +23,7 @@ import { Input } from '@client/components/ui/input';
 import { Badge, type BadgeProps } from '@client/components/ui/badge';
 import { Alert } from '@client/components/ui/alert';
 import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import { cn } from '@client/lib/utils';
 import type { CredentialStatus, VcsCredentialStatus, VcsCredentialStoreInput } from '@shared/schema';
 
@@ -382,6 +383,7 @@ export function VcsCredentialsPage() {
                   <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
+                        <VcsProviderMark provider={credential.vcsProvider} size={15} className="text-muted-foreground" />
                         <span className="truncate font-mono text-sm text-foreground">{identity}</span>
                         <StatusBadge status={credential.status} />
                         {credential.label && (

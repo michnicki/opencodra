@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@client/components/ui/
 import { Badge, StatusBadge } from '@client/components/ui/badge';
 import type { JobDetail, JobStep } from '@shared/schema';
 import { formatDuration } from '@client/lib/utils';
+import { commitUrl, reviewUrl, vcsProviderLabel } from '@client/lib/vcs';
 
 interface JobMetaCardsProps {
   job: JobDetail;
@@ -94,6 +95,7 @@ function StepRow({ step, index, total }: { step: JobStep; index: number; total: 
 }
 
 export function JobMetaCards({ job }: JobMetaCardsProps) {
+  const providerReviewUrl = reviewUrl(job, job.prNumber, job.reviewId);
   const isPartialReview = job.status === 'done' && job.errorMessage?.startsWith('Partial review:');
   const steps = job.steps ?? [];
   const shortCommitSha = job.commitSha?.slice(0, 7) ?? 'unknown';
@@ -134,7 +136,7 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
               <dd>
                 {job.commitSha ? (
                   <a
-                    href={`https://github.com/${job.owner}/${job.repo}/commit/${job.commitSha}`}
+                    href={commitUrl(job, job.commitSha)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-foreground hover:text-primary transition-colors"
@@ -148,17 +150,17 @@ export function JobMetaCards({ job }: JobMetaCardsProps) {
               </dd>
             </div>
 
-            {job.reviewId && (
+            {providerReviewUrl && (
               <div>
                 <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">Review</dt>
                 <dd>
                   <a
-                    href={`https://github.com/${job.owner}/${job.repo}/pull/${job.prNumber}#pullrequestreview-${job.reviewId}`}
+                    href={providerReviewUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground hover:text-primary transition-colors"
                   >
-                    GitHub <ExternalLink size={10} className="text-muted-foreground/50" />
+                    {vcsProviderLabel(job.repositoryVcsProvider)} <ExternalLink size={10} className="text-muted-foreground/50" />
                   </a>
                 </dd>
               </div>

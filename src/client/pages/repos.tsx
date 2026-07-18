@@ -17,6 +17,7 @@ import {
 } from '@client/components/ui/dropdown-menu';
 import { GithubMark } from '@client/components/shared/github-mark';
 import { BitbucketMark } from '@client/components/shared/bitbucket-mark';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import {
   GitBranch,
   RefreshCw,
@@ -44,8 +45,8 @@ const EMPTY_MODEL_ROUTE: ModelRouteConfig = {
 
 type GlobalModelConfig = RepoConfig['model'];
 
-function repoId(repo: Pick<RepoConfigRecord, 'owner' | 'repo'>) {
-  return `${repo.owner}/${repo.repo}`;
+function repoId(repo: Pick<RepoConfigRecord, 'vcsProvider' | 'owner' | 'repo'>) {
+  return `${repo.vcsProvider}:${repo.owner}/${repo.repo}`;
 }
 
 function hasStoredModelStrategy(repo: RepoConfigRecord) {
@@ -155,8 +156,9 @@ function RepoRow({
             )}
           />
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-foreground">
-              {repo.owner}/{repo.repo}
+            <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-foreground">
+              <VcsProviderMark provider={repo.vcsProvider} size={15} className="text-muted-foreground" />
+              <span className="truncate">{repo.owner}/{repo.repo}</span>
             </h2>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <span
@@ -324,8 +326,13 @@ function RepoModelModal({
               <Dialog.Title className="text-base font-semibold text-foreground">
                 Edit model strategy
               </Dialog.Title>
-              <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
-                {repo ? repoId(repo) : 'Repository routing'}
+              <Dialog.Description className="mt-1 flex items-center gap-2 truncate text-sm text-muted-foreground">
+                {repo ? (
+                  <>
+                    <VcsProviderMark provider={repo.vcsProvider} size={14} />
+                    <span className="truncate">{repo.owner}/{repo.repo}</span>
+                  </>
+                ) : 'Repository routing'}
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>

@@ -8,6 +8,7 @@ export const reviewSeverities = ['P0', 'P1', 'P2', 'P3', 'nit'] as const;
 export const reviewCategories = ['security', 'bugs', 'performance', 'correctness', 'quality'] as const; // Keeping for DB compatibility but will deprecate usage in prompts
 export const llmApiFormats = ['openai', 'anthropic', 'gemini', 'cloudflare-workers-ai'] as const;
 export const vcsProviders = ['github', 'bitbucket'] as const;
+export type VcsProvider = typeof vcsProviders[number];
 
 export const dateStringSchema = z.union([z.string(), z.date()]).transform((d) => (d instanceof Date ? d.toISOString() : d));
 export const coerceNumberSchema = z.coerce.number();
@@ -224,7 +225,7 @@ export const jobSummarySchema = z.object({
   retryOfJobId: z.uuid().nullable().optional(),
   // R-01: expose the parent repository's provider + workspace so VcsService.forRepo can branch
   // without a separate query. Optional so pre-widening fixtures still parse.
-  repositoryVcsProvider: z.string().optional(),
+  repositoryVcsProvider: z.enum(vcsProviders).optional(),
   repositoryWorkspace: z.string().nullable().optional(),
   // REV-R-E: pass-through for the new jobs.status_check_ref column (Bitbucket Code Insights
   // report key / generic status reference). Used by Plan 03's runPreparePhase writer and the
@@ -283,6 +284,7 @@ export const repoConfigRecordSchema = z.object({
   installationId: z.string(),
   owner: z.string(),
   repo: z.string(),
+  vcsProvider: z.enum(vcsProviders),
   parsedJson: repoConfigSchema,
   updatedAt: dateStringSchema,
   lastJobCreatedAt: dateStringSchema.nullable(),
@@ -328,6 +330,7 @@ export const statsSchema = z.object({
     z.object({
       owner: z.string(),
       repo: z.string(),
+      vcsProvider: z.enum(vcsProviders),
       jobs: z.number().int(),
     }),
   ),

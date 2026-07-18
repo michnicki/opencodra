@@ -7,6 +7,7 @@ type RepoConfigRow = {
   installation_id: string;
   owner: string;
   repo: string;
+  vcs_provider: 'github' | 'bitbucket';
   parsed_json: RepoConfig | string | null;
   updated_at: string;
   main_model: string | null;
@@ -23,6 +24,7 @@ function mapRepo(row: RepoConfigRow) {
     installationId: row.installation_id,
     owner: row.owner,
     repo: row.repo,
+    vcsProvider: row.vcs_provider,
     parsedJson,
     updatedAt: row.updated_at,
     lastJobCreatedAt: row.last_job_created_at,
@@ -169,6 +171,7 @@ export async function listRepoConfigs(env: Pick<AppBindings, 'HYPERDRIVE'>) {
         r.installation_id,
         r.owner,
         r.repo,
+        r.vcs_provider,
         rc.parsed_json,
         rc.updated_at,
         rc.main_model,
@@ -201,6 +204,7 @@ export async function getRepoConfigRecord(env: Pick<AppBindings, 'HYPERDRIVE'>, 
         r.installation_id,
         r.owner,
         r.repo,
+        r.vcs_provider,
         rc.parsed_json,
         rc.updated_at,
         rc.main_model,

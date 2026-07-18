@@ -54,14 +54,14 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
         ORDER BY count DESC
       `,
     ),
-    queryRows<{ owner: string; repo: string; jobs: number }>(
+    queryRows<{ owner: string; repo: string; vcs_provider: 'github' | 'bitbucket'; jobs: number }>(
       env,
       `
-        SELECT r.owner, r.repo, COUNT(*)::int AS jobs
+        SELECT r.owner, r.repo, r.vcs_provider, COUNT(*)::int AS jobs
         FROM jobs j
         JOIN repositories r ON j.repository_id = r.id
-        GROUP BY r.owner, r.repo
-        ORDER BY jobs DESC, r.owner ASC, r.repo ASC
+        GROUP BY r.vcs_provider, r.owner, r.repo
+        ORDER BY jobs DESC, r.owner ASC, r.repo ASC, r.vcs_provider ASC
         LIMIT 10
       `,
     ),
@@ -148,7 +148,12 @@ export async function getStats(env: Pick<AppBindings, 'HYPERDRIVE'>, days = 30) 
       inputTokens: row.input_tokens ?? 0,
       outputTokens: row.output_tokens ?? 0,
     })),
-    topRepos: topRepos.map((row) => ({ owner: row.owner, repo: row.repo, jobs: row.jobs })),
+    topRepos: topRepos.map((row) => ({
+      owner: row.owner,
+      repo: row.repo,
+      vcsProvider: row.vcs_provider,
+      jobs: row.jobs,
+    })),
     // Drop any rows whose enum-typed column holds an unexpected value (e.g. legacy
     // rows back-migrated from JSON, where severity/category have no DB CHECK
     // constraint). Keeping them would fail statsSchema.parse and 500 the endpoint.
