@@ -56,7 +56,13 @@ describe('completeTerminalCheckRuns (REV-M-8 widening)', () => {
     await completeTerminalCheckRuns(env);
 
     expect(forRepoMock).toHaveBeenCalledTimes(1);
-    expect(forRepoMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'job-gh-1' }), undefined);
+    // Guards the snake_case installation_id -> camelCase installationId mapping the GitHub adapter
+    // needs: without it every github job hit the sweep with an empty installation.
+    expect(forRepoMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: 'job-gh-1', installationId: 'inst-1' }),
+      undefined,
+    );
     // The numeric check_run_id is forwarded as a string ref.
     expect(updateStatusCheckMock).toHaveBeenCalledWith(
       'acme',
@@ -65,6 +71,35 @@ describe('completeTerminalCheckRuns (REV-M-8 widening)', () => {
       expect.objectContaining({ status: 'completed', conclusion: 'success', title: 'LGTM' }),
     );
     expect(markJobCheckRunCompletedMock).toHaveBeenCalledWith(expect.anything(), 'job-gh-1');
+  });
+
+  it('skips a github job whose repo has no installation_id (cannot complete a check run)', async () => {
+    const env = createTestEnv();
+    forRepoMock.mockResolvedValue({ name: 'github', updateStatusCheck: vi.fn() });
+    getTerminalJobsNeedingCheckRunCompletionMock.mockResolvedValue([
+      {
+        id: 'job-gh-orphan',
+        status: 'failed',
+        verdict: null,
+        error_msg: null,
+        comment_count: 0,
+        file_count: 0,
+        owner: 'acme',
+        repo: 'orphan',
+        check_run_id: 9002,
+        status_check_ref: null,
+        installation_id: null,
+        repositoryVcsProvider: 'github',
+        repositoryWorkspace: null,
+      },
+    ]);
+
+    await completeTerminalCheckRuns(env);
+
+    // No installation -> a GitHub check run can never be completed, so the sweep skips the row
+    // entirely rather than throwing on every invocation.
+    expect(forRepoMock).not.toHaveBeenCalled();
+    expect(markJobCheckRunCompletedMock).not.toHaveBeenCalled();
   });
 
   it('routes a Bitbucket job through VcsService.forRepo (provider-aware reconciliation)', async () => {

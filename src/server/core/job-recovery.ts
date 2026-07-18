@@ -43,6 +43,12 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
     // migration that drops one would otherwise reach this code with no ref to update).
     if (!job.check_run_id && !job.status_check_ref) continue;
 
+    // A GitHub check-run completion needs the App installation. A github-provider job whose repo
+    // has no installation_id (App uninstalled, or an orphan row) can never complete one, so skip
+    // it rather than throwing on every ~2-min sweep. Bitbucket jobs carry a null installation_id
+    // by design and are routed to their own adapter, so only guard the github/default path.
+    if (job.repositoryVcsProvider !== 'bitbucket' && !job.installation_id) continue;
+
     try {
       // REV-M-8: route the reconciliation through VcsService.forRepo (provider-aware) instead
       // of the direct `new GitHubService(env, job.installation_id)` construction. The
@@ -57,7 +63,10 @@ export async function completeTerminalCheckRuns(env: AppBindings) {
       // segment (the recurring BitbucketError 404 in the ~2-min sweep). GitHub jobs ignore headSha.
       const vcs = await VcsService.forRepo(
         env,
-        { ...job, headSha: bytesToHex(job.commit_sha) },
+        // The raw job row exposes the DB column as snake_case `installation_id`, but forRepo reads
+        // camelCase `installationId`. Without this mapping the GitHub adapter received an empty id
+        // and EVERY github job silently failed this sweep (surfaced once the id became required).
+        { ...job, installationId: job.installation_id, headSha: bytesToHex(job.commit_sha) },
         undefined,
       );
 
