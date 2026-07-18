@@ -26,13 +26,14 @@
 
 OpenCodra listens to GitHub and Bitbucket pull request events, runs AI-powered review jobs, posts inline findings back to the PR, and gives you a dashboard to inspect jobs, repositories, model routing, review history, and failed queue runs.
 
-> **OpenCodra is a fork of [Codra](https://github.com/devarshishimpi/codra) by Devarshi Shimpi.** It exists for one reason: the original Codra requires a **Contributor License Agreement (CLA)** to accept contributions. OpenCodra removes that requirement — contributions are accepted under AGPL-3.0 with **no CLA**. Same license, original copyright retained; this fork adds Bitbucket support and welcomes open contributions.
+> **OpenCodra is a fork of [Codra](https://github.com/devarshishimpi/codra) by Devarshi Shimpi.** It exists for one reason: the original Codra requires a **Contributor License Agreement (CLA)** to accept contributions. OpenCodra removes that requirement — contributions are accepted under AGPL-3.0 with **no CLA**. Same license, original copyright retained; this fork adds Bitbucket support, removes the upstream anonymous usage telemetry, and welcomes open contributions.
 
 > **Beta** - OpenCodra is under active development. Expect rough edges, missing features, and breaking changes between releases. Feedback and bug reports are welcome via [GitHub Issues](https://github.com/michnicki/opencodra/issues).
 
 ## Why OpenCodra
 
 - **No CLA to contribute**: OpenCodra accepts contributions under AGPL-3.0 with no Contributor License Agreement — the barrier that motivated this fork.
+- **No telemetry, no phone-home**: Upstream Codra ships anonymous usage telemetry that reports review metrics to a hosted endpoint by default. OpenCodra removes it entirely — nothing is collected or sent.
 - **Own the whole review loop**: Run the GitHub/Bitbucket app, Cloudflare Worker, queue, database, model credentials, and dashboard under your own control.
 - **Review with repository context**: OpenCodra checks pull request diffs for correctness, security, performance, maintainability, and repo-specific patterns.
 - **Configure each repository**: Tune triggers, skipped paths, draft handling, mention reviews, labels, custom rules, and review budgets from the dashboard.
@@ -68,6 +69,10 @@ OpenCodra listens to GitHub and Bitbucket pull request events, runs AI-powered r
 - **Models**: OpenAI, OpenRouter, Anthropic, Google, and Cloudflare providers
 - **VCS**: GitHub App and Bitbucket Cloud webhooks, checks/Code Insights, reviews, and OAuth
 - **Quality**: TypeScript, Zod, Vitest, Playwright browser tests
+
+## Telemetry
+
+**OpenCodra sends no telemetry.** Upstream Codra ships anonymous usage telemetry that is *on by default*: it reports aggregate review metrics (token usage, model names, file extensions, finding counts, durations, verdicts) plus a stable anonymous instance ID to a hosted endpoint (`codra.run`), with an opt-out via `TELEMETRY_DISABLED`. OpenCodra removes that code path entirely — there is no instance ID, no usage events, and no network calls home, so there is nothing to opt out of.
 
 ## Documentation
 
