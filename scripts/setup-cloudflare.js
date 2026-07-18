@@ -30,32 +30,12 @@ function spawnAsync(command, args) {
 const WRANGLER_JSONC_PATH = path.join(process.cwd(), 'wrangler.jsonc');
 const DEV_VARS_PATH = path.join(process.cwd(), '.dev.vars');
 
-async function runWranglerCmd(cmd, spinnerMessage) {
-  const spinner = ora(spinnerMessage).start();
-  try {
-    const { stdout } = await execAsync(cmd);
-    spinner.succeed();
-    return stdout;
-  } catch (error) {
-    spinner.fail();
-    console.error(chalk.red(`\n❌ Error executing: ${cmd}`));
-    const errorMsg = error.stderr || error.message;
-    console.error(chalk.red(errorMsg));
-    
-    if (errorMsg.includes('[code: 10000]') || errorMsg.includes('Authentication error')) {
-      console.log(chalk.yellow('\n💡 Hint: Alternatively, run `npx wrangler login` to use your global Cloudflare session instead.'));
-    }
-    process.exit(1);
-  }
-}
-
 function extractId(output) {
   const match = output.match(/[a-f0-9]{32}/);
   return match ? match[0] : null;
 }
 
 async function handleKVNamespace(baseBinding, isPreview) {
-  const previewFlag = isPreview ? ' --preview' : '';
   let currentBinding = baseBinding;
   
   while (true) {
@@ -301,7 +281,7 @@ function getEnvVars() {
 
 function setSecret(secretName, secretValue) {
   return new Promise((resolve, reject) => {
-    const child = exec(`npx wrangler secret put ${secretName}`, (error, stdout, stderr) => {
+    const child = exec(`npx wrangler secret put ${secretName}`, (error, _stdout, stderr) => {
       if (error) reject(new Error(stderr || error.message));
       else resolve();
     });
@@ -462,7 +442,10 @@ async function main() {
   let wranglerConfig = fs.readFileSync(WRANGLER_JSONC_PATH, 'utf-8');
   let configChanged = false;
 
-  const escapeJson = (str) => str.replace(/"/g, '\\"');
+  // Fully escape the value for embedding inside a JSON string literal (handles
+  // quotes, backslashes, and control chars). slice(1,-1) drops the surrounding
+  // quotes JSON.stringify adds, since the value is interpolated as `"KEY": "${...}"`.
+  const escapeJson = (str) => JSON.stringify(str).slice(1, -1);
 
   const routeRegex = /"routes"\s*:\s*\[[\s\S]*?\]|"workers_dev"\s*:\s*(true|false)/;
   wranglerConfig = wranglerConfig.replace(routeRegex, routesConfigStr);

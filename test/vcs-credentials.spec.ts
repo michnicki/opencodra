@@ -380,7 +380,14 @@ dbDescribe('/api/vcs-credentials route + storage integration', () => {
     );
     expect(entry).toBeUndefined(); // absent from the list => missing
 
-    expect(fetchUrls.some((u) => u.includes('api.bitbucket.org'))).toBe(false);
+    const hitBitbucket = fetchUrls.some((u) => {
+      try {
+        return new URL(u).hostname === 'api.bitbucket.org';
+      } catch {
+        return false;
+      }
+    });
+    expect(hitBitbucket).toBe(false);
   });
 
   // 6. D-12 / T-04-04: auth + CSRF rejection.
