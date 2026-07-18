@@ -30,6 +30,41 @@ export default defineConfig({
       },
       {
         extends: true,
+        // Pre-bundle every third-party dep the browser suite imports. Without this, Vite's dep
+        // optimizer discovers deps lazily as test files load and, on a cold cache (every CI run does
+        // a fresh `npm ci`), re-optimizes mid-run — which triggers a Vite reload that aborts the
+        // in-flight dynamic imports and fails whichever suites were loading at that moment with
+        // "Failed to fetch dynamically imported module" (flaky, run-order-dependent). Enumerating
+        // the deps up front forces a single pre-run optimize pass, so no reload happens mid-suite.
+        // Keep this list in sync with the bare imports under src/client + test/browser.
+        optimizeDeps: {
+          include: [
+            'react',
+            'react/jsx-runtime',
+            'react/jsx-dev-runtime',
+            'react-dom',
+            'react-dom/client',
+            'react-router-dom',
+            'lenis',
+            'lenis/react',
+            'motion/react',
+            'lucide-react',
+            'react-markdown',
+            'remark-gfm',
+            'rehype-raw',
+            'rehype-sanitize',
+            'recharts',
+            'sonner',
+            'clsx',
+            'class-variance-authority',
+            'tailwind-merge',
+            '@radix-ui/react-dialog',
+            '@radix-ui/react-slot',
+            '@testing-library/react',
+            '@testing-library/user-event',
+            '@testing-library/jest-dom/vitest',
+          ],
+        },
         test: {
           name: 'browser',
           include: ['test/browser/**/*.spec.tsx'],

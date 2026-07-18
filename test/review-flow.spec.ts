@@ -88,8 +88,16 @@ vi.mock('@server/services/model', () => {
             };
         }
     }
+    class MockRetryableModelError extends Error {
+        readonly retryable = true;
+        constructor(message: string) {
+            super(message);
+            this.name = 'RetryableModelError';
+        }
+    }
     return {
         ModelService: MockModelService,
+        RetryableModelError: MockRetryableModelError,
         isRetryableModelError: (error: unknown) => Boolean(error && typeof error === 'object' && (error as any).retryable === true),
     };
 });
@@ -823,8 +831,168 @@ dbDescribe('Review Flow Lifecycle', () => {
     const steps = typeof finalJob?.steps === 'string' ? JSON.parse(finalJob.steps) : finalJob?.steps;
     expect(steps?.find((step: { name: string }) => step.name === 'Completing')?.status).toBe('done');
     expect(finalJob?.summary_markdown).toMatch(/^### OpenCodra Review/);
+    // Best-effort AI narrative is now always attempted at finalize (previously never called --
+    // the latent bug this plan fixes).
+    expect(finalJob?.summary_model).toBe('sum-model');
+    expect(summarySpy).toHaveBeenCalled();
+    summarySpy.mockRestore();
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('populates summary_markdown/summary_model/overall_confidence_score/overall_correctness on a successful finalize', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const repo = `test-repo-${Date.now()}-summary-success`;
+    const headSha = sha('1');
+    const baseSha = sha('2');
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([
+        { path: 'src/app.ts', content: 'console.log(1);' },
+        { path: 'src/util.ts', content: 'console.log(2);' },
+      ]),
+    );
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 8,
+      prTitle: 'Summary Success Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 2);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 10,
+      outputTokens: 5,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok',
+      overallCorrectness: 'patch is correct',
+      confidenceScore: 0.8,
+      errorMessage: null,
+    });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/util.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 10,
+      outputTokens: 5,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok too',
+      overallCorrectness: 'patch is correct',
+      confidenceScore: 0.6,
+      errorMessage: null,
+    });
+
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      const result = await runReviewJob(env, {
+        jobId: job.id,
+        deliveryId: 'delivery-summary-success',
+        phase: 'finalize',
+      });
+      expect(result).toEqual({ action: 'ack' });
+    });
+
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('done');
+    expect(finalJob?.summary_markdown).toContain('test');
+    expect(finalJob?.summary_model).toBe('sum-model');
+    expect(finalJob?.overall_confidence_score).toBeCloseTo(0.7, 5);
+    expect(finalJob?.overall_correctness).toBe('patch is correct');
+    expect(finalJob?.total_input_tokens ?? 0).toBeGreaterThanOrEqual(20 + 3);
+    expect(finalJob?.total_output_tokens ?? 0).toBeGreaterThanOrEqual(10 + 2);
+
+    getDiffSpy.mockRestore();
+  }, REVIEW_FLOW_TIMEOUT_MS);
+
+  it('falls back to a recap-only overview and never fails the job when generateSummary throws a RetryableModelError', async () => {
+    const { GitHubService } = await import('@server/services/github');
+    const { ModelService, RetryableModelError } = await import('@server/services/model');
+    const repo = `test-repo-${Date.now()}-summary-failure`;
+    const headSha = sha('3');
+    const baseSha = sha('4');
+    const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+      generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+    );
+    const summarySpy = vi.spyOn(ModelService.prototype as any, 'generateSummary').mockRejectedValue(
+      new (RetryableModelError as any)('summary provider down'),
+    );
+
+    const job = await insertJob(env, {
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prNumber: 9,
+      prTitle: 'Summary Failure Test',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha,
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await updateJobFileCount(env, job.id, 1);
+    await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+    await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+    await upsertFileReview(env, job.id, {
+      filePath: 'src/app.ts',
+      fileStatus: 'done',
+      modelUsed: 'test-model',
+      modelProvider: 'test-provider',
+      diffLineCount: 1,
+      diffInput: 'diff',
+      rawAiOutput: '{}',
+      parsedComments: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      durationMs: 1,
+      verdict: 'approve',
+      fileSummary: 'ok',
+      errorMessage: null,
+    });
+
+    await runWithDb(env, async () => {
+      (env.REVIEW_QUEUE as any).sent.length = 0;
+      const result = await runReviewJob(env, {
+        jobId: job.id,
+        deliveryId: 'delivery-summary-failure',
+        phase: 'finalize',
+      });
+      expect(result).toEqual({ action: 'ack' });
+    });
+
+    const finalJob = await getJobForProcessing(env, job.id);
+    expect(finalJob?.status).toBe('done');
+    expect(finalJob?.review_id).not.toBeNull();
     expect(finalJob?.summary_model).toBeNull();
-    expect(summarySpy).not.toHaveBeenCalled();
+    // Falls back to recap-only: the narrative (which the mock would emit as the word "test") is
+    // never inserted, so the heading is immediately followed by the deterministic recap with no
+    // narrative text sandwiched in between.
+    expect(finalJob?.summary_markdown).toMatch(/^### OpenCodra Review\n\n\*\*No issues found\*\*/);
+
     summarySpy.mockRestore();
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);

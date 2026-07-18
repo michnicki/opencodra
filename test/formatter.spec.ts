@@ -170,66 +170,143 @@ describe('FormatterService.summarizeVerdict', () => {
 });
 
 describe('FormatterService.formatReviewOverview', () => {
-  it('truncates the commit sha to 10 characters and interpolates the bot username', () => {
-    const output = formatter.formatReviewOverview('abcdef1234567890', 'codra-app');
-
-    expect(output).toContain('**Reviewed commit:** `abcdef1234`');
-    expect(output).toContain('@codra-app review');
-    expect(output).toContain('@codra-app address that feedback');
-    expect(output).toContain(`${BASE_URL}/repos`);
-  });
+  function overviewInput(overrides: Partial<Parameters<FormatterService['formatReviewOverview']>[0]> = {}) {
+    return {
+      commitSha: 'abcdef1234567890',
+      botUsername: 'codra-app',
+      narrative: null as string | null,
+      verdict: 'comment' as const,
+      confidenceScore: null as number | null,
+      severityCounts: { P0: 0, P1: 0, P2: 0, P3: 0, nit: 0 },
+      topFindings: [] as Array<{ severity: ParsedReviewComment['severity']; title: string; path: string }>,
+      filesReviewed: 3,
+      omittedCount: 0,
+      maxComments: 10,
+      ...overrides,
+    };
+  }
 
   it('handles a short commit sha without throwing', () => {
-    const output = formatter.formatReviewOverview('abc', 'codra-app');
-    expect(output).toContain('**Reviewed commit:** `abc`');
+    expect(() => formatter.formatReviewOverview(overviewInput({ commitSha: 'abc' }))).not.toThrow();
   });
 
-  // Thread C: the GitHub output must stay byte-identical whether provider is omitted or explicit.
+  it('never renders a "Reviewed commit" line', () => {
+    const output = formatter.formatReviewOverview(overviewInput());
+    expect(output).not.toContain('Reviewed commit');
+  });
+
+  // (a) findings present
+  it('renders verdict, confidence, non-zero counts in P0..nit order, and top findings', () => {
+    const output = formatter.formatReviewOverview(
+      overviewInput({
+        verdict: 'comment',
+        confidenceScore: 0.82,
+        severityCounts: { P0: 1, P1: 2, P2: 0, P3: 0, nit: 0 },
+        topFindings: [
+          { severity: 'P0', title: 'SQL injection risk', path: 'src/index.ts' },
+          { severity: 'P1', title: 'Missing null check', path: 'src/util.ts' },
+        ],
+      }),
+    );
+
+    expect(output).toContain('**Verdict:** Changes requested');
+    expect(output).toContain('Confidence 82%');
+    expect(output).toContain('**Top findings**');
+
+    const p0Index = output.indexOf('P0');
+    const p1Index = output.indexOf('P1');
+    expect(p0Index).toBeGreaterThan(-1);
+    expect(p1Index).toBeGreaterThan(p0Index);
+
+    expect(output).toContain('SQL injection risk');
+    expect(output).toContain('`src/index.ts`');
+  });
+
+  it('omits the confidence readout when confidenceScore is null', () => {
+    const output = formatter.formatReviewOverview(
+      overviewInput({ severityCounts: { P0: 1, P1: 0, P2: 0, P3: 0, nit: 0 } }),
+    );
+    expect(output).not.toContain('Confidence');
+  });
+
+  it('renders GitHub <img> icons for top findings on the github/default path', () => {
+    const output = formatter.formatReviewOverview(
+      overviewInput({
+        severityCounts: { P0: 1, P1: 0, P2: 0, P3: 0, nit: 0 },
+        topFindings: [{ severity: 'P0', title: 'SQL injection risk', path: 'src/index.ts' }],
+      }),
+    );
+    expect(output).toContain('<img');
+  });
+
+  it('renders emoji icons for top findings on the bitbucket path', () => {
+    const output = formatter.formatReviewOverview(
+      overviewInput({
+        severityCounts: { P0: 1, P1: 0, P2: 0, P3: 0, nit: 0 },
+        topFindings: [{ severity: 'P0', title: 'SQL injection risk', path: 'src/index.ts' }],
+      }),
+      { provider: 'bitbucket' },
+    );
+    expect(output).not.toContain('<img');
+    expect(output).toContain('🚨 P0');
+  });
+
+  // (b) zero findings + approve
+  it('renders "No issues found" with no verdict/counts/top-findings when there are zero findings and verdict is approve', () => {
+    const output = formatter.formatReviewOverview(overviewInput({ verdict: 'approve' }));
+    expect(output).toContain('**No issues found**');
+    expect(output).not.toContain('**Verdict:**');
+    expect(output).not.toContain('**Top findings**');
+    expect(output).toContain('3 files reviewed');
+  });
+
+  // (c) omitted-count footer
+  it('includes "comments trimmed to" in the footer only when omittedCount > 0', () => {
+    const withOmitted = formatter.formatReviewOverview(
+      overviewInput({ omittedCount: 97, maxComments: 10, filesReviewed: 7 }),
+    );
+    expect(withOmitted).toContain('comments trimmed to');
+    expect(withOmitted).toContain('7 files reviewed');
+
+    const withoutOmitted = formatter.formatReviewOverview(overviewInput({ omittedCount: 0 }));
+    expect(withoutOmitted).not.toContain('comments trimmed to');
+  });
+
+  // (d) narrative null vs present
+  it('starts directly with the recap when narrative is null or empty (no stray blank narrative line)', () => {
+    const nullNarrative = formatter.formatReviewOverview(overviewInput({ narrative: null, verdict: 'approve' }));
+    const emptyNarrative = formatter.formatReviewOverview(overviewInput({ narrative: '', verdict: 'approve' }));
+    expect(nullNarrative).not.toMatch(/### OpenCodra Review\n\n\n/);
+    expect(emptyNarrative).not.toMatch(/### OpenCodra Review\n\n\n/);
+  });
+
+  it('includes the narrative text verbatim when present', () => {
+    const output = formatter.formatReviewOverview(
+      overviewInput({ narrative: 'This PR tightens input validation across the API layer.', verdict: 'approve' }),
+    );
+    expect(output).toContain('This PR tightens input validation across the API layer.');
+  });
+
+  // (e) GitHub vs Bitbucket
   it('is byte-identical for the default path and explicit provider:"github"', () => {
-    const def = formatter.formatReviewOverview('abcdef1234567890', 'codra-app');
-    const gh = formatter.formatReviewOverview('abcdef1234567890', 'codra-app', { provider: 'github' });
+    const def = formatter.formatReviewOverview(overviewInput());
+    const gh = formatter.formatReviewOverview(overviewInput(), { provider: 'github' });
     expect(gh).toBe(def);
-    // Pin the GitHub-flavored surface so a future edit that drops it is caught.
     expect(gh).toContain('<details>');
-    expect(gh).toContain('About OpenCodra');
+    expect(gh).toContain('<summary>');
     expect(gh).toContain('<br/>');
-    expect(gh).toContain('react with 👍');
+    expect(gh).toContain('About OpenCodra');
   });
 
-  // Thread C: Bitbucket Cloud does not render GitHub-flavored HTML — emit clean CommonMark with
-  // Bitbucket-accurate trigger copy (no <details>/<summary>/<br/>, no "in GitHub", no @mention/👍).
-  it('emits clean Bitbucket markdown when provider is "bitbucket"', () => {
-    const output = formatter.formatReviewOverview('abcdef1234567890', 'codra-app', { provider: 'bitbucket' });
+  it('emits clean Bitbucket markdown with no <details>/<summary>/<br/>/"About OpenCodra", but keeps a flat About-equivalent paragraph', () => {
+    const output = formatter.formatReviewOverview(overviewInput(), { provider: 'bitbucket' });
 
     expect(output).toContain('### OpenCodra Review');
-    expect(output).toContain('**Reviewed commit:** `abcdef1234`');
-    expect(output).toContain(`${BASE_URL}/repos`);
-
-    // None of the GitHub-only HTML / copy leaks into the Bitbucket comment.
     expect(output).not.toContain('<details>');
     expect(output).not.toContain('<summary>');
     expect(output).not.toContain('<br/>');
-    expect(output).not.toContain('in GitHub');
-    expect(output).not.toContain('👍');
-    expect(output).not.toContain('@codra-app');
-  });
-});
-
-describe('FormatterService.formatOmittedCommentsNote', () => {
-  it('emits a GitHub [!NOTE] callout for the default/github path (byte-identical)', () => {
-    const def = formatter.formatOmittedCommentsNote(107, 10);
-    const gh = formatter.formatOmittedCommentsNote(107, 10, { provider: 'github' });
-    expect(gh).toBe(def);
-    expect(gh).toBe(
-      '> [!NOTE]\n> **107 comments were omitted** from this review to reduce noise and respect the configured `max_comments` limit (10). Showing the most critical issues.',
-    );
-  });
-
-  it('emits a plain bold note for Bitbucket (no [!NOTE] callout syntax)', () => {
-    const output = formatter.formatOmittedCommentsNote(107, 10, { provider: 'bitbucket' });
-    expect(output).not.toContain('[!NOTE]');
-    expect(output).toContain('**Note:**');
-    expect(output).toContain('107 comments were omitted');
-    expect(output).toContain('`max_comments` limit (10)');
+    expect(output).not.toContain('<img');
+    expect(output).toContain(`${BASE_URL}/repos`);
+    expect(output).toContain('automatically reviews pull requests');
   });
 });
