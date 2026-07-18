@@ -84,10 +84,37 @@ function getNumber(value: unknown, key: string) {
   return typeof child === 'number' ? child : null;
 }
 
+// Workers AI surfaces quota/authorization failures as an error object carrying a numeric `code`
+// (e.g. 4006 = "out of daily free allocation"). Prefer that structured code over brittle message
+// substrings; the substring paths below are kept only as a documented last-resort fallback for
+// runtimes/paths where the error was stringified and lost its numeric code.
+function getStructuredErrorCode(error: unknown): number | null {
+  if (!isRecord(error)) return null;
+  const code = error.code;
+  if (typeof code === 'number') return code;
+  if (typeof code === 'string' && /^\d+$/.test(code.trim())) return Number(code.trim());
+  return null;
+}
+
+// Workers AI "out of daily free allocation" quota error code.
+const CLOUDFLARE_QUOTA_EXCEEDED_CODE = 4006;
+
 function isLocalWorkersAiBindingError(error: unknown) {
+  // Structured-first: if the runtime ever attaches a code/status for the local-binding case,
+  // this is where it would be checked. Wrangler's local Workers-AI shim currently throws a plain
+  // Error with no numeric code/status for "binding AI ... run remotely", so we fall back to the
+  // message substrings below as the documented last resort.
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
   return normalized.includes('binding ai') && normalized.includes('run remotely');
+}
+
+// Persistent (non-retryable) quota exhaustion for this account/day. Prefer the structured Workers
+// AI error code; fall back to message substrings only when no structured code is present.
+function isCloudflareQuotaExhaustedError(error: unknown, errorMsg: string) {
+  const code = getStructuredErrorCode(error);
+  if (code !== null) return code === CLOUDFLARE_QUOTA_EXCEEDED_CODE;
+  return errorMsg.includes('4006') || errorMsg.includes('daily free allocation');
 }
 
 function failUnparseable(model: string, reason: string): never {
@@ -360,7 +387,7 @@ export async function reviewWithCloudflare(
       logger.error(`Cloudflare request failed (attempt ${attempt}/${maxRetries})`, { error: errorMsg });
 
       // If we've used up our neuron quota, don't retry - it's a persistent error for this account/day
-      if (errorMsg.includes('4006') || errorMsg.includes('daily free allocation')) {
+      if (isCloudflareQuotaExhaustedError(error, errorMsg)) {
         throw error;
       }
 

@@ -1,5 +1,19 @@
 import type { ParsedReviewComment } from '@shared/schema';
 
+// Defense-in-depth HTML escaper for the plain-text comment `title` before it is interpolated into
+// a `<strong>...</strong>` tag. The title is plain text per schema (not model-authored Markdown),
+// so escaping `<`/`&`/etc. cannot break intended formatting. This is NOT applied to `body`: the
+// body is model-authored Markdown meant to render, and every sink already sanitizes it (VCS
+// platforms + the dashboard's rehypeSanitize), so escaping it would corrupt intended formatting.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Provider discriminator consumed by `severityIcon` and forwarded by `formatInlineComment`. The
 // formatter-level branch keeps the Bitbucket-specific emoji rendering isolated from the GitHub
 // path so reviewers can see at a glance that the GitHub <img> output is byte-identical (D-13).
@@ -64,7 +78,9 @@ export class FormatterService {
       body = body.slice(firstLine.length).replace(/^[\n\r]+/, '');
     }
 
-    return `${this.severityIcon(comment.severity, options)} <strong>${comment.title}</strong>\n\n${body}`;
+    // Escape the title only (defense-in-depth) — body is intentionally left as-is (sanitized
+    // Markdown at every sink; escaping it would break rendering).
+    return `${this.severityIcon(comment.severity, options)} <strong>${escapeHtml(comment.title)}</strong>\n\n${body}`;
   }
 
   summarizeVerdict(comments: ParsedReviewComment[], hasFailures: boolean) {

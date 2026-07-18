@@ -40,6 +40,11 @@ export function AddBitbucketRepoPage() {
         webhookSecret: webhookSecret.trim(),
         tokenExpiresAt: tokenExpiresAt || null,
       });
+      // Drop the credential material from component state as soon as it's been
+      // persisted — no reason to keep the plaintext access token / webhook
+      // secret resident in memory for the remainder of the page lifetime.
+      setAccessToken('');
+      setWebhookSecret('');
       toast.success('Bitbucket repository added', {
         description: 'OpenCodra will review pull requests on this repo as soon as webhooks arrive.',
       });

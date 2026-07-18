@@ -16,17 +16,19 @@ import { MemoryKV } from './helpers';
 import { createAuthBitbucketRouter } from '@server/routes/auth-bitbucket';
 
 // Hoisted vi.mock (not a post-import monkey-patch -- ESM named imports are read-only live
-// bindings) so we can assert createSession was invoked with the discriminated-union Bitbucket
-// variant (D-26) while still exercising the real KV-backed session write. Mirrors the
-// vi.hoisted + vi.mock pattern already used by test/bitbucket-webhook.spec.ts for ingestSpy.
-const { createSessionSpy } = vi.hoisted(() => ({ createSessionSpy: vi.fn() }));
+// bindings) so we can assert the session was established with the discriminated-union Bitbucket
+// variant (D-26) while still exercising the real KV-backed session write. The callback now calls
+// `rotateSession` (safe login rotation), which internally calls the module-local `createSession`
+// binding -- so wrapping the exported `createSession` would never fire. Spy on `rotateSession`
+// instead. Mirrors the vi.hoisted + vi.mock pattern used by test/bitbucket-webhook.spec.ts.
+const { rotateSessionSpy } = vi.hoisted(() => ({ rotateSessionSpy: vi.fn() }));
 vi.mock('@server/core/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@server/core/sessions')>();
   return {
     ...actual,
-    createSession: async (...args: Parameters<typeof actual.createSession>) => {
-      createSessionSpy(...args);
-      return actual.createSession(...args);
+    rotateSession: async (...args: Parameters<typeof actual.rotateSession>) => {
+      rotateSessionSpy(...args);
+      return actual.rotateSession(...args);
     },
   };
 });
@@ -43,6 +45,12 @@ function buildTestEnv(overrides: Record<string, unknown> = {}) {
     BITBUCKET_CLIENT_ID: 'test-bitbucket-client-id',
     BITBUCKET_CLIENT_SECRET: 'test-bitbucket-client-secret',
     BITBUCKET_AUTH_CALLBACK_URL: 'http://localhost:8787/auth/bitbucket/callback',
+    // The `/auth/bitbucket` authorize route now calls assertTrustedCallbackUrl(callbackUrl,
+    // APP_URL, ENVIRONMENT); both URLs must be valid absolute URLs or it throws and redirects to
+    // /login?error=oauth_failed. Non-production skips the origin/https match, so any localhost
+    // APP_URL + non-'production' ENVIRONMENT keeps the authorize flow green.
+    APP_URL: 'http://localhost:8787',
+    ENVIRONMENT: 'development',
     DASHBOARD_ALLOWED_USERS: '{"bitbucket":["557058:on-list"]}',
     ...overrides,
   } as any;
@@ -91,7 +99,7 @@ function stubBitbucketOAuthFetch(options: {
 describe('routes/auth-bitbucket — D-33 / D-34 / D-35 callback allow-list flow', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    createSessionSpy.mockClear();
+    rotateSessionSpy.mockClear();
   });
 
   it('GET /auth/bitbucket redirects to the authorize URL with scope=account only (D-34)', async () => {
@@ -142,11 +150,11 @@ describe('routes/auth-bitbucket — D-33 / D-34 / D-35 callback allow-list flow'
       profileBody: bitbucketProfileFixture({ account_id: '557058:not-on-list', username: 'alice-not-on-list' }),
     });
 
-    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, {}, env);
+    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, { headers: { cookie: `codra_oauth_state=${state}` } }, env);
 
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/login?error=bitbucket_not_allowed');
-    expect(createSessionSpy).not.toHaveBeenCalled();
+    expect(rotateSessionSpy).not.toHaveBeenCalled();
   });
 
   it('allows an account_id on the allow-list, creates a session, and redirects to /dashboard (D-26)', async () => {
@@ -155,12 +163,12 @@ describe('routes/auth-bitbucket — D-33 / D-34 / D-35 callback allow-list flow'
     const state = await createOAuthState(env);
     stubBitbucketOAuthFetch({ profileBody: bitbucketProfileFixture({ account_id: '557058:on-list' }) });
 
-    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, {}, env);
+    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, { headers: { cookie: `codra_oauth_state=${state}` } }, env);
 
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/dashboard');
-    expect(createSessionSpy).toHaveBeenCalledTimes(1);
-    const [, sessionArg] = createSessionSpy.mock.calls[0];
+    expect(rotateSessionSpy).toHaveBeenCalledTimes(1);
+    const [, sessionArg] = rotateSessionSpy.mock.calls[0];
     expect(sessionArg).toMatchObject({
       provider: 'bitbucket',
       accountId: '557058:on-list',
@@ -185,7 +193,7 @@ describe('routes/auth-bitbucket — D-33 / D-34 / D-35 callback allow-list flow'
       },
     });
 
-    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, {}, env);
+    const res = await app.request(`/auth/bitbucket/callback?code=test-code&state=${state}`, { headers: { cookie: `codra_oauth_state=${state}` } }, env);
 
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/login?error=invalid_grant');

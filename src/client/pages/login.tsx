@@ -46,6 +46,10 @@ export function LoginPage() {
       if (!cancelled && user) {
         navigate('/dashboard', { replace: true });
       }
+    }).catch(() => {
+      // Probe is best-effort: a rejected session check (network blip, 401)
+      // simply leaves the visitor on the sign-in page. Swallow it so it never
+      // surfaces as an unhandled promise rejection.
     });
     return () => {
       cancelled = true;

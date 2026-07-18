@@ -60,7 +60,8 @@ async function getAuthCookie(app: ReturnType<typeof createApp>, env: ReturnType<
   const authLocation = authStart.headers.get('location');
   const state = authLocation ? new URL(authLocation).searchParams.get('state') : null;
 
-  const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, {}, env);
+  const stateCookie = (authStart.headers.get('set-cookie') || '').match(/codra_oauth_state=[^;]+/)?.[0] ?? '';
+  const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, { headers: { cookie: stateCookie } }, env);
   const cookieHeader = callback.headers.get('set-cookie') || '';
   const match = cookieHeader.match(/codra_session=([^;]+)/);
   return match ? match[1] : '';
@@ -216,7 +217,7 @@ dbDescribe('POST /api/repos/bitbucket — D-32 transactional add-repo endpoint',
       });
     });
 
-    it('persists an encrypted vcs_credentials row (v1: ciphertext, not plaintext)', async () => {
+    it('persists an encrypted vcs_credentials row (v2: ciphertext, not plaintext)', async () => {
       const rows = await queryRows<{
         vcs_provider: string;
         encrypted_access_token: string | null;
@@ -228,8 +229,10 @@ dbDescribe('POST /api/repos/bitbucket — D-32 transactional add-repo endpoint',
       );
       expect(rows).toHaveLength(1);
       const [row] = rows;
-      expect(row.encrypted_access_token).toMatch(/^v1:/);
-      expect(row.encrypted_webhook_secret).toMatch(/^v1:/);
+      // New writes use the PBKDF2 v2 envelope (`v2:salt:iv:ciphertext`); v1 rows remain
+      // decrypt-only for backward compatibility but are never produced on insert.
+      expect(row.encrypted_access_token).toMatch(/^v2:/);
+      expect(row.encrypted_webhook_secret).toMatch(/^v2:/);
       expect(row.encrypted_access_token).not.toBe('zzk');
       expect(row.encrypted_webhook_secret).not.toBe('sec');
     });
@@ -238,7 +241,7 @@ dbDescribe('POST /api/repos/bitbucket — D-32 transactional add-repo endpoint',
       const serialized = JSON.stringify(responseJson);
       expect(serialized).not.toContain('zzk');
       expect(serialized).not.toContain('sec');
-      expect(serialized).not.toContain('v1:');
+      expect(serialized).not.toContain('v2:');
     });
   });
 

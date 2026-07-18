@@ -127,7 +127,7 @@ export function createTestEnv(overrides: Partial<AppBindings> = {}): AppBindings
     BITBUCKET_CLIENT_SECRET: requiredEnv('BITBUCKET_CLIENT_SECRET'),
     BITBUCKET_AUTH_CALLBACK_URL: requiredEnv('BITBUCKET_AUTH_CALLBACK_URL'),
     BOT_USERNAME: requiredEnv('BOT_USERNAME'),
-    get ENVIRONMENT() { return unusedEnv('ENVIRONMENT'); },
+    ENVIRONMENT: 'test',
     get CF_API_TOKEN() { return unusedEnv('CF_API_TOKEN'); },
     get CF_ACCOUNT_ID() { return unusedEnv('CF_ACCOUNT_ID'); },
     ...overrides,

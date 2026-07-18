@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '@server/env';
 import { jsonError } from '@server/core/http';
+import { logger } from '@server/core/logger';
 import { encryptSecret } from '@server/core/crypto';
 import {
   deleteVcsCredential,
@@ -69,7 +70,8 @@ export function createVcsCredentialsRouter() {
       );
     } catch (error) {
       if (isEncryptionConfigError(error)) {
-        return jsonError(error instanceof Error ? error.message : 'Encryption is not configured.', 400);
+        logger.error('VCS credential store: encryption not configured', error);
+        return jsonError('Encryption is not configured.', 400);
       }
       throw error;
     }

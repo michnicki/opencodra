@@ -3,7 +3,6 @@ import pkg from '../../../package.json';
 import { toast } from 'sonner';
 import { api, type ProviderPayload } from '@client/lib/api';
 import { PageHeader } from '@client/components/layout/page-header';
-import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
 import { Skeleton } from '@client/components/shared/skeleton';
 import { Input } from '@client/components/ui/input';
@@ -14,7 +13,6 @@ import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
 import {
   Save,
   ShieldAlert,
-  Layers,
   RefreshCw,
   Plus,
   Trash2,
@@ -125,10 +123,6 @@ function providerToDraft(provider: LlmProvider): ProviderDraft {
   return { ...provider, apiKey: '' };
 }
 
-function formatLabel(format: LlmApiFormat) {
-  return API_FORMAT_OPTIONS.find(option => option.value === format)?.label ?? format;
-}
-
 function domId(prefix: string, value: string) {
   return `${prefix}-${value.replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
 }
@@ -143,11 +137,6 @@ function providerIsReady(provider: Pick<LlmProvider, 'enabled' | 'hasApiKey' | '
 
 function providerHasCredential(provider: Pick<ProviderDraft, 'hasApiKey' | 'apiFormat' | 'apiKey'>) {
   return provider.apiFormat === 'cloudflare-workers-ai' || provider.hasApiKey || provider.apiKey.trim().length > 0;
-}
-
-function providerStatusLabel(provider: Pick<LlmProvider, 'enabled' | 'hasApiKey' | 'apiFormat'>) {
-  if (!provider.enabled) return 'Off';
-  return providerIsReady(provider) ? 'Ready' : 'Needs key';
 }
 
 function providerDraftDirty(provider: ProviderDraft, saved?: LlmProvider) {
@@ -205,20 +194,11 @@ function FieldLabel({ htmlFor, id, children }: { htmlFor: string; id?: string; c
   );
 }
 
-/* ─── Stat pill ───────────────────────────────────────────────────────────── */
-function StatPill({ label }: { label: string }) {
-  return (
-    <span className="rounded-full border border-border bg-muted/30 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground">
-      {label}
-    </span>
-  );
-}
-
 export function SettingsPage() {
   const [providers, setProviders] = useState<ProviderDraft[]>([]);
   const [savedProviders, setSavedProviders] = useState<LlmProvider[]>([]);
   const [configs, setConfigs] = useState<ModelConfig[]>([]);
-  const [savedConfigs, setSavedConfigs] = useState<ModelConfig[]>([]);
+  const [, setSavedConfigs] = useState<ModelConfig[]>([]);
   const [globalConfig, setGlobalConfig] = useState<ModelRouteConfig | null>(null);
   const [savedGlobalConfig, setSavedGlobalConfig] = useState<ModelRouteConfig | null>(null);
   const [reviewSettings, setReviewSettings] = useState<ReviewSettings | null>(null);
@@ -504,7 +484,10 @@ export function SettingsPage() {
   const clearProviderKey = async (provider: ProviderDraft) => {
     // A provider can't stay enabled without a key, so drop it to disabled while
     // clearing (the server rejects an enabled provider with no credential).
-    await persistProvider({ ...provider, apiKey: '', enabled: false }, { clearApiKey: true });
+    const saved = await persistProvider({ ...provider, apiKey: '', enabled: false }, { clearApiKey: true });
+    // Refresh the model catalog so models served by the now-keyless provider
+    // stop appearing in route pickers (mirrors saveProvider's refresh on enable).
+    if (saved) void refreshModelCatalog({ quiet: true });
   };
 
   const createProvider = async () => {
@@ -779,7 +762,7 @@ export function SettingsPage() {
         {/* Provider list */}
         {loading ? (
           <div className="divide-y divide-border/40">
-            {[148, 148, 148].map((h, i) => (
+            {[148, 148, 148].map((_, i) => (
               <div key={i} className="flex items-center gap-4 px-4 py-4 sm:px-5">
                 <div className="flex-1 space-y-2">
                   <Skeleton height={13} width="40%" />

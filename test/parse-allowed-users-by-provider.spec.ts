@@ -9,7 +9,7 @@ import { parseAllowedUsersByProvider } from '@server/core/oauth';
 import { logger } from '@server/core/logger';
 
 describe('parseAllowedUsersByProvider — D-27/D-28 + Pitfall 1', () => {
-  // Restores the logger.warn spy from case (6) so it never leaks into later cases
+  // Restores the logger.error spy from case (6) so it never leaks into later cases
   // (06-REVIEWS.md LOW finding).
   afterEach(() => {
     vi.restoreAllMocks();
@@ -54,17 +54,18 @@ describe('parseAllowedUsersByProvider — D-27/D-28 + Pitfall 1', () => {
     expect((caught as Error).message).toContain('JSON must parse to an object');
   });
 
-  it('accepts the legacy comma-separated GitHub-only format and warns once (D-27 migration)', () => {
-    const warnSpy = vi.spyOn(logger, 'warn');
+  it('accepts the legacy comma-separated GitHub-only format and logs an error once (D-27 migration)', () => {
+    // Escalated from warn to error in src: the legacy CSV format silently DISABLES all Bitbucket
+    // allowlisting, so the diagnostic is now logged at error level to make a misconfigured
+    // deployment loud. logger.error's signature is `error(message: string, error?: unknown)`.
+    const errorSpy = vi.spyOn(logger, 'error');
 
     const result = parseAllowedUsersByProvider('devarshishimpi');
 
     expect(result.github.has('devarshishimpi')).toBe(true);
     expect(result.bitbucket.size).toBe(0);
 
-    // logger.warn's real signature is `warn(message: string, data?: any)` (src/server/core/logger.ts:92)
-    // — NOT an object-shaped first argument (06-REVIEWS.md MEDIUM finding, both reviewers).
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('legacy comma-separated format'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('legacy comma-separated format'));
   });
 
   it('returns empty sets for both providers on an empty string, without throwing', () => {

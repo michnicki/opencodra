@@ -24,6 +24,22 @@ export function createApp() {
   const app = new Hono<AppEnv>();
 
   app.use('*', observability);
+
+  // Security response headers applied to every response (safe, non-breaking set). We deliberately
+  // do NOT set a Content-Security-Policy here: a strict CSP would break the Vite-built SPA and the
+  // Google Fonts it loads. These three headers are safe for both JSON API and HTML/SPA responses.
+  app.use('*', async (c, next) => {
+    await next();
+    c.res.headers.set('X-Content-Type-Options', 'nosniff');
+    c.res.headers.set('X-Frame-Options', 'DENY');
+    c.res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  });
+
+  // Unauthenticated infra health probe. Registered before any session-gated route so that probes
+  // get a lightweight JSON 200 instead of a 302 redirect to /login (requireSession redirects HTML
+  // requests). There is no client-side /health route, so this endpoint is API-only.
+  app.get('/health', (c) => c.json({ status: 'ok' }));
+
   app.use('/auth/logout', requireSession);
   app.use('/auth/logout', requireCsrfHeader);
 
@@ -51,7 +67,6 @@ export function createApp() {
   app.get('/repos', requireSession, serveIndex);
   app.get('/repos/*', requireSession, serveIndex);
   app.get('/stats', requireSession, serveIndex);
-  app.get('/health', requireSession, serveIndex);
   app.get('/settings', requireSession, serveIndex);
   app.get('/credentials', requireSession, serveIndex);
 

@@ -1,5 +1,6 @@
 import type { LlmApiFormat } from '@shared/schema';
 import { withTimeout } from '@server/core/timeout';
+import { isValidPublicUrl } from '@server/core/ssrf';
 
 const MODEL_LIST_TIMEOUT_MS = 8_000;
 const ERROR_BODY_LIMIT = 500;
@@ -127,6 +128,12 @@ export async function listProviderModels(input: {
 }) {
   const baseUrl = (input.baseUrl || defaultBaseUrl(input.apiFormat)).replace(/\/+$/, '');
 
+  // Guard the user-configurable discovery base URL against SSRF to private/reserved
+  // targets. The fixed-host Cloudflare path (listCloudflareModels) is not user-controlled.
+  if (input.baseUrl && !isValidPublicUrl(baseUrl)) {
+    throw new Error('Invalid provider base URL.');
+  }
+
   if (input.apiFormat === 'openai') {
     if (!input.apiKey) throw new Error('OpenAI API key is required to list models.');
     const apiKey = input.apiKey;
@@ -226,10 +233,21 @@ function normalizeCloudflareModelId(value: unknown) {
   return null;
 }
 
+// Scrub common credential patterns out of a provider error body before it is echoed into a thrown
+// message. Some providers reflect the offending request (including its Authorization/x-api-key
+// header) back in the error payload; without this, that would surface to callers/logs.
+function scrubProviderCredentials(text: string): string {
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, '[REDACTED]')
+    .replace(/(x-api-key["'\s:=]+)[A-Za-z0-9._-]+/gi, '$1[REDACTED]')
+    .replace(/sk-[A-Za-z0-9._-]{8,}/g, '[REDACTED]');
+}
+
 async function limitedErrorBody(response: Response) {
   const body = await response.text().catch(() => '');
   if (!body) return response.statusText || 'request failed';
-  return body.length > ERROR_BODY_LIMIT ? `${body.slice(0, ERROR_BODY_LIMIT)}...` : body;
+  const scrubbed = scrubProviderCredentials(body);
+  return scrubbed.length > ERROR_BODY_LIMIT ? `${scrubbed.slice(0, ERROR_BODY_LIMIT)}...` : scrubbed;
 }
 
 function defaultBaseUrl(apiFormat: LlmApiFormat) {

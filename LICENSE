@@ -186,6 +186,7 @@ recipients a copy of this License along with the Program.
 You may charge any price or no price for each copy that you convey,
 and you may offer support or warranty protection for a fee.
 
+### 5. Conveying Modified Source Versions
 You may convey a work based on the Program, or the modifications to
 produce it from the Program, in the form of source code under the
 terms of section 4, provided that you also meet all of these conditions:
@@ -431,6 +432,7 @@ rights granted under this License, and you may not initiate litigation
 any patent claim is infringed by making, using, selling, offering for
 sale, or importing the Program or any portion of it.
 
+### 11. Patents
 A “contributor” is a copyright holder who authorizes use under this
 License of the Program or a work on which the Program is based.  The
 work thus licensed is called the contributor's “contributor version”.

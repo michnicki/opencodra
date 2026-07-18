@@ -813,6 +813,39 @@ export async function cancelJob(env: Pick<AppBindings, 'HYPERDRIVE' | 'APP_KV'>,
 }
 
 /**
+ * TOCTOU guard for the /retry and /rerun replacement flow. Atomically transitions an *active*
+ * (queued/running) source out of its active state -- into the same 'superseded' end-state that
+ * supersedeOlderJobs applies once the replacement is inserted -- so two concurrent retry/rerun
+ * requests for the same source cannot both spawn a replacement job. The conditional UPDATE takes a
+ * row lock: exactly one caller observes RETURNING rows (returns true), the loser sees the row is no
+ * longer queued/running and returns false, so the handler can respond 409 instead of double-inserting.
+ *
+ * Only active sources are claimed here. Retrying an already-terminal job (done/failed/cancelled)
+ * stays allowed and unguarded: supersedeOlderJobs collapses concurrent replacements of a terminal
+ * source to the newest job, so no exclusive claim is required for that path. The columns written
+ * mirror supersedeOlderJobs exactly (status/finished_at/lease/error_msg, steps untouched) so a
+ * single-caller retry of a queued source reaches byte-identical row state whether the source is
+ * superseded here first or by supersedeOlderJobs after the insert.
+ */
+export async function claimActiveJobForReplacement(env: Pick<AppBindings, 'HYPERDRIVE'>, jobId: string): Promise<boolean> {
+  const rows = await queryRows<{ id: string }>(
+    env,
+    `
+      UPDATE jobs
+      SET status = 'superseded',
+          finished_at = now(),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          error_msg = COALESCE(error_msg, 'Superseded by a newer commit or job.')
+      WHERE id = $1 AND status IN ('queued', 'running')
+      RETURNING id
+    `,
+    [jobId],
+  );
+  return rows.length > 0;
+}
+
+/**
  * Permanently delete a job. file_reviews and review_comments cascade automatically (ON DELETE
  * CASCADE); child retry jobs have their retry_of_job_id nulled (ON DELETE SET NULL). Returns true
  * if a row was deleted.

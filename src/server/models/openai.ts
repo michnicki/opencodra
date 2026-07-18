@@ -1,5 +1,6 @@
 import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
+import { isValidPublicUrl } from '@server/core/ssrf';
 import { ProviderRequestError, providerErrorMessage, type ModelResponse } from './types';
 
 const OPENAI_TIMEOUT_MS = 80_000;
@@ -29,37 +30,6 @@ function extractOpenAiText(data: OpenAIResponse) {
   const outputText = data?.output_text;
   if (typeof outputText === 'string') return outputText.trim();
   return '';
-}
-
-function isPrivateIP(hostname: string) {
-  const privateRanges = [
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
-    /^192\.168\./,
-    /^169\.254\./,
-    /^localhost$/,
-    /^::1$/,
-  ];
-  return privateRanges.some((regex) => regex.test(hostname));
-}
-
-function isValidPublicUrl(urlString: string) {
-  try {
-    const url = new URL(urlString);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
-    
-    const hostname = url.hostname;
-    if (hostname === 'metadata.google.internal' || hostname === '100.100.100.200') {
-      return false;
-    }
-    if (isPrivateIP(hostname)) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function reviewWithOpenAI(

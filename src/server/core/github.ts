@@ -25,15 +25,20 @@ async function withRetry<T>(
       return await fn();
     } catch (error: any) {
       attempt++;
-      const isSecondaryRateLimit = error instanceof GitHubError && 
-        error.status === 403 && 
+      const isSecondaryRateLimit = error instanceof GitHubError &&
+        error.status === 403 &&
         error.body?.toLowerCase().includes('secondary rate limit');
 
+      // `fn` can reject with a non-Error (string, null, number). Reading `error.name` /
+      // `error.message` directly would then throw a TypeError from inside the retry predicate,
+      // masking the real rejection. Normalize both fields first (matches core/bitbucket.ts).
+      const errorName = error instanceof Error ? error.name : '';
+      const errorMessage = error instanceof Error ? error.message : String(error);
       const isRetryable =
         isSecondaryRateLimit ||
         (error instanceof GitHubError && (error.status === 429 || error.status >= 500)) ||
-        error.name === 'TimeoutError' ||
-        error.message.includes('timeout');
+        errorName === 'TimeoutError' ||
+        errorMessage.includes('timeout');
 
       if (!isRetryable || attempt > maxRetries) {
         throw error;
@@ -42,7 +47,7 @@ async function withRetry<T>(
       const delay = isSecondaryRateLimit ? Math.pow(2, attempt) * 30000 : Math.pow(2, attempt) * 1000;
       logger.warn(`Retrying GitHub operation ${operation} (attempt ${attempt}/${maxRetries}) in ${delay}ms`, {
         status: error instanceof GitHubError ? error.status : undefined,
-        error: error.message,
+        error: errorMessage,
       });
       await new Promise((resolve) => setTimeout(resolve, delay));
     }

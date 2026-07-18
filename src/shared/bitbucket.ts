@@ -12,41 +12,41 @@ import {
 // injects X-Event-Key after capturing and parsing the raw body. REV-M-2 keeps comments
 // Bitbucket-native, while REV-M-4 imports every emitted API enum from the server constants module.
 // Any upstream contract change requires updating this versioned seam.
-const workspaceSchema = z.object({
+const workspaceSchema = z.looseObject({
   slug: z.string().min(1),
-}).passthrough();
+});
 
-const repositorySchema = z.object({
+const repositorySchema = z.looseObject({
   full_name: z.string().min(1),
   workspace: workspaceSchema,
   uuid: z.string().min(1),
-}).passthrough();
+});
 
-const branchSchema = z.object({
+const branchSchema = z.looseObject({
   name: z.string().min(1),
-}).passthrough();
+});
 
-const commitSchema = z.object({
+const commitSchema = z.looseObject({
   hash: z.string().min(1),
-}).passthrough();
+});
 
-const pullRequestSideSchema = z.object({
+const pullRequestSideSchema = z.looseObject({
   branch: branchSchema,
   commit: commitSchema,
-}).passthrough();
+});
 
-const pullRequestSchema = z.object({
+const pullRequestSchema = z.looseObject({
   id: z.number().int().positive(),
   source: pullRequestSideSchema,
   destination: pullRequestSideSchema,
   title: z.string(),
   state: z.string().min(1),
-}).passthrough();
+});
 
-export const bitbucketPullRequestWebhookBaseSchema = z.object({
+export const bitbucketPullRequestWebhookBaseSchema = z.looseObject({
   repository: repositorySchema,
   pullrequest: pullRequestSchema,
-}).passthrough();
+});
 
 export const pullRequestCreatedPayloadSchema = bitbucketPullRequestWebhookBaseSchema.extend({
   eventName: z.literal('pullrequest:created'),
@@ -124,17 +124,22 @@ export type CommitBuildStatus = z.infer<typeof commitBuildStatusSchema>;
 // Phase 6 (D-33/D-34): inbound Bitbucket OAuth /2.0/user profile response. `.passthrough()`
 // preserves documented provider fields Codra does not consume, mirroring the webhook-inbound
 // convention above.
-export const bitbucketOAuthProfileSchema = z.object({
+export const bitbucketOAuthProfileSchema = z.looseObject({
   account_id: z.string().min(1),
   uuid: z.string().min(1),
   username: z.string().min(1),
   display_name: z.string().nullable(),
-  avatar: z.string().nullable().optional(),
-  links: z.object({
-    avatar: z.object({ href: z.string().url() }).optional(),
-  }).passthrough().optional(),
+  // URL-validate the top-level `avatar` fallback the same way `links.avatar.href` is validated
+  // below: it flows into `avatarUrl` (bitbucket-oauth.ts) and is rendered as an image src, so a
+  // non-URL value (e.g. `javascript:`/`data:`) must not pass through. `.catch(null)` degrades a
+  // malformed value to null instead of failing the whole OAuth profile parse (which would block
+  // login).
+  avatar: z.url().nullable().optional().catch(null),
+  links: z.looseObject({
+    avatar: z.object({ href: z.url() }).optional(),
+  }).optional(),
   email: z.string().nullable().optional(),
-}).passthrough();
+});
 
 // Phase 6 (D-32): outbound add-repo form input. `.strict()` rejects unknown keys so malformed
 // API writes fail at the boundary, mirroring vcsCredentialStoreSchema (src/shared/schema.ts).

@@ -26,6 +26,24 @@ function repositoryParts(repository: RepositoryLocation) {
   };
 }
 
+/**
+ * Defense-in-depth for anything bound straight into an <a href>. The VCS URLs
+ * here are built from a hardcoded https base plus encodeURIComponent'd parts, so
+ * a dangerous scheme should be impossible — but if a malformed repository shape
+ * or future refactor ever produced a `javascript:`, `data:`, or otherwise
+ * non-http(s) URL, we drop the link entirely rather than render a hostile
+ * anchor. Returns the original string only when it parses as http(s).
+ */
+function safeHttpUrl(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? url : undefined;
+}
+
 export function pullRequestUrl(repository: RepositoryLocation, prNumber: number) {
   const { provider, owner, repo } = repositoryParts(repository);
   return provider === 'bitbucket'
@@ -33,20 +51,24 @@ export function pullRequestUrl(repository: RepositoryLocation, prNumber: number)
     : `https://github.com/${owner}/${repo}/pull/${prNumber}`;
 }
 
-export function commitUrl(repository: RepositoryLocation, commitSha: string) {
+export function commitUrl(
+  repository: RepositoryLocation,
+  commitSha: string,
+): string | undefined {
   const { provider, owner, repo } = repositoryParts(repository);
   const encodedSha = encodeURIComponent(commitSha);
-  return provider === 'bitbucket'
+  const url = provider === 'bitbucket'
     ? `https://bitbucket.org/${owner}/${repo}/commits/${encodedSha}`
     : `https://github.com/${owner}/${repo}/commit/${encodedSha}`;
+  return safeHttpUrl(url);
 }
 
 export function reviewUrl(
   repository: RepositoryLocation,
   prNumber: number,
   reviewId: number | null | undefined,
-) {
+): string | null {
   const provider: VcsProvider = resolveVcsProvider(repository.repositoryVcsProvider);
   if (provider !== 'github' || !reviewId) return null;
-  return `${pullRequestUrl(repository, prNumber)}#pullrequestreview-${reviewId}`;
+  return safeHttpUrl(`${pullRequestUrl(repository, prNumber)}#pullrequestreview-${reviewId}`) ?? null;
 }

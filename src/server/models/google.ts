@@ -1,5 +1,6 @@
 import { logger } from '@server/core/logger';
 import { withTimeout } from '@server/core/timeout';
+import { isValidPublicUrl } from '@server/core/ssrf';
 import { ProviderRequestError, UnparseableModelResponseError, providerErrorMessage, type ModelResponse } from './types';
 
 /** Default max wall-clock time for a single Google AI Studio call when the caller doesn't
@@ -55,32 +56,6 @@ function isRetryableTransportError(error: unknown) {
   return error instanceof TypeError;
 }
 
-function isPrivateIP(hostname: string) {
-  const privateRanges = [
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
-    /^192\.168\./,
-    /^169\.254\./,
-    /^localhost$/,
-    /^::1$/,
-  ];
-  return privateRanges.some((regex) => regex.test(hostname));
-}
-
-function isValidPublicUrl(urlString: string) {
-  try {
-    const url = new URL(urlString);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
-    const hostname = url.hostname;
-    if (hostname === 'metadata.google.internal' || hostname === '100.100.100.200') return false;
-    if (isPrivateIP(hostname)) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function reviewWithGoogle(
   config: { apiKey: string; baseUrl?: string | null; providerName?: string; timeoutMs?: number },
   model: string,
@@ -96,7 +71,7 @@ export async function reviewWithGoogle(
 
   const startTime = Date.now();
   const baseUrl = (config.baseUrl || DEFAULT_GEMINI_BASE_URL).replace(/\/+$/, '');
-  const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
+  const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
   const maxRetries = GEMINI_MAX_RETRIES;
   let lastError: unknown;
   let delayBeforeAttemptMs = 0;
@@ -117,6 +92,7 @@ export async function reviewWithGoogle(
           signal,
           headers: {
             'content-type': 'application/json',
+            'x-goog-api-key': config.apiKey,
           },
           body: JSON.stringify({
             systemInstruction: {

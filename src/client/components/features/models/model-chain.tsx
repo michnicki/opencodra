@@ -336,7 +336,7 @@ export function ModelRouteEditor({
                       type="number"
                       min={1}
                       value={tier.max_lines}
-                      onChange={e => updateTier(index, { max_lines: Number(e.target.value) || 1 })}
+                      onChange={e => updateTier(index, { max_lines: Math.max(1, Math.floor(Number(e.target.value) || 1)) })}
                       className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none"
                     />
                     <span className="shrink-0 text-xs text-muted-foreground">lines</span>

@@ -50,7 +50,8 @@ async function getAuthCookie(app: ReturnType<typeof createApp>, env = createTest
   const authLocation = authStart.headers.get('location');
   const state = authLocation ? new URL(authLocation).searchParams.get('state') : null;
 
-  const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, {}, env);
+  const stateCookie = (authStart.headers.get('set-cookie') || '').match(/codra_oauth_state=[^;]+/)?.[0] ?? '';
+  const callback = await app.request(`/auth/github/callback?code=test-code&state=${state}`, { headers: { cookie: stateCookie } }, env);
   const cookieHeader = callback.headers.get('set-cookie') || '';
   const match = cookieHeader.match(/codra_session=([^;]+)/);
   return match ? match[1] : '';

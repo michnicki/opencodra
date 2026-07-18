@@ -123,6 +123,21 @@ describe('FormatterService.formatInlineComment', () => {
     expect(output).toContain('<strong>Null check missing</strong>');
     expect(output).toContain('This value can be undefined at runtime.');
   });
+
+  // Defense-in-depth: the plain-text title is HTML-escaped before interpolation into <strong>.
+  it('HTML-escapes special characters in the title only, leaving the body untouched', () => {
+    const output = formatter.formatInlineComment(
+      comment({
+        title: '<script>alert(1)</script> & "risky"',
+        body: 'Use `<div>` & keep **markdown** intact.',
+      }),
+    );
+    // Title is escaped inside <strong>...</strong>.
+    expect(output).toContain('<strong>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;risky&quot;</strong>');
+    expect(output).not.toContain('<script>alert(1)</script>');
+    // Body is left as-authored (Markdown that downstream sinks sanitize/render).
+    expect(output).toContain('Use `<div>` & keep **markdown** intact.');
+  });
 });
 
 describe('FormatterService.summarizeVerdict', () => {

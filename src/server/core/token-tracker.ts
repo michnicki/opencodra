@@ -94,7 +94,16 @@ export class TokenTracker {
    */
   merge(other: TokenTracker) {
     for (const usage of other.getBreakdown()) {
-      this.record(usage.model, usage.input, usage.output);
+      // `record()` would increment `calls` by 1 per model regardless of how many calls the other
+      // tracker actually accumulated, undercounting the merged call total. Combine the aggregated
+      // per-model breakdown directly so tokens AND call counts sum correctly.
+      const existing = this.usage.get(usage.model) ?? { model: usage.model, input: 0, output: 0, calls: 0 };
+      this.usage.set(usage.model, {
+        model: usage.model,
+        input: existing.input + usage.input,
+        output: existing.output + usage.output,
+        calls: existing.calls + usage.calls,
+      });
     }
   }
 

@@ -41,12 +41,16 @@ function pauseThemeTransitions(root: HTMLElement) {
   }, 180);
 }
 
-export function applyTheme(theme: Theme, options: { pauseTransitions?: boolean } = {}) {
+export function applyTheme(theme: Theme, options: { pauseTransitions?: boolean; persist?: boolean } = {}) {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
   if (options.pauseTransitions) pauseThemeTransitions(root);
   root.classList.toggle('dark', theme === 'dark');
   root.setAttribute('data-theme', theme);
+  // `persist: false` lets the system-preference listener sync the DOM without
+  // writing a stored preference — otherwise the first OS theme change would
+  // pin the user to that value and stop following the system afterwards.
+  if (options.persist === false) return;
   try {
     localStorage.setItem('codra-theme', theme);
   } catch {
@@ -79,7 +83,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const handler = () => {
       if (!getStoredTheme()) {
-        setThemeState(media.matches ? 'dark' : 'light');
+        const next: Theme = media.matches ? 'dark' : 'light';
+        setThemeState(next);
+        // Sync the DOM class / data-theme too — updating React state alone
+        // leaves <html> stale so the actual colours never change.
+        applyTheme(next, { persist: false });
       }
     };
     media.addEventListener('change', handler);

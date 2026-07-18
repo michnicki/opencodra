@@ -10,13 +10,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { TimeRangeSelect } from '@client/components/features/stats/time-range-select';
 import { PageHeaderActions } from '@client/components/shared/page-header-actions';
 import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Skeleton } from '@client/components/shared/skeleton';
 import { Alert } from '@client/components/ui/alert';
-import { Button } from '@client/components/ui/button';
 import { useIsDarkMode } from '@client/hooks/use-is-dark-mode';
 import { usePolling } from '@client/hooks/use-polling';
 import { api } from '@client/lib/api';
@@ -333,7 +331,7 @@ function MetricsGridSkeleton() {
 
 export function StatsPage() {
   const [stats, setStats] = useState<StatsPayload | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(30);
