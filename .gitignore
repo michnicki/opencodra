@@ -157,3 +157,6 @@ ds-bundle/
 .design-sync/learnings/
 .design-sync/node_modules
 .design-sync/opencodra-compiled.css
+
+# GSD planning artifacts — private to this fork, never committed to the public repo.
+.planning/
