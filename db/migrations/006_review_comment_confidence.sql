@@ -1,0 +1,14 @@
+-- Quick task 260718-fx1: per-finding review confidence.
+-- Adds review_comments.confidence, the model's per-finding confidence score (0..1) emitted by the
+-- hardened file-review prompt. It is written when a review is persisted, read back on job resume
+-- (getFileReviewsForJobs reconstruction), and consulted by the finalize confidence floor to drop
+-- speculative low-confidence findings.
+--
+-- The column is NULLABLE and NOT backfilled on purpose: pre-existing rows and any provider that
+-- omits a confidence score are represented as NULL and treated FAIL-OPEN (always kept) by the
+-- finalize gate. This guarantees zero regression to existing reviews — the 0.7 floor only starts
+-- suppressing findings once the model actually emits a per-finding confidence_score.
+--
+-- Additive and re-run safe: ADD COLUMN IF NOT EXISTS mirrors the file_reviews precedent in
+-- 002 (ADD COLUMN IF NOT EXISTS on file_reviews). No drop, rename, or backfill.
+ALTER TABLE review_comments ADD COLUMN IF NOT EXISTS confidence REAL;
