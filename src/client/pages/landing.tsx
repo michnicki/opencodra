@@ -124,15 +124,6 @@ export function LandingPage() {
               <ExternalLink size={11} />
               github.com/michnicki/opencodra
             </a>
-            <a
-              href="https://github.com/michnicki/opencodra"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 transition-colors hover:text-foreground"
-            >
-              <ExternalLink size={11} />
-              GitHub
-            </a>
           </div>
         </div>
 

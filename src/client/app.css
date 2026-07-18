@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
 
 @import "tailwindcss";
 
@@ -20,22 +20,22 @@
 :root {
   /* Surfaces - Pure & Crisp */
   /* Surfaces - High-Contrast */
-  --background:         oklch(96.3% 0.003 286.3); /* #f4f4f5 */
-  --foreground:         oklch(12%   0.02  115);
-  --card:               oklch(100%  0     0);     /* #ffffff */
-  --card-foreground:    oklch(12%   0.02  115);
-  --popover:            oklch(100%  0     0);
-  --popover-foreground: oklch(12%   0.02  115);
+  --background:         oklch(97.2% 0.004 106);
+  --foreground:         oklch(18%   0.018 105);
+  --card:               oklch(99.6% 0.002 106);
+  --card-foreground:    oklch(18%   0.018 105);
+  --popover:            oklch(99.6% 0.002 106);
+  --popover-foreground: oklch(18%   0.018 105);
 
   /* Signature lime - darkened in light mode for AA accessibility on white */
-  --primary:             oklch(64%   0.24  115);
-  --primary-foreground:  oklch(100%  0     0);   /* White text on the deeper green */
+  --primary:             oklch(61%   0.19  125);
+  --primary-foreground:  oklch(99%   0     0);
 
   /* Secondary / muted - Zinc */
-  --secondary:           oklch(96.3% 0.003 286.3);
+  --secondary:           oklch(94.5% 0.006 106);
   --secondary-foreground:oklch(27.4% 0.006 286.3); /* #27272a */
-  --muted:               oklch(96.3% 0.003 286.3);
-  --muted-foreground:    oklch(55.1% 0.011 286.3); /* #71717a */
+  --muted:               oklch(94.5% 0.006 106);
+  --muted-foreground:    oklch(50% 0.012 106);
 
   /* Accent - slightly darker zinc for visible hover on white popovers */
   --accent:              oklch(90.9% 0.004 286.3); /* #e4e4e7 */
@@ -46,8 +46,8 @@
   --destructive-foreground: oklch(100% 0 0);
 
   /* Border / input / ring */
-  --border:              oklch(90.9% 0.004 286.3);
-  --input:               oklch(90.9% 0.004 286.3);
+  --border:              oklch(88.5% 0.008 106);
+  --input:               oklch(88.5% 0.008 106);
   --ring:                oklch(72%   0.22  115);
 
   /* Radius */
@@ -70,9 +70,9 @@
   --info-border:    oklch(88%   0.12  250);
 
   /* Premium Shadows */
-  --shadow-sm: 0 1px 2px oklch(0% 0 0 / 0.02);
-  --shadow-md: 0 1px 4px oklch(0% 0 0 / 0.03), 0 1px 2px oklch(0% 0 0 / 0.02);
-  --shadow-lg: 0 4px 16px -4px oklch(0% 0 0 / 0.04), 0 1px 6px -2px oklch(0% 0 0 / 0.03);
+  --shadow-sm: 0 1px 2px oklch(20% 0.02 105 / 0.045), 0 6px 20px -16px oklch(20% 0.02 105 / 0.18);
+  --shadow-md: 0 1px 2px oklch(20% 0.02 105 / 0.05), 0 12px 30px -20px oklch(20% 0.02 105 / 0.2);
+  --shadow-lg: 0 2px 4px oklch(20% 0.02 105 / 0.05), 0 24px 60px -28px oklch(20% 0.02 105 / 0.24);
 
   /* Code Blocks (Zinc) */
   --code-bg: oklch(96.3% 0.003 286.3);
@@ -86,29 +86,29 @@
 .dark {
   /* Surfaces - Deep & Layered */
   /* Surfaces - Ultra-Dark */
-  --background:          #09090b;
-  --foreground:          oklch(98%  0.005 115);
-  --card:                #09090b;
+  --background:          oklch(13.8% 0.012 106);
+  --foreground:          oklch(94.5% 0.006 106);
+  --card:                oklch(17.2% 0.012 106);
   --card-foreground:     oklch(98%  0.005 115);
-  --popover:             #09090b;
+  --popover:             oklch(17.2% 0.012 106);
   --popover-foreground:  oklch(98%  0.005 115);
 
-  --primary:             oklch(94%  0.23  115); /* #E0FE56 */
-  --primary-foreground:  oklch(12%  0.04  115);
+  --primary:             oklch(86%  0.19  125);
+  --primary-foreground:  oklch(16%  0.03  125);
 
-  --secondary:           oklch(18%  0.018 115);
+  --secondary:           oklch(21.5% 0.012 106);
   --secondary-foreground:oklch(82%  0.012 115);
-  --muted:               oklch(18%  0.018 115);
-  --muted-foreground:    oklch(55%  0.015 115);
+  --muted:               oklch(21.5% 0.012 106);
+  --muted-foreground:    oklch(65% 0.012 106);
 
-  --accent:              oklch(18%  0.018 115);
+  --accent:              oklch(23%  0.014 106);
   --accent-foreground:   oklch(91%  0.010 115);
 
   --destructive:         oklch(60%  0.220 25);
   --destructive-foreground: oklch(10% 0.015 115);
 
-  --border:              oklch(22%  0.02  115); /* #1A1A1A */
-  --input:               oklch(22%  0.02  115);
+  --border:              oklch(27%  0.012 106);
+  --input:               oklch(27%  0.012 106);
   --ring:                oklch(94%  0.23  115);
 
   --success:        oklch(94%  0.23  115);
@@ -138,8 +138,8 @@
    Tailwind v4 theme tokens  (@theme inline = dynamic)
 ───────────────────────────────────────────────────── */
 @theme inline {
-  --font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --font-sans: 'Manrope', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'DM Mono', 'SFMono-Regular', ui-monospace, monospace;
 
   --color-background:            var(--background);
   --color-foreground:            var(--foreground);
@@ -1009,4 +1009,125 @@
 
 .dark .codra-toast-info {
   color: oklch(80%  0.12 250) !important;
+}
+
+/* ─────────────────────────────────────────────────────
+   Utility console refresh
+───────────────────────────────────────────────────── */
+.utility-shell {
+  isolation: isolate;
+  background-image:
+    linear-gradient(color-mix(in oklch, var(--border) 34%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklch, var(--border) 34%, transparent) 1px, transparent 1px);
+  background-position: -1px -1px;
+  background-size: 32px 32px;
+}
+
+.utility-shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 80% 0%, color-mix(in oklch, var(--primary) 8%, transparent), transparent 28rem),
+    linear-gradient(to bottom, var(--background) 0, transparent 12rem);
+}
+
+.utility-shell .dashboard-sidebar,
+.utility-shell .dashboard-sidebar :where(a, button, p, span, div, svg) {
+  color: var(--foreground) !important;
+}
+
+.utility-shell .dashboard-sidebar {
+  background-color: color-mix(in oklch, var(--card) 94%, transparent) !important;
+  backdrop-filter: blur(20px);
+  box-shadow: 0 1px 2px oklch(0% 0 0 / 0.04), 0 18px 50px -32px oklch(0% 0 0 / 0.32) !important;
+}
+
+.utility-shell .dashboard-sidebar-divider {
+  background: linear-gradient(90deg, transparent, var(--border) 18%, var(--border) 82%, transparent);
+}
+
+.utility-shell .dashboard-sidebar :where(button[aria-label='Expand sidebar'], button[aria-label='Collapse sidebar'], button[aria-label='Toggle theme'], button[aria-label='Close menu']) {
+  border: 1px solid var(--border) !important;
+  background: var(--background) !important;
+  color: var(--foreground) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.utility-shell .dashboard-sidebar .dashboard-sidebar-username {
+  color: var(--muted-foreground) !important;
+}
+
+.utility-shell .dashboard-sidebar-action[aria-current='page'] {
+  background: color-mix(in oklch, var(--primary) 12%, transparent) !important;
+}
+
+.utility-shell .dashboard-sidebar-action[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  inset: 5px 7px auto auto;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.app-shell-content {
+  --background: oklch(97.2% 0.004 106);
+  --card: oklch(99.6% 0.002 106);
+  --muted: oklch(94.5% 0.006 106);
+  --popover: oklch(99.6% 0.002 106);
+  --secondary: oklch(94.5% 0.006 106);
+  --border: oklch(88.5% 0.008 106);
+  --input: oklch(88.5% 0.008 106);
+}
+
+.dark .app-shell-content {
+  --background: oklch(13.8% 0.012 106);
+  --card: oklch(17.2% 0.012 106);
+  --muted: oklch(21.5% 0.012 106);
+  --popover: oklch(17.2% 0.012 106);
+  --secondary: oklch(21.5% 0.012 106);
+  --border: oklch(27% 0.012 106);
+  --input: oklch(27% 0.012 106);
+}
+
+.utility-topbar {
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+.utility-stat-card {
+  transition: border-color 180ms var(--ease-out-quart), transform 180ms var(--ease-out-quart), box-shadow 180ms var(--ease-out-quart);
+}
+
+.utility-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--primary);
+  opacity: 0;
+  transition: opacity 180ms var(--ease-out-quart);
+}
+
+.utility-stat-card:hover {
+  border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.utility-stat-card:hover::before {
+  opacity: 1;
+}
+
+.utility-pipeline-strip {
+  background-image: linear-gradient(110deg, color-mix(in oklch, var(--primary) 5%, transparent), transparent 42%);
+}
+
+@media (max-width: 1023px) {
+  .utility-shell {
+    background-size: 24px 24px;
+  }
 }

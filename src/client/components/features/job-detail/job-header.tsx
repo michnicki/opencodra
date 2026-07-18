@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@client/components/ui/button';
 import { ConfirmDialog } from '@client/components/ui/confirm-dialog';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
+import { pullRequestUrl } from '@client/lib/vcs';
 import type { JobDetail } from '@shared/schema';
 
 /* Stop icon: outlined circle with a solid square inside. Lucide's CircleStop strokes the inner
@@ -64,7 +66,10 @@ export function JobHeader({
         <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
           <Link to="/jobs" className="hover:text-foreground transition-colors">Jobs</Link>
           <ChevronRight size={12} className="opacity-40" />
-          <span className="text-foreground/60">{job.owner}/{job.repo}</span>
+          <span className="inline-flex min-w-0 items-center gap-1.5 text-foreground/60">
+            <VcsProviderMark provider={job.repositoryVcsProvider} size={12} />
+            <span className="truncate">{job.owner}/{job.repo}</span>
+          </span>
           <ChevronRight size={12} className="opacity-40" />
           <span
             className="font-mono text-[10px] font-medium lowercase tracking-normal text-muted-foreground/50 hover:text-muted-foreground transition-colors cursor-default"
@@ -75,7 +80,7 @@ export function JobHeader({
         </div>
         <h1 className="mt-2 text-2xl font-bold tracking-tight text-foreground">
           <a
-            href={`https://github.com/${job.owner}/${job.repo}/pull/${job.prNumber}`}
+            href={pullRequestUrl(job, job.prNumber)}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 hover:text-primary transition-colors"

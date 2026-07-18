@@ -27,6 +27,7 @@ const REPO: RepoConfigRecord = {
   installationId: '1',
   owner: 'acme',
   repo: 'widgets',
+  vcsProvider: 'github',
   parsedJson: {} as any,
   updatedAt: new Date().toISOString(),
   lastJobCreatedAt: null,

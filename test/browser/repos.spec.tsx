@@ -20,6 +20,7 @@ const REPO: RepoConfigRecord = {
   installationId: '1',
   owner: 'acme',
   repo: 'widgets',
+  vcsProvider: 'github',
   parsedJson: {} as any,
   updatedAt: new Date().toISOString(),
   lastJobCreatedAt: null,
@@ -43,6 +44,19 @@ describe('ReposPage repository management', () => {
 
     expect(await screen.findByText('acme/widgets')).toBeInTheDocument();
     expect(screen.getByText('Enabled')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'GitHub' })).toHaveAttribute('title', 'GitHub');
+  });
+
+  it('distinguishes same-named repositories by provider', async () => {
+    vi.mocked(api.getRepos).mockResolvedValue({
+      repos: [REPO, { ...REPO, installationId: '2', vcsProvider: 'bitbucket' }],
+    });
+
+    renderPage(<ReposPage />);
+
+    expect(await screen.findAllByText('acme/widgets')).toHaveLength(2);
+    expect(screen.getByRole('img', { name: 'GitHub' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Bitbucket' })).toHaveAttribute('title', 'Bitbucket');
   });
 
   it('toggling the enabled switch patches the repo config', async () => {
