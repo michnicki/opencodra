@@ -36,3 +36,40 @@ describe('app security response headers', () => {
     expect(response.headers.get('content-security-policy')).toBeNull();
   });
 });
+
+describe('app security headers on immutable ASSETS responses (regression)', () => {
+  // serveIndex returns c.env.ASSETS.fetch(...), whose headers are IMMUTABLE in the Workers
+  // runtime. The security-headers middleware must rebuild the response rather than mutate it in
+  // place — otherwise the SPA/HTML routes (/, /login) 500 with "Can't modify immutable headers".
+  // The default MockAssets returns a mutable Response, so this mock reproduces the immutability.
+  function immutableHtmlResponse() {
+    const res = new Response('<!doctype html><title>codra</title>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    });
+    const immutable = new Proxy(res.headers, {
+      get(target, prop) {
+        if (prop === 'set' || prop === 'append' || prop === 'delete') {
+          return () => {
+            throw new TypeError("Can't modify immutable headers.");
+          };
+        }
+        const value = (target as unknown as Record<string, unknown>)[prop as string];
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    Object.defineProperty(res, 'headers', { value: immutable, configurable: true });
+    return res;
+  }
+
+  const env = createTestEnv({ ASSETS: { fetch: async () => immutableHtmlResponse() } as never });
+  const app = createApp();
+
+  it('serves / (SPA) with security headers without 500-ing on immutable ASSETS headers', async () => {
+    const response = await app.request('http://codra.test/', { method: 'GET' }, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    await expect(response.text()).resolves.toContain('<!doctype html>');
+  });
+});

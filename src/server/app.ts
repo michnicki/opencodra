@@ -30,9 +30,16 @@ export function createApp() {
   // Google Fonts it loads. These three headers are safe for both JSON API and HTML/SPA responses.
   app.use('*', async (c, next) => {
     await next();
-    c.res.headers.set('X-Content-Type-Options', 'nosniff');
-    c.res.headers.set('X-Frame-Options', 'DENY');
-    c.res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    // ASSETS.fetch() (and other upstream fetch responses, e.g. serveIndex) return a Response
+    // whose headers are IMMUTABLE in the Workers runtime, so mutating c.res.headers directly
+    // throws "Can't modify immutable headers" (500 on the SPA/HTML routes). Rebuild the response
+    // with a mutable headers copy before adding the security headers. Body is piped through, not
+    // consumed; status/statusText/existing headers are preserved via the ResponseInit.
+    const res = new Response(c.res.body, c.res);
+    res.headers.set('X-Content-Type-Options', 'nosniff');
+    res.headers.set('X-Frame-Options', 'DENY');
+    res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    c.res = res;
   });
 
   // Unauthenticated infra health probe. Registered before any session-gated route so that probes
