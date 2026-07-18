@@ -17,6 +17,7 @@ function makeJob(overrides: Partial<JobSummary> = {}) {
     id: '1',
     owner: 'test-owner',
     repo: 'test-repo',
+    repositoryVcsProvider: 'github',
     prNumber: 101,
     prTitle: 'Fixing bug',
     status: 'done',
@@ -38,6 +39,18 @@ describe('JobsPage filters and pagination', () => {
 
     expect(await screen.findByText('test-owner/test-repo')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Fixing bug' })).toBeInTheDocument();
+    expect(screen.getAllByRole('img', { name: 'GitHub' }).length).toBeGreaterThan(0);
+  });
+
+  it('shows the Bitbucket mark for Bitbucket jobs', async () => {
+    vi.mocked(api.getJobs).mockResolvedValue({
+      jobs: [makeJob({ repositoryVcsProvider: 'bitbucket', repositoryWorkspace: 'test-workspace' })],
+      total: 1,
+    });
+
+    renderPage(<JobsPage />);
+
+    expect((await screen.findAllByRole('img', { name: 'Bitbucket' })).length).toBeGreaterThan(0);
   });
 
   it('sends the search term and resets to page 1', async () => {

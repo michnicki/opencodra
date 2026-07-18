@@ -17,6 +17,10 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  Bell,
+  Search,
+  Command,
+  CircleHelp,
 } from 'lucide-react';
 import { cn } from '@client/lib/utils';
 import { useTheme } from '@client/lib/theme';
@@ -286,7 +290,7 @@ export function AppShell() {
   }, []);
 
   return (
-    <div className="flex min-h-svh bg-background" style={shellStyle}>
+    <div className="utility-shell flex min-h-svh bg-background" style={shellStyle}>
 
       {/* Mobile overlay */}
       {mobileMenuOpen && (
@@ -302,9 +306,8 @@ export function AppShell() {
           'dashboard-sidebar',
           sidebarCollapsed && 'dashboard-sidebar-collapsed',
           'fixed bottom-3 left-3 top-3 z-40 flex flex-col',
-          'rounded-xl border border-border/60',
-          'bg-white dark:bg-black',
-          'text-black dark:text-white',
+          'rounded-2xl border border-border/70',
+          'bg-card text-foreground',
           'shadow-[0_6px_20px_-8px_oklch(0%_0_0/0.14),0_0_0_1px_color-mix(in_oklch,var(--primary)_6%,transparent)]',
           'dark:shadow-[0_8px_24px_-10px_oklch(0%_0_0/0.42),0_0_0_1px_color-mix(in_oklch,var(--primary)_9%,transparent)]',
           'transition-[transform,width] duration-300 ease-[var(--ease-out-expo)]',
@@ -390,10 +393,10 @@ export function AppShell() {
         <div className="dashboard-sidebar-divider" />
 
         {/* ── Nav ─────────────────────────────────── */}
-        <nav className="flex-1 overflow-visible px-2 py-3">
+          <nav className="flex-1 overflow-visible px-2 py-3">
           {!sidebarCollapsed && (
             <p className="mb-2 px-2 text-[9.5px] font-semibold uppercase tracking-[0.12em] text-black dark:text-white">
-              Menu
+              Workspace
             </p>
           )}
 
@@ -576,7 +579,38 @@ export function AppShell() {
       </aside>
 
       {/* ── MAIN ────────────────────────────────────── */}
-      <main className="flex min-w-0 flex-1 flex-col transition-[margin,color,background-color] duration-300 ease-[var(--ease-out-expo)] lg:ml-[calc(var(--app-sidebar-width)+2rem)]">
+      <main className="utility-shell-main flex min-w-0 flex-1 flex-col transition-[margin,color,background-color] duration-300 ease-[var(--ease-out-expo)] lg:ml-[calc(var(--app-sidebar-width)+2rem)]">
+
+        <header className="utility-topbar sticky top-0 z-20 hidden h-16 shrink-0 items-center justify-between border-b border-border/70 bg-background/85 px-8 backdrop-blur-xl lg:flex">
+          <div className="flex items-center gap-5">
+            <div className="flex items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-30" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+              </span>
+              System online
+            </div>
+            <span className="h-4 w-px bg-border" />
+            <span className="text-xs text-muted-foreground">Production workspace</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button className="flex h-9 w-[240px] items-center gap-2 rounded-lg border border-border bg-card px-3 text-left text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary/35" aria-label="Search workspace">
+              <Search size={14} />
+              <span className="flex-1">Search workspace</span>
+              <span className="flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[9px]">
+                <Command size={9} /> K
+              </span>
+            </button>
+            <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground shadow-sm transition-colors hover:text-foreground" aria-label="Help">
+              <CircleHelp size={15} />
+            </button>
+            <button className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground shadow-sm transition-colors hover:text-foreground" aria-label="Notifications">
+              <Bell size={15} />
+              <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-card" />
+            </button>
+          </div>
+        </header>
 
         {/* Mobile topbar */}
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4 lg:hidden">
@@ -596,7 +630,7 @@ export function AppShell() {
           </button>
         </header>
 
-        <div className="app-shell-content mx-auto w-full max-w-screen-xl px-4 py-6 md:px-8 md:py-8">
+        <div className="app-shell-content mx-auto w-full max-w-[1440px] px-4 py-6 md:px-8 md:py-9 lg:px-10">
           <Outlet />
         </div>
       </main>

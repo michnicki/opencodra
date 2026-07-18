@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useJobDetail } from '@client/hooks/use-job-detail';
 import { JobDetailSkeleton } from '@client/components/features/job-detail/job-skeleton';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import { Alert } from '@client/components/ui/alert';
 import type { FileReviewRecord } from '@shared/schema';
 
@@ -160,8 +161,11 @@ export function JobLogsPage() {
         <div>
           <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-primary mb-1.5">Raw Logs</p>
           <h1 className="text-2xl font-bold tracking-tight text-foreground leading-none">Review logs</h1>
-          <p className="mt-2 text-sm text-muted-foreground font-mono">
-            {job.owner}/{job.repo} · PR #{job.prNumber} · <span className="opacity-60">{job.commitSha.slice(0, 7)}</span>
+          <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground font-mono">
+            <VcsProviderMark provider={job.repositoryVcsProvider} size={13} />
+            <span>{job.owner}/{job.repo}</span>
+            <span>· PR #{job.prNumber} ·</span>
+            <span className="opacity-60">{job.commitSha.slice(0, 7)}</span>
           </p>
         </div>
 

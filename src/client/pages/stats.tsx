@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 import { TimeRangeSelect } from '@client/components/features/stats/time-range-select';
 import { PageHeaderActions } from '@client/components/shared/page-header-actions';
+import { VcsProviderMark } from '@client/components/shared/vcs-provider-mark';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Skeleton } from '@client/components/shared/skeleton';
 import { Alert } from '@client/components/ui/alert';
@@ -239,10 +240,13 @@ function MetricsGrid({ stats, isDark }: { stats: StatsPayload; isDark: boolean }
         <GraphShell title="Repository bars">
           <div className="space-y-4 px-4 pb-5 pt-4 sm:px-5 sm:pb-6 sm:pt-5">
             {stats.topRepos.slice(0, 8).map((repo) => (
-              <div key={`${repo.owner}/${repo.repo}`} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
+              <div key={`${repo.vcsProvider}:${repo.owner}/${repo.repo}`} className="grid grid-cols-[minmax(0,1fr)_3rem] items-center gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="truncate font-semibold text-foreground">{repo.owner}/{repo.repo}</span>
+                    <span className="flex min-w-0 items-center gap-1.5 font-semibold text-foreground">
+                      <VcsProviderMark provider={repo.vcsProvider} size={13} className="text-muted-foreground" />
+                      <span className="truncate">{repo.owner}/{repo.repo}</span>
+                    </span>
                   </div>
                   <div className="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
                     <div className="h-full rounded-full bg-primary" style={{ width: `${percent(repo.jobs, repoMax)}%` }} />

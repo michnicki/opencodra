@@ -25,33 +25,42 @@ export function StatsGrid({ items, columns = 4, className, ...props }: StatsGrid
   return (
     <div 
       className={cn(
-        'surface surface-static-shadow grid divide-x divide-y divide-border overflow-hidden',
+        'grid gap-3',
         gridCols,
-        columns === 4 && 'sm:divide-y-0',
         className
       )}
       {...props}
     >
       {items.map(({ label, value, icon: Icon, trend }, i) => (
-        <div 
+        <article
           key={i} 
-          className="flex flex-col gap-2.5 px-5 py-4 sm:px-6 sm:py-5 relative overflow-hidden"
+          className="utility-stat-card group relative flex min-h-[148px] flex-col overflow-hidden rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)] sm:p-5"
         >
           {trend && <Sparkline data={trend} />}
-          
-          <div className="relative z-10 flex items-center gap-2 text-muted-foreground">
-            <Icon size={13} strokeWidth={1.75} />
-            <span className="stat-label">{label}</span>
+
+          <div className="relative z-10 flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-muted-foreground">
+              <span className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background text-foreground shadow-sm">
+                <Icon size={13} strokeWidth={2} />
+              </span>
+              <span className="stat-label">{label}</span>
+            </div>
+            <span className="font-mono text-[9px] font-medium tracking-[0.08em] text-muted-foreground/55">
+              0{i + 1}
+            </span>
           </div>
-          
-          <div className="relative z-10">
+
+          <div className="relative z-10 mt-auto flex items-end justify-between gap-2 pt-6">
             {value !== null ? (
               <p className="stat-number">{value}</p>
             ) : (
               <Skeleton height={36} width={60} />
             )}
+            <span className="mb-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-muted-foreground/50">
+              selected range
+            </span>
           </div>
-        </div>
+        </article>
       ))}
     </div>
   );
