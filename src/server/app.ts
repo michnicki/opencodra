@@ -17,7 +17,14 @@ import { createSettingsRouter } from '@server/routes/api/settings';
 import { createVcsCredentialsRouter } from '@server/routes/api/vcs-credentials';
 
 async function serveIndex(c: Context<AppEnv>) {
-  return c.env.ASSETS.fetch(new URL('/index.html', c.req.url));
+  const res = await c.env.ASSETS.fetch(new URL('/index.html', c.req.url));
+  // Rebuild with a mutable header copy (ASSETS responses are immutable in the Workers runtime)
+  // and mark the app-shell no-cache: every SPA navigation revalidates against the worker, so a
+  // deploy takes effect immediately and a bad response can never get stuck in the edge cache.
+  // Hashed JS/CSS assets keep their own long-lived immutable caching.
+  const out = new Response(res.body, res);
+  out.headers.set('Cache-Control', 'no-cache');
+  return out;
 }
 
 export function createApp() {

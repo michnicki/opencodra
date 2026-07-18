@@ -70,6 +70,9 @@ describe('app security headers on immutable ASSETS responses (regression)', () =
     expect(response.status).toBe(200);
     expect(response.headers.get('x-frame-options')).toBe('DENY');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    // App-shell must be no-cache so a deploy takes effect immediately (and a bad response
+    // can't get stuck in the edge cache).
+    expect(response.headers.get('cache-control')).toBe('no-cache');
     await expect(response.text()).resolves.toContain('<!doctype html>');
   });
 });
