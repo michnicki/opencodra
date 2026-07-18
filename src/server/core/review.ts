@@ -1258,6 +1258,17 @@ async function reviewAndPersistFile(
   }
 }
 
+/**
+ * Fail-open confidence floor for the finalize gate. A finding whose confidence is null OR undefined
+ * is ALWAYS kept — a provider that omits confidence (or a review produced before the hardened prompt
+ * took effect) must never be zeroed out. Only a finding that carries an explicit confidence below the
+ * floor is dropped.
+ */
+export function passesConfidenceFloor(comment: ParsedReviewComment, minConfidence: number): boolean {
+  if (comment.confidence == null) return true;
+  return comment.confidence >= minConfidence;
+}
+
 async function runFinalizePhase(
   env: AppBindings,
   job: PersistedReviewJob,
@@ -1328,7 +1339,9 @@ async function runFinalizePhase(
   const { maxComments: globalMaxComments } = await getReviewSettings(env);
   const effectiveMaxComments = Math.min(config.review.max_comments, globalMaxComments);
 
-  let finalComments = reviewedComments.filter(c => (severityRanks[c.severity] ?? 4) <= minRank);
+  let finalComments = reviewedComments
+    .filter(c => (severityRanks[c.severity] ?? 4) <= minRank)
+    .filter(c => passesConfidenceFloor(c, config.review.min_confidence));
   finalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
 
   const omittedCount = reviewedComments.length - Math.min(finalComments.length, effectiveMaxComments);
