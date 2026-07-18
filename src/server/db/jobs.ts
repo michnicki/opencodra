@@ -44,6 +44,7 @@ export type JobRow = {
   retry_of_job_id: string | null;
   summary_model: string | null;
   overall_confidence_score: number | null;
+  overall_correctness: string | null;
   steps: JobStep[] | string | null;
   // R-01: exposed on the row so mapJob can publish repositoryVcsProvider / repositoryWorkspace on
   // the JobSummary without a separate query (VcsService.forRepo reads it in Wave 2).
@@ -150,6 +151,7 @@ export function mapJob(row: JobRow) {
     finishedAt: row.finished_at,
     errorMessage: row.error_msg,
     overallConfidenceScore: row.overall_confidence_score,
+    overallCorrectness: row.overall_correctness,
     steps: parseJsonColumn(row.steps, []),
     checkRunId: row.check_run_id,
     configSnapshot: row.config_snapshot ? repoConfigSchema.parse(parseJsonColumn(row.config_snapshot, defaultRepoConfig)) : null,
@@ -678,6 +680,7 @@ export async function completeJob(
     reviewId: number | null;
     summaryModel: string | null;
     overallConfidenceScore?: number | null;
+    overallCorrectness?: string | null;
     errorMessage?: string | null;
   },
 ) {
@@ -704,14 +707,15 @@ export async function completeJob(
           review_id = $8,
           summary_model = $9,
           overall_confidence_score = $10,
-          error_msg = $11,
+          overall_correctness = $11,
+          error_msg = $12,
           steps = CASE
             WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(steps, '[]'::jsonb)) s WHERE s->>'name' = 'Completing')
             THEN (
               SELECT jsonb_agg(
                 CASE
                   WHEN s->>'name' = 'Completing'
-                  THEN s || jsonb_build_object('status', 'done', 'finishedAt', $12::text, 'error', NULL)
+                  THEN s || jsonb_build_object('status', 'done', 'finishedAt', $13::text, 'error', NULL)
                   ELSE s
                 END
               ) FROM jsonb_array_elements(COALESCE(steps, '[]'::jsonb)) s
@@ -720,8 +724,8 @@ export async function completeJob(
               jsonb_build_object(
                 'name', 'Completing',
                 'status', 'done',
-                'startedAt', $12::text,
-                'finishedAt', $12::text,
+                'startedAt', $13::text,
+                'finishedAt', $13::text,
                 'error', NULL
               )
             )
@@ -739,6 +743,7 @@ export async function completeJob(
       input.reviewId,
       input.summaryModel,
       input.overallConfidenceScore ?? null,
+      input.overallCorrectness ?? null,
       input.errorMessage ?? null,
       now
     ],

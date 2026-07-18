@@ -28,6 +28,7 @@ import {
   updateJobStep,
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
+import { parseSummaryResponse } from './model-output';
 
 import { VcsService } from '../services/vcs';
 import type { VcsProvider, VcsPullRequest, VcsUpdateStatusCheckInput } from '../vcs/types';
@@ -1353,11 +1354,73 @@ async function runFinalizePhase(
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
-  let formattedSummary = formatter.formatReviewOverview(pr.headSha, env.BOT_USERNAME, { provider: vcs.name });
+  // Aggregate job-level confidence/correctness from the already-loaded `reviews` rows,
+  // independent of the best-effort AI narrative call below. This fixes a latent bug: completeJob
+  // has always accepted overallConfidenceScore/overallCorrectness but finalize never computed or
+  // passed them, so both columns were always null. Only successfully-reviewed (non-failed) files
+  // count toward the aggregate -- a failed file's null confidence/correctness would otherwise
+  // silently drag the average/verdict down.
+  const successfulReviews = reviews.filter((review) => review.file_status !== 'failed');
+  const confidenceScores = successfulReviews
+    .map((review) => review.confidence_score)
+    .filter((score): score is number => score !== null && score !== undefined);
+  const confidenceScore = confidenceScores.length > 0
+    ? confidenceScores.reduce((sum, score) => sum + score, 0) / confidenceScores.length
+    : null;
+  const overallCorrectness = successfulReviews.some((review) =>
+    (review.overall_correctness ?? '').toLowerCase().includes('incorrect'),
+  )
+    ? 'patch is incorrect'
+    : 'patch is correct';
 
-  if (omittedCount > 0) {
-    formattedSummary += `\n\n${formatter.formatOmittedCommentsNote(omittedCount, effectiveMaxComments, { provider: vcs.name })}`;
+  // Best-effort AI narrative synthesizing the review. Finalize posts the review and cannot safely
+  // hibernate/retry, so ANY failure here (including RetryableModelError) must be caught and must
+  // never fail or retry the job -- we simply fall back to a recap-only overview (narrative: null).
+  const summaryTracker = new TokenTracker();
+  const summaryModelService = new ModelService(env, summaryTracker, { jobId: job.id });
+  let narrative: string | null = null;
+  let summaryModelUsed: string | null = null;
+  let summaryInputTokens = 0;
+  let summaryOutputTokens = 0;
+  try {
+    const summaryResponse = await summaryModelService.generateSummary({
+      prTitle: pr.title,
+      verdict: verdictSummary.verdict,
+      fileSummaries,
+      config,
+    });
+    narrative = parseSummaryResponse(summaryResponse.rawText);
+    summaryModelUsed = summaryResponse.modelUsed;
+    summaryInputTokens = summaryResponse.inputTokens;
+    summaryOutputTokens = summaryResponse.outputTokens;
+  } catch (error) {
+    logger.warn(
+      `generateSummary failed for job ${job.id}; falling back to a recap-only overview`,
+      error instanceof Error ? error : new Error(String(error)),
+    );
   }
+
+  const severityCounts: Record<ParsedReviewComment['severity'], number> = { P0: 0, P1: 0, P2: 0, P3: 0, nit: 0 };
+  for (const comment of finalComments) {
+    severityCounts[comment.severity] = (severityCounts[comment.severity] ?? 0) + 1;
+  }
+  const topFindings = finalComments.slice(0, 5).map((c) => ({ severity: c.severity, title: c.title, path: c.path }));
+
+  const formattedSummary = formatter.formatReviewOverview(
+    {
+      commitSha: pr.headSha,
+      botUsername: env.BOT_USERNAME,
+      narrative,
+      verdict: verdictSummary.verdict,
+      confidenceScore,
+      severityCounts,
+      topFindings,
+      filesReviewed: files.length,
+      omittedCount,
+      maxComments: effectiveMaxComments,
+    },
+    { provider: vcs.name },
+  );
 
   // If a prior finalize attempt already reached the posting stage (the 'Completing' step was
   // started) and then died before completeJob recorded the review id, the review may already be on
@@ -1383,8 +1446,8 @@ async function runFinalizePhase(
     })),
   });
 
-  const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0);
-  const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0);
+  const fileInputTokens = reviews.reduce((sum, review) => sum + (review.input_tokens ?? 0), 0) + summaryInputTokens;
+  const fileOutputTokens = reviews.reduce((sum, review) => sum + (review.output_tokens ?? 0), 0) + summaryOutputTokens;
 
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed.`
@@ -1409,7 +1472,9 @@ async function runFinalizePhase(
     summaryMarkdown: formattedSummary,
     // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
     reviewId: numericReviewId,
-    summaryModel: null,
+    summaryModel: summaryModelUsed,
+    overallConfidenceScore: confidenceScore,
+    overallCorrectness,
     errorMessage: partialErrorMessage,
   });
   logger.info(`Review job completed: ${job.owner}/${job.repo} PR #${job.prNumber}`);
