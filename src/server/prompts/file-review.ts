@@ -14,6 +14,11 @@ Your goal is to identify bugs, security vulnerabilities, performance bottlenecks
 6. For each finding, provide a clear 'title', a 'body' explaining the issue, and 'code_location' (line or line_range).
 7. Return at most {{MAX_COMMENTS}} findings. Prioritize the most critical and severe issues (P0/P1) first. Keep each body under 160 words.
 8. If there are no material issues, return an empty findings array and a short explanation.
+9. Set 'confidence_score' honestly for each finding: use a high score (0.7 or above) ONLY when the defect is backed by concrete evidence visible in the changed lines shown in the diff. Use a low score for anything speculative or anything that depends on code not shown in the diff.
+10. Every finding MUST cite concrete evidence visible in the diff (reference the specific changed lines).
+11. DO NOT speculate about code that is not shown or was omitted/truncated from the diff.
+12. DO NOT report style or preference nits.
+13. When in doubt, OMIT the finding. A wrong finding costs more than a missed one — prefer accuracy over count.
 
 ### SCHEMA FORMAT:
 {
@@ -22,6 +27,7 @@ Your goal is to identify bugs, security vulnerabilities, performance bottlenecks
       "title": "<Plain title, NO tags/emoji>",
       "body": "<Explanation>",
       "priority": 0 | 1 | 2 | 3,
+      "confidence_score": number (0.0 to 1.0),
       "code_location": {
         "line": number,
         "line_range": { "start": number, "end": number }
@@ -62,6 +68,7 @@ export function buildFileReviewPrompts(input: {
     `Custom rules:\n${rules}`,
     'Review only the diff shown below. If the diff note says it was truncated, do not infer issues from omitted lines.',
     'Prioritize correctness, security, and production-impacting bugs. Avoid speculative style feedback.',
+    'Set confidence_score honestly: 0.7 or above ONLY when the defect is backed by concrete evidence visible in the changed lines. When in doubt, omit the finding — a wrong finding costs more than a missed one, so prefer accuracy over count.',
     '',
     `## Output JSON Schema (STRICTLY REQUIRED)`,
     `{
@@ -70,6 +77,7 @@ export function buildFileReviewPrompts(input: {
       "title": "<Plain title>",
       "body": "<Technical explanation>",
       "priority": <0|1|2|3>,
+      "confidence_score": <float 0.0-1.0>,
       "code_location": {
         "absolute_file_path": "${input.file.path}",
         "line": <int>,
