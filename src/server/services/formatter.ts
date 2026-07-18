@@ -1,4 +1,5 @@
 import type { ParsedReviewComment } from '@shared/schema';
+import { reviewSeverities } from '@shared/schema';
 
 // Defense-in-depth HTML escaper for the plain-text comment `title` before it is interpolated into
 // a `<strong>...</strong>` tag. The title is plain text per schema (not model-authored Markdown),
@@ -95,8 +96,83 @@ export class FormatterService {
     return { verdict: 'approve' as const, errors: 0, warnings: 0 };
   }
 
-  formatReviewOverview(commitSha: string, botUsername: string, options?: FormatterOptions) {
-    const shortSha = commitSha.slice(0, 10);
+  /**
+   * Assembles the "Review Overview" block posted to the PR (and rendered verbatim in the
+   * dashboard job-detail panel via `summary_markdown`). Combines a best-effort AI `narrative`
+   * with a deterministic recap (verdict, confidence, non-zero severity counts, up to 5 top
+   * findings, and a files-reviewed/omitted footer) — see
+   * docs/superpowers/specs/2026-07-19-review-overview-design.md §1.
+   *
+   * `commitSha` is accepted for interface parity with the design's input shape but intentionally
+   * never rendered — the new format has no "Reviewed commit" line.
+   */
+  formatReviewOverview(
+    input: {
+      commitSha: string;
+      botUsername: string;
+      narrative: string | null;
+      verdict: 'approve' | 'comment';
+      confidenceScore: number | null;
+      severityCounts: Record<ParsedReviewComment['severity'], number>;
+      topFindings: Array<{ severity: ParsedReviewComment['severity']; title: string; path: string }>;
+      filesReviewed: number;
+      omittedCount: number;
+      maxComments: number;
+    },
+    options?: FormatterOptions,
+  ) {
+    const {
+      botUsername,
+      narrative,
+      verdict,
+      confidenceScore,
+      severityCounts,
+      topFindings,
+      filesReviewed,
+      omittedCount,
+    } = input;
+
+    const totalFindings = reviewSeverities.reduce((sum, sev) => sum + (severityCounts[sev] ?? 0), 0);
+    const zeroFindings = verdict === 'approve' && totalFindings === 0;
+
+    const fileWord = `${filesReviewed} file${filesReviewed === 1 ? '' : 's'} reviewed`;
+    const footer =
+      omittedCount > 0
+        ? `_${fileWord} · ${omittedCount} comments trimmed to ${input.maxComments}_`
+        : `_${fileWord}_`;
+
+    const sections: string[] = [];
+    if (narrative && narrative.trim().length > 0) {
+      sections.push(narrative.trim());
+    }
+
+    if (zeroFindings) {
+      sections.push('**No issues found**');
+    } else {
+      const verdictLabel = verdict === 'approve' ? 'Approved' : 'Changes requested';
+      const confidenceSuffix =
+        confidenceScore !== null ? ` · Confidence ${Math.round(confidenceScore * 100)}%` : '';
+      sections.push(`**Verdict:** ${verdictLabel}${confidenceSuffix}`);
+
+      const countsLine = reviewSeverities
+        .filter((sev) => (severityCounts[sev] ?? 0) > 0)
+        .map((sev) => `${this.severityIcon(sev, { provider: 'bitbucket' })} ×${severityCounts[sev]}`)
+        .join('  ');
+      if (countsLine) {
+        sections.push(countsLine);
+      }
+
+      if (topFindings.length > 0) {
+        const findingLines = topFindings
+          .map((f) => `- ${this.severityIcon(f.severity, options)} ${escapeHtml(f.title)} — \`${f.path}\``)
+          .join('\n');
+        sections.push(`**Top findings**\n${findingLines}`);
+      }
+    }
+
+    sections.push(footer);
+
+    const bodyBlock = sections.join('\n\n');
 
     // D-13 (Thread C): Bitbucket Cloud does not render GitHub-flavored HTML — <details>/<summary>/
     // <br/> are sanitized to junk, and the "in GitHub" copy plus @mention / draft / 👍 semantics
@@ -105,18 +181,14 @@ export class FormatterService {
     if (options?.provider === 'bitbucket') {
       return `### OpenCodra Review
 
-Here are some automated review suggestions for this pull request.
-
-**Reviewed commit:** \`${shortSha}\`
+${bodyBlock}
 
 [OpenCodra](${this.baseUrl}/repos) automatically reviews pull requests in this repository. A review runs when you open a pull request or push new commits to it.`;
     }
 
     return `### OpenCodra Review
 
-Here are some automated review suggestions for this pull request.
-
-**Reviewed commit:** \`${shortSha}\`
+${bodyBlock}
 
 <details>
 <summary>ℹ️ About OpenCodra</summary>
@@ -134,19 +206,5 @@ If OpenCodra has suggestions, it will comment; otherwise it will react with 👍
 OpenCodra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
 
 </details>`;
-  }
-
-  /**
-   * The "N comments were omitted" note appended to the review overview when max_comments trims the
-   * finding list. GitHub renders `> [!NOTE]` as a callout; Bitbucket renders that syntax literally,
-   * so the Bitbucket branch emits a plain bold note. The GitHub branch is byte-identical to the
-   * pre-Thread-C inline string in core/review.ts (regression-guarded).
-   */
-  formatOmittedCommentsNote(omittedCount: number, maxComments: number, options?: FormatterOptions) {
-    if (options?.provider === 'bitbucket') {
-      return `**Note:** ${omittedCount} comments were omitted from this review to reduce noise and respect the configured \`max_comments\` limit (${maxComments}). Showing the most critical issues.`;
-    }
-
-    return `> [!NOTE]\n> **${omittedCount} comments were omitted** from this review to reduce noise and respect the configured \`max_comments\` limit (${maxComments}). Showing the most critical issues.`;
   }
 }
