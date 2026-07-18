@@ -308,7 +308,10 @@ export function AppShell() {
 
         {/* ── Header ──────────────────────────────── */}
         <div className={cn(
-          'relative flex shrink-0 items-center px-3 pt-4 pb-3',
+          // Asymmetric padding: keep the left inset (logo alignment) but trim the right so the
+          // control cluster gets a few more px of breathing room from the wordmark on the narrow
+          // 240px sidebar (the logo used to bleed into the collapse chevron).
+          'relative flex shrink-0 items-center pl-3 pr-2 pt-4 pb-3',
           'justify-between',
           sidebarCollapsed && 'lg:flex-col lg:items-center lg:justify-start lg:gap-2 lg:pb-4',
         )}>
@@ -354,14 +357,14 @@ export function AppShell() {
           <div className={cn('ml-auto flex items-center gap-1 lg:ml-0', sidebarCollapsed && 'lg:hidden')}>
             <button
               onClick={() => setSidebarCollapsed(true)}
-              className="hidden h-8 w-8 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:flex"
+              className="hidden h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:flex"
               aria-label="Collapse sidebar"
             >
               <ChevronLeft size={15} strokeWidth={2.25} />
             </button>
             <button
               onClick={toggleTheme}
-              className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15 lg:h-8 lg:w-8"
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-sm transition-[background-color,color,transform] duration-200 hover:-translate-y-px hover:bg-[color-mix(in_oklch,var(--primary)_12%,white)] dark:bg-white/10 dark:text-white dark:hover:bg-white/15"
               aria-label="Toggle theme"
             >
               {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
