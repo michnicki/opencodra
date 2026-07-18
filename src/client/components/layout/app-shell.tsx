@@ -18,8 +18,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Bell,
-  Search,
-  Command,
   CircleHelp,
 } from 'lucide-react';
 import { cn } from '@client/lib/utils';
@@ -196,7 +194,7 @@ function CollapsedNavItem({
       </span>
 
       {/* Hover tooltip */}
-      <span className={cn('dashboard-sidebar-action-label dashboard-sidebar-tooltip', collapsedTooltipClass)}>
+      <span className={cn('dashboard-sidebar-tooltip', collapsedTooltipClass)}>
         {label}
       </span>
     </NavLink>
@@ -581,27 +579,8 @@ export function AppShell() {
       {/* ── MAIN ────────────────────────────────────── */}
       <main className="utility-shell-main flex min-w-0 flex-1 flex-col transition-[margin,color,background-color] duration-300 ease-[var(--ease-out-expo)] lg:ml-[calc(var(--app-sidebar-width)+2rem)]">
 
-        <header className="utility-topbar sticky top-0 z-20 hidden h-16 shrink-0 items-center justify-between border-b border-border/70 bg-background/85 px-8 backdrop-blur-xl lg:flex">
-          <div className="flex items-center gap-5">
-            <div className="flex items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-30" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
-              </span>
-              System online
-            </div>
-            <span className="h-4 w-px bg-border" />
-            <span className="text-xs text-muted-foreground">Production workspace</span>
-          </div>
-
+        <header className="utility-topbar sticky top-0 z-20 hidden h-16 shrink-0 items-center justify-end border-b border-border/70 bg-background/85 px-8 backdrop-blur-xl lg:flex">
           <div className="flex items-center gap-2">
-            <button className="flex h-9 w-[240px] items-center gap-2 rounded-lg border border-border bg-card px-3 text-left text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary/35" aria-label="Search workspace">
-              <Search size={14} />
-              <span className="flex-1">Search workspace</span>
-              <span className="flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[9px]">
-                <Command size={9} /> K
-              </span>
-            </button>
             <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground shadow-sm transition-colors hover:text-foreground" aria-label="Help">
               <CircleHelp size={15} />
             </button>

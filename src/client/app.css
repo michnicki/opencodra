@@ -1035,7 +1035,7 @@
 }
 
 .utility-shell .dashboard-sidebar,
-.utility-shell .dashboard-sidebar :where(a, button, p, span, div, svg) {
+.utility-shell .dashboard-sidebar :where(a, button, p, span:not(.dashboard-sidebar-tooltip), div, svg) {
   color: var(--foreground) !important;
 }
 
