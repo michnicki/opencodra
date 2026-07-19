@@ -57,10 +57,17 @@ const CONTROL_CHARS = new RegExp('[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\
 const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
 
 // Neutralize untrusted text before fencing it into the prompt: strip control characters (which can
-// smuggle escape/terminal sequences) and break any backtick run so content can never close a fence
-// or open a new instruction/code block (prompt-injection hardening — mirrors file-review.ts:128-132).
+// smuggle escape/terminal sequences), break any backtick run so content can never close a fence or
+// open a new instruction/code block, AND break any `<<<`/`>>>` run so untrusted content can never
+// spoof the BEGIN/END data sentinels — the boundary the prompt actually relies on (WR-02, mirrors the
+// backtick treatment; prompt-injection hardening — mirrors file-review.ts:128-132). Inserting a
+// zero-width space between the angle brackets keeps the text visually intact for diagramming while
+// making a literal `<<<END UNTRUSTED DIFF>>>` inside the diff no longer match the real sentinel.
 function sanitizeUntrusted(text: string): string {
-  return text.replace(CONTROL_CHARS, '').replace(/`/g, '`' + ZERO_WIDTH_SPACE);
+  return text
+    .replace(CONTROL_CHARS, '')
+    .replace(/`/g, '`' + ZERO_WIDTH_SPACE)
+    .replace(/<<<|>>>/g, (m) => m.split('').join(ZERO_WIDTH_SPACE));
 }
 
 // Render one file's hunks the way file-review.ts:134-152 does (reimplemented locally). Every emitted
