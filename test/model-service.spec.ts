@@ -741,6 +741,104 @@ describe('ModelService', () => {
     expect(response.wasPromptTruncated).toBe(false);
   });
 
+  const criticFindings = [
+    { path: 'src/a.ts', line: 10, severity: 'P1' as const, title: 'SQL injection', body: 'Concatenated query.' },
+    { path: 'src/b.ts', line: 20, severity: 'P3' as const, title: 'Style nit', body: 'Prefer const.' },
+  ];
+
+  it('critiqueFindings returns { rawText, modelUsed, inputTokens, outputTokens } and records tokens on success', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"prune":[{"id":1,"reason":"stylistic nitpick"}]}' }] } }],
+          usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    const service = new ModelService(env, tracker);
+
+    const response = await service.critiqueFindings({
+      findings: criticFindings,
+      prTitle: 'Test PR',
+      config: {
+        ...defaultRepoConfig,
+        model: { main: 'gemma-4-31b-it', fallbacks: [], size_overrides: [] },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(response.rawText).toContain('"prune"');
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+    expect(response.inputTokens).toBe(7);
+    expect(response.outputTokens).toBe(3);
+    expect(tracker.getTotalUsage().input).toBe(7);
+    expect(tracker.getTotalUsage().output).toBe(3);
+  });
+
+  it('critiqueFindings resolves the MAIN model with size overrides DISABLED (never a size-override model)', async () => {
+    // A totalLineCount of 0 would match the FIRST size override (0 <= max_lines) if overrides were
+    // applied; critiqueFindings passes applySizeOverrides:false so the MAIN model is used instead.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"prune":[]}' }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    const response = await service.critiqueFindings({
+      findings: criticFindings,
+      prTitle: 'Test PR',
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: [],
+          // A size override that WOULD win for totalLineCount:0 if overrides were applied.
+          size_overrides: [{ max_lines: 100, model: 'gemma-4-26b-a4b-it', fallbacks: [] }],
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain('gemma-4-26b-a4b-it');
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+  });
+
+  it('critiqueFindings throws RetryableModelError when every model in the chain fails transiently', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 503, message: 'The model is overloaded and currently unavailable.', status: 'UNAVAILABLE' } }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    await expect(
+      service.critiqueFindings({
+        findings: criticFindings,
+        prTitle: 'Test PR',
+        config: {
+          ...defaultRepoConfig,
+          model: { main: 'gemma-4-31b-it', fallbacks: ['gemma-4-26b-a4b-it'], size_overrides: [] },
+        },
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   it('generateWalkthroughDiagram issues exactly ONE outbound request (primary only, no fallback fan-out)', async () => {
     // WT-03 budget invariant (cross-AI MEDIUM): the whole-diff diagram call must try ONLY the primary
     // model even when fallbacks are configured, so "one model call" is literally one outbound request.

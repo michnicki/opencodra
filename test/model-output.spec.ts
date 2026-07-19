@@ -1,4 +1,4 @@
-import { parseFileReviewResponse, parseWalkthroughDiagram } from '@server/core/model-output';
+import { parseCriticPruneResponse, parseFileReviewResponse, parseWalkthroughDiagram } from '@server/core/model-output';
 import type { FileDiff } from '@server/core/diff';
 
 describe('Model Output Parsing Deep Dive', () => {
@@ -283,5 +283,60 @@ describe('parseWalkthroughDiagram (WT-04)', () => {
   it('returns null for garbage / non-diagram output', () => {
     expect(parseWalkthroughDiagram('{"foo": "bar"}')).toBeNull();
     expect(parseWalkthroughDiagram('graph TD; A-->B;')).toBeNull();
+  });
+});
+
+describe('parseCriticPruneResponse (D-05 ID-based prune contract)', () => {
+  it('returns { id, reason }[] for a well-formed prune object', () => {
+    const out = parseCriticPruneResponse('{"prune":[{"id":0,"reason":"false positive"},{"id":2,"reason":"nitpick"}]}');
+    expect(out).toEqual([
+      { id: 0, reason: 'false positive' },
+      { id: 2, reason: 'nitpick' },
+    ]);
+  });
+
+  it('extracts the prune object from a ```json fenced block with surrounding prose', () => {
+    const raw = 'Here is my verdict:\n```json\n{ "prune": [ { "id": 1, "reason": "duplicate" } ] }\n```\nDone.';
+    expect(parseCriticPruneResponse(raw)).toEqual([{ id: 1, reason: 'duplicate' }]);
+  });
+
+  it('strips a leading <think> block before parsing', () => {
+    const raw = '<think>let me decide which to drop</think>\n{"prune":[{"id":3,"reason":"stylistic"}]}';
+    expect(parseCriticPruneResponse(raw)).toEqual([{ id: 3, reason: 'stylistic' }]);
+  });
+
+  it('skips malformed entries per-item (bad id / missing reason) and keeps valid ones', () => {
+    const raw = JSON.stringify({
+      prune: [
+        { id: 0, reason: 'keep this one' },
+        { id: 'nope', reason: 'bad id type' },
+        { id: -1, reason: 'negative id rejected' },
+        { id: 4 }, // missing reason
+        { reason: 'missing id' },
+        { id: 5, reason: 'also valid' },
+      ],
+    });
+    expect(parseCriticPruneResponse(raw)).toEqual([
+      { id: 0, reason: 'keep this one' },
+      { id: 5, reason: 'also valid' },
+    ]);
+  });
+
+  it('returns [] for an empty prune array', () => {
+    expect(parseCriticPruneResponse('{"prune":[]}')).toEqual([]);
+  });
+
+  it('returns [] for unparseable / non-JSON input', () => {
+    expect(parseCriticPruneResponse('not json at all, just prose')).toEqual([]);
+    expect(parseCriticPruneResponse('')).toEqual([]);
+    expect(parseCriticPruneResponse('   ')).toEqual([]);
+  });
+
+  it('returns [] when the JSON has no prune array', () => {
+    expect(parseCriticPruneResponse('{"kept":[1,2,3]}')).toEqual([]);
+  });
+
+  it('tolerates a jsonrepair-fixable trailing comma', () => {
+    expect(parseCriticPruneResponse('{"prune":[{"id":1,"reason":"x"},]}')).toEqual([{ id: 1, reason: 'x' }]);
   });
 });
