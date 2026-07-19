@@ -97,6 +97,20 @@ const MAX_JOB_CONTINUATIONS = 20;
 // a clean budget, more retries won't help -- so cap them low and fail fast (the check-run reconciler
 // and an inheriting re-run recover) instead of churning ~20 min against the shared ceiling.
 const MAX_FINALIZE_CONTINUATIONS = 3;
+// Critic skip threshold (D-06): a deduped candidate set this small isn't worth a model round-trip.
+// The critic's value is triaging a LARGE finding set (deduping main+security noise); re-judging a
+// handful of findings risks pruning a genuine issue for negligible noise reduction. At or below this
+// count runCriticPhase keeps ALL findings and records { skipped: true } instead of calling the model.
+// Overridable per-repo via passes.critic.skip_threshold; kept low so the critic still runs on any set
+// big enough to plausibly contain duplicates.
+const CRITIC_SKIP_THRESHOLD = 3;
+// Critic input char budget (D-06): an upper bound on the serialized candidate set handed to the
+// single whole-set critic call. Beyond this the prompt would risk the model's context window and this
+// invocation's subrequest/latency budget — and the plan forbids CHUNKING the critic (a chunked critic
+// can't reason about the whole set), so an oversized set fail-opens keep-all rather than being
+// partially judged. ~50k chars comfortably fits a large multi-finding set while staying well inside a
+// single model context. Overridable per-repo via passes.critic.input_char_budget.
+const CRITIC_INPUT_CHAR_BUDGET = 50_000;
 // A job's commit (and therefore its diff) never changes, so the raw diff can be
 // cached for the job's entire lifetime instead of being re-fetched from GitHub on
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
@@ -426,6 +440,8 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       await runPreparePhase(env, job, leaseOwner, vcs);
     } else if (phase === 'finalize') {
       await runFinalizePhase(env, job, leaseOwner, vcs, formatter);
+    } else if (phase === 'critic') {
+      await runCriticPhase(env, job, leaseOwner, model);
     } else {
       await runReviewPhase(env, job, leaseOwner, vcs, model, tracker);
     }
@@ -1771,6 +1787,165 @@ async function runFinalizePhase(
   } catch (error) {
     logger.warn(`Post-review labels/check-run update failed for job ${job.id}; review is posted and job is completed, so leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
   }
+}
+
+/**
+ * The dedicated critic phase (D-07 / D-05 / MP-03). Runs BETWEEN review and finalize on its OWN fresh
+ * subrequest budget: it assembles the full candidate finding set (union of every (file, pass) review
+ * row), dedupes it (only when the security pass is on — Pitfall 4), then makes at most ONE whole-set,
+ * ID-based, PRUNE-ONLY model call and reconciles `kept = deduped MINUS pruned-by-index` in code (a
+ * model keep-list is never trusted — T-10-10). The result blob { kept, pruned } is persisted to
+ * jobs.critic_result for finalize (10-07) to consume.
+ *
+ * Two hard contracts:
+ *   - IDEMPOTENT: a valid persisted job.criticResult short-circuits straight to finalize with NO model
+ *     call, so a re-invocation after a persist-then-enqueue-failure never re-critiques (review-verified
+ *     HIGH).
+ *   - FAIL-OPEN (D-05): the critic is conservative and NEVER terminal-fails or loses a finding. On any
+ *     model/parse error (including RetryableModelError) it keeps ALL findings and records
+ *     { skipped: true, pruned: [] }; only a subrequest-budget error is re-thrown so it retries on a
+ *     fresh instance (continueOrFailWedgedJob's critic ceiling), then fails open to finalize.
+ * The critic model call NEVER runs inside finalize (D-07) — it lives only here.
+ */
+async function runCriticPhase(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  leaseOwner: string,
+  model: ModelService,
+) {
+  const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+
+  // (1) IDEMPOTENCY: a valid persisted result means the model call already ran (or was skipped) on a
+  // prior invocation that then died before finalize picked up. mapJob has already safeParsed the blob
+  // (a malformed one degrades to null), so a non-null criticResult is trustworthy. Skip straight to
+  // finalize with NO model call so a re-entry after hibernation never re-critiques (T-10-12 / cost).
+  if (job.criticResult) {
+    logger.info(`Critic result already persisted for job ${job.id}; skipping the model call and transitioning to finalize.`);
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  // (2) TOGGLE-OFF fail-open: a critic phase reached with passes.critic off (config drift / a stale
+  // in-flight message after the toggle was turned off) must NOT run — fail open straight to finalize
+  // so behavior is byte-identical to the critic-off engine (NREG-01, Pitfall 5).
+  if (!config.review.passes?.critic?.enabled) {
+    logger.info(`Critic phase reached for job ${job.id} but passes.critic is off; failing open to finalize.`);
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+
+  // (3) TERMINAL-ROWS ASSERTION (Pitfall 5 / OpenCode #3): the critic assembles the candidate set from
+  // the persisted (file, pass) review rows and assumes the review phase FULLY completed — every row is
+  // terminal (done/failed/skipped). A 'pending' row means the review phase is not actually finished
+  // (an async batch still in flight), so critiquing now would judge an incomplete set. This is an
+  // invariant violation, not a transient: the review-completion / degrade paths mark any lingering
+  // async row failed before handing off to the critic, so a pending row here is a scheduling bug.
+  const reviews = await getFileReviewsForJobs(env, [job.id]);
+  const pendingRow = reviews.find((review) => review.file_status === 'pending');
+  if (pendingRow) {
+    throw new Error(`Critic phase reached with a non-terminal review row (${pendingRow.file_path}/${pendingRow.pass}); the review phase did not fully complete.`);
+  }
+
+  // (4) Candidate set = union of EVERY row's findings (main + security), in stable row order. dedup is
+  // applied ONLY when the security pass is on: a single main source has no cross-pass duplicates, and
+  // deduping it would change the main-only finding set — an NREG-01 violation (Pitfall 4).
+  const candidateSet = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  const securityEnabled = config.review.passes?.security?.enabled ?? false;
+  const dedupedSet = securityEnabled ? dedupeFindings(candidateSet) : candidateSet;
+
+  // (5) SKIP conditions (D-06): a trivially small set isn't worth a round-trip, and an oversized set
+  // can't be chunked — both keep ALL findings and record skipped:true (nothing lost, audit-visible).
+  const skipThreshold = config.review.passes.critic.skip_threshold ?? CRITIC_SKIP_THRESHOLD;
+  const charBudget = config.review.passes.critic.input_char_budget ?? CRITIC_INPUT_CHAR_BUDGET;
+  const serializedChars = JSON.stringify(dedupedSet).length;
+  if (dedupedSet.length <= skipThreshold || serializedChars > charBudget) {
+    logger.info(`Critic skipping the model call for job ${job.id} (keep-all).`, {
+      dedupedCount: dedupedSet.length,
+      skipThreshold,
+      serializedChars,
+      charBudget,
+      reason: dedupedSet.length <= skipThreshold ? 'below-skip-threshold' : 'over-char-budget',
+    });
+    await updateJobCriticResult(env, job.id, {
+      kept: dedupedSet,
+      pruned: [],
+      skipped: true,
+      dedupedCount: dedupedSet.length,
+    });
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  // (6) The single whole-set, ID-based, PRUNE-ONLY model call + in-code reconciliation. Wrapped in a
+  // fail-open try/catch (7): any error EXCEPT a subrequest-budget hit keeps all findings and continues.
+  let criticResult: CriticResult;
+  try {
+    const response = await model.critiqueFindings({
+      findings: dedupedSet.map((finding) => ({
+        path: finding.path,
+        line: finding.line ?? null,
+        severity: finding.severity,
+        title: finding.title,
+        body: finding.body,
+      })),
+      prTitle: job.prTitle,
+      config,
+    });
+
+    // RECONCILE IN CODE (T-10-10): map each pruned INDEX id back to a finding. Ignore out-of-range and
+    // duplicate ids; a model keep-list is never trusted — kept = deduped MINUS pruned-by-index. This is
+    // what makes a hallucinated/injected finding structurally unable to enter the posted set.
+    const pruneList = parseCriticPruneResponse(response.rawText);
+    const prunedIndices = new Set<number>();
+    const pruned: CriticResult['pruned'] = [];
+    for (const { id, reason } of pruneList) {
+      if (!Number.isInteger(id) || id < 0 || id >= dedupedSet.length) continue; // out-of-range id ignored
+      if (prunedIndices.has(id)) continue; // duplicate id ignored
+      prunedIndices.add(id);
+      pruned.push({ finding: dedupedSet[id], reason });
+    }
+    const kept = dedupedSet.filter((_finding, index) => !prunedIndices.has(index));
+
+    criticResult = {
+      kept,
+      pruned,
+      model: response.modelUsed,
+      inputTokens: response.inputTokens,
+      outputTokens: response.outputTokens,
+      dedupedCount: dedupedSet.length,
+      skipped: false,
+    };
+    logger.info(`Critic pruned ${pruned.length}/${dedupedSet.length} findings for job ${job.id}.`, {
+      kept: kept.length,
+      pruned: pruned.length,
+      model: response.modelUsed,
+    });
+  } catch (error) {
+    // (7) A subrequest-budget error is NOT a critic failure — it clears on a fresh invocation. Re-throw
+    // so runReviewJob's catch routes it through continueOrFailWedgedJob (critic ceiling), which retries
+    // on a fresh instance and ultimately fails OPEN to finalize. Everything else (including
+    // RetryableModelError, a parse failure, a resolveModel miss) fails open HERE: keep all findings.
+    if (isSubrequestBudgetError(error)) {
+      throw error;
+    }
+    logger.warn(
+      `Critic model call failed for job ${job.id}; failing open (keeping all findings, no prune applied)`,
+      error instanceof Error ? error : new Error(String(error)),
+    );
+    criticResult = {
+      kept: dedupedSet,
+      pruned: [],
+      skipped: true,
+      dedupedCount: dedupedSet.length,
+    };
+  }
+
+  // Persist BEFORE the (throwing) finalize hand-off so a persist-then-enqueue-failure re-enters this
+  // phase, hits the idempotency short-circuit (1), and never re-critiques.
+  await updateJobCriticResult(env, job.id, criticResult);
+  await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
 }
 
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
