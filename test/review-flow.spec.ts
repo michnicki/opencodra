@@ -1180,9 +1180,9 @@ dbDescribe('Review Flow Lifecycle', () => {
     async function seedFinalizeJob(
       repo: string,
       prNumber: number,
-      opts: { ref?: string; comments?: ParsedReviewComment[] } = {},
+      opts: { ref?: string; comments?: ParsedReviewComment[]; config?: RepoConfig } = {},
     ) {
-      const job = await insertJob(env, { ...baseJob(repo, prNumber), configSnapshot: walkthroughConfig() });
+      const job = await insertJob(env, { ...baseJob(repo, prNumber), configSnapshot: opts.config ?? walkthroughConfig() });
       await updateJobFileCount(env, job.id, 1);
       await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
       await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
@@ -1435,10 +1435,200 @@ dbDescribe('Review Flow Lifecycle', () => {
       editSpy.mockRestore();
     }, REVIEW_FLOW_TIMEOUT_MS);
 
+    it('WT-03 (github): mermaid fence + diagram fed the REAL diff + exactly one call + tokens folded', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_owner: string, _repo: string, _id: number, body: string) => {
+          capturedBody = body;
+          return { id: 700 };
+        },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      const repo = `test-repo-${Date.now()}-wt03-gh`;
+      const job = await seedFinalizeJob(repo, 60, { ref: '910', comments: [mainComment('P1')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-gh', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // GitHub (supportsMermaid true) + sequence_diagram on + a valid diagram response -> fenced block.
+      expect(capturedBody).toContain('```mermaid');
+      expect(capturedBody).toContain('sequenceDiagram');
+      // Exactly ONE diagram inference request on the enabled GitHub path (no fallback fan-out).
+      expect(diagramSpy).toHaveBeenCalledTimes(1);
+      // Fed the ACTUAL parsed diff (FileDiff[] with hunks), not only the {path,summary,verdict} rows.
+      const diagramArg = diagramSpy.mock.calls[0][0] as any;
+      expect(Array.isArray(diagramArg.files)).toBe(true);
+      expect(diagramArg.files.length).toBeGreaterThan(0);
+      expect(diagramArg.files[0].path).toBe('src/app.ts');
+      expect(diagramArg.files[0]).toHaveProperty('hunks');
+      // The diagram call's tokens are folded into the persisted job totals (file + summary + diagram).
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.total_input_tokens).toBe(1 + 3 + 7);
+      expect(finalJob?.total_output_tokens).toBe(1 + 2 + 4);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03 (github): sub-toggle OFF makes no diagram call and emits no mermaid fence (D-09)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      const subToggleOff: RepoConfig = {
+        ...defaultRepoConfig,
+        review: {
+          ...defaultRepoConfig.review,
+          walkthrough: { enabled: true, sequence_diagram: { enabled: false } },
+        },
+      };
+      const repo = `test-repo-${Date.now()}-wt03-off`;
+      const job = await seedFinalizeJob(repo, 61, { ref: '911', comments: [mainComment('P2')], config: subToggleOff });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-off', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).not.toHaveBeenCalled(); // sub-toggle off -> the call is skipped entirely
+      expect(capturedBody).toContain('OpenCodra Walkthrough'); // walkthrough still posts
+      expect(capturedBody).not.toContain('```mermaid'); // but no diagram
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.total_input_tokens).toBe(1 + 3); // no diagram tokens folded
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03 (bitbucket): supportsMermaid false skips the diagram call and emits no fence (Pitfall #7)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const { VcsService } = await import('@server/services/vcs');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      // Drive the finalize path against a provider whose capabilities.supportsMermaid is false. Full
+      // Bitbucket client fixtures aren't needed to prove the capability gate: reuse the GitHub adapter
+      // (so all the mocked service plumbing works) but override name + capabilities to Bitbucket's.
+      const forRepoSpy = vi.spyOn(VcsService, 'forRepo').mockImplementation(async (e: any, j: any, t: any) => {
+        const { GithubAdapter } = await import('@server/vcs/github');
+        const adapter = new GithubAdapter(e, j.installationId ?? '', t);
+        Object.defineProperty(adapter, 'name', { value: 'bitbucket', configurable: true });
+        Object.defineProperty(adapter, 'capabilities', { value: { supportsMermaid: false }, configurable: true });
+        return adapter;
+      });
+      const repo = `test-repo-${Date.now()}-wt03-bb`;
+      const job = await seedFinalizeJob(repo, 62, { ref: '912', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-bb', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).not.toHaveBeenCalled(); // capability gate: the diagram call is NOT made
+      expect(capturedBody).not.toContain('```mermaid'); // no raw mermaid fence ever reaches Bitbucket
+      expect(capturedBody).toContain('OpenCodra Walkthrough'); // the rest of the walkthrough is intact
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+      forRepoSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03/WT-04 (github): a THROWN diagram call omits the diagram; the walkthrough still posts and the job completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram')
+        .mockRejectedValue(new Error('diagram model down'));
+      const repo = `test-repo-${Date.now()}-wt03-throw`;
+      const job = await seedFinalizeJob(repo, 63, { ref: '913', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-throw', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).toHaveBeenCalledTimes(1);
+      expect(capturedBody).not.toContain('```mermaid'); // best-effort omit
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      expect(editSpy).toHaveBeenCalledTimes(1); // the walkthrough still posts
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done'); // the job completes
+      expect(finalJob?.review_id).not.toBeNull();
+      expect(finalJob?.total_input_tokens).toBe(1 + 3); // no diagram tokens folded on failure
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03/WT-04 (github): unparseable diagram output omits the diagram but folds the spent tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram')
+        .mockResolvedValue({ modelUsed: 'diagram-model', provider: 'google', rawText: 'this is not a diagram', inputTokens: 5, outputTokens: 2 });
+      const repo = `test-repo-${Date.now()}-wt03-garbage`;
+      const job = await seedFinalizeJob(repo, 64, { ref: '914', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-garbage', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(capturedBody).not.toContain('```mermaid'); // parseWalkthroughDiagram returned null -> omitted
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      // The call succeeded (tokens were spent) even though the parse returned null, so they're folded.
+      expect(finalJob?.total_input_tokens).toBe(1 + 3 + 5);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
     it('NREG-01: with the walkthrough OFF there are zero comment side effects and no ref write', async () => {
       const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
       const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
       const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
       const repo = `test-repo-${Date.now()}-wt-off`;
       // defaultRepoConfig has walkthrough.enabled === false.
       const job = await insertJob(env, { ...baseJob(repo, 49), configSnapshot: defaultRepoConfig });
@@ -1449,10 +1639,12 @@ dbDescribe('Review Flow Lifecycle', () => {
       expect(finalJob?.status).toBe('done');
       expect(createSpy).not.toHaveBeenCalled();
       expect(editSpy).not.toHaveBeenCalled();
+      expect(diagramSpy).not.toHaveBeenCalled(); // walkthrough off -> no diagram model call either
       expect(finalJob?.walkthrough_comment_ref).toBeNull();
 
       createSpy.mockRestore();
       editSpy.mockRestore();
+      diagramSpy.mockRestore();
     }, REVIEW_FLOW_TIMEOUT_MS);
 
     it('WT-05 handoff: prepare + finalize as SEPARATE runReviewJob calls edit the SAME ref (DB-backed)', async () => {

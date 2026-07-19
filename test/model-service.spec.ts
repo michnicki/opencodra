@@ -738,4 +738,53 @@ describe('ModelService', () => {
     expect(response.reviewedLineCount).toBe(900);
     expect(response.wasPromptTruncated).toBe(false);
   });
+
+  it('generateWalkthroughDiagram issues exactly ONE outbound request (primary only, no fallback fan-out)', async () => {
+    // WT-03 budget invariant (cross-AI MEDIUM): the whole-diff diagram call must try ONLY the primary
+    // model even when fallbacks are configured, so "one model call" is literally one outbound request.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'sequenceDiagram\n  participant A\n  A->>B: call()' }] } }],
+          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    const service = new ModelService(env, tracker);
+
+    const response = await service.generateWalkthroughDiagram({
+      prTitle: 'Test',
+      files: [
+        {
+          path: 'src/app.ts',
+          previousPath: null,
+          isNew: false,
+          isDeleted: false,
+          isBinary: false,
+          lineCount: 1,
+          hunks: [{ header: '@@ -1 +1 @@', lines: [{ kind: 'add', content: 'x', newLineNumber: 1, position: 1 }] }],
+        },
+      ],
+      fileSummaries: [{ path: 'src/app.ts', summary: 'ok', verdict: 'comment' }],
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          // Fallbacks are configured but must NOT be tried — a fan-out would make >1 fetch.
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+          size_overrides: [],
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // exactly one outbound request, no fallback fan-out
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(response.rawText).toContain('sequenceDiagram');
+    expect(response.inputTokens).toBe(3);
+    expect(response.outputTokens).toBe(2);
+  });
 });
