@@ -4,6 +4,7 @@ import { reviewWithCloudflare, submitCloudflareBatch, pollCloudflareBatch } from
 import { reviewWithOpenAI } from '../models/openai';
 import { reviewWithAnthropic } from '../models/anthropic';
 import { buildFileReviewPrompts } from '../prompts/file-review';
+import { buildSecurityReviewPrompts } from '../prompts/security-review';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '../prompts/summary';
 import { WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT, buildWalkthroughDiagramPrompt } from '../prompts/walkthrough-diagram';
 import { parseFileReviewResponse } from '../core/model-output';
@@ -187,15 +188,24 @@ export class ModelService {
   private selectModel(params: {
     totalLineCount: number;
     config: RepoConfig;
+    // When false, the size-override block is skipped entirely and model.main + fallbacks resolve
+    // directly. Two reasons this exists (both from the review-verified HIGH bug): (1) a size-override
+    // is only meaningful for a single SIZED file/diff, but the critic reviews a whole finding SET,
+    // not a sized file; (2) with overrides applied, selectModel({ totalLineCount: 0 }) matches the
+    // FIRST override (0 <= any positive max_lines) instead of using model.main — so 0 (a valid line
+    // count / "not a sized call") must NOT silently swap the model. Defaults to true so every
+    // existing caller is behavior-identical.
+    applySizeOverrides?: boolean;
   }): { primary: string; fallbacks: string[] } {
     const { model: modelCfg } = params.config;
     const thresholdBase = params.totalLineCount;
+    const applySizeOverrides = params.applySizeOverrides ?? true;
 
     let selectedModel = modelCfg?.main ? normalizeModel(modelCfg.main) : null;
     let fallbackModels = (modelCfg?.fallbacks || []).map(normalizeModel);
 
     // Apply size overrides based on total PR lines
-    if (modelCfg?.size_overrides && modelCfg.size_overrides.length > 0) {
+    if (applySizeOverrides && modelCfg?.size_overrides && modelCfg.size_overrides.length > 0) {
       const sortedOverrides = [...modelCfg.size_overrides].sort((a, b) => a.max_lines - b.max_lines);
       const matched = sortedOverrides.find(o => thresholdBase <= o.max_lines);
       if (matched) {
@@ -307,6 +317,11 @@ export class ModelService {
     config: RepoConfig;
     totalLineCount: number;
     compactPrompt?: boolean;
+    // Selects which review PROMPT this unit uses (D-01). 'security' routes through
+    // buildSecurityReviewPrompts; 'main' (default) is behavior-identical to today. This selects only
+    // the prompt — model resolution, chunking, fallback chain, and retry classification are shared
+    // (D-02: there is NO per-pass model override).
+    pass?: 'main' | 'security';
   }) {
     const configuredLineCap = params.config.review.max_diff_lines_per_file;
     const modelLineCap = params.compactPrompt
@@ -472,12 +487,24 @@ export class ModelService {
     config: RepoConfig;
     totalLineCount: number;
     compactPrompt?: boolean;
+    pass?: 'main' | 'security';
   }) {
-    const { systemPrompt, userPrompt } = buildFileReviewPrompts({
-      ...params,
-      file: params.file,
-      config: params.config.review,
-    });
+    // The security pass swaps in buildSecurityReviewPrompts (same input shape, identical findings
+    // JSON contract so parseFileReviewResponse handles it unchanged). Everything below —
+    // selectModel, resolveModel, the fallback chain, adaptive timeout, tracker recording, and
+    // RetryableModelError classification — is reused verbatim, so a transient failure on a
+    // (file,'security') unit classifies retryable exactly like the main pass (D-01/D-02).
+    const { systemPrompt, userPrompt } = params.pass === 'security'
+      ? buildSecurityReviewPrompts({
+          ...params,
+          file: params.file,
+          config: params.config.review,
+        })
+      : buildFileReviewPrompts({
+          ...params,
+          file: params.file,
+          config: params.config.review,
+        });
 
     const { primary, fallbacks } = this.selectModel({
       totalLineCount: params.totalLineCount,
