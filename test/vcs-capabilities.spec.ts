@@ -27,7 +27,7 @@ function buildBitbucketAdapter(): BitbucketAdapter {
   return new (BitbucketAdapter as unknown as new (
     env: ReturnType<typeof createTestEnv>,
     client: BitbucketClient,
-    job: typeof job,
+    jobArg: typeof job,
   ) => BitbucketAdapter)(env, client, job);
 }
 
