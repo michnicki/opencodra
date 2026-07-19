@@ -81,6 +81,15 @@ export type VcsSubmitReviewInput = {
 export interface VcsProvider {
   readonly name: 'github' | 'bitbucket';
 
+  /**
+   * Per-adapter capability flags. REQUIRED (not optional like `labels?`) so every adapter MUST
+   * declare it — this is the single extension point where future capability flags join the same
+   * block, avoiding a per-flag interface refactor (D-09). `supportsMermaid` lets a later phase's
+   * walkthrough formatter gate its Mermaid diagram per-provider (GitHub renders Mermaid in
+   * markdown; Bitbucket Cloud does not). Inert this phase — no consumer reads it yet.
+   */
+  readonly capabilities: { readonly supportsMermaid: boolean };
+
   getPullRequest(owner: string, repo: string, prNumber: number): Promise<VcsPullRequest>;
   getPullRequestDiff(owner: string, repo: string, prNumber: number): Promise<string>;
 

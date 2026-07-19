@@ -82,6 +82,9 @@ function bitbucketReviewFooter(commitSha: string): string {
 
 export class BitbucketAdapter implements VcsProvider {
   readonly name = 'bitbucket' as const;
+  // Bitbucket Cloud does not render Mermaid diagrams in PR markdown, so the walkthrough formatter
+  // MUST NOT emit one for Bitbucket PRs (D-09). Required member on VcsProvider; inert this phase.
+  readonly capabilities = { supportsMermaid: false } as const;
   // Bitbucket Cloud has no native PR-labels feature (Pattern 2). The interface marks `labels`
   // optional; this adapter intentionally does NOT assign the property so callers must feature-
   // detect `if (vcs.labels)` (mirrors `GithubAdapter` which DOES assign it).

@@ -21,6 +21,9 @@ import type {
  */
 export class GithubAdapter implements VcsProvider {
   readonly name = 'github' as const;
+  // GitHub renders Mermaid fenced code blocks in markdown, so the walkthrough formatter may emit a
+  // Mermaid diagram for GitHub PRs (D-09). Required member on VcsProvider; inert this phase.
+  readonly capabilities = { supportsMermaid: true } as const;
   private gh: GitHubService;
 
   constructor(
