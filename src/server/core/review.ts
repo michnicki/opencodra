@@ -1,6 +1,6 @@
 import { logger } from './logger';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHubWebhookPayload, type IssueCommentWebhookPayload, type PullRequestWebhookPayload } from '@shared/github';
-import { defaultRepoConfig, normalizeModelId, reviewUnitKey, type FileReviewPass, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
+import { defaultRepoConfig, normalizeModelId, reviewUnitKey, type CriticResult, type FileReviewPass, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
 import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
 import { bulkInheritFileReviews, bulkMarkFilesFailed, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
@@ -24,11 +24,13 @@ import {
   setJobWorkflowInstance,
   supersedeOlderJobs,
   updateJobCheckRun,
+  updateJobCriticResult,
   updateJobStatusCheckRef,
   updateJobStep,
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
-import { parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
+import { dedupeFindings } from './dedup';
+import { parseCriticPruneResponse, parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
 import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
 
 import { VcsService } from '../services/vcs';
@@ -55,7 +57,7 @@ export type ReviewJobRunResult =
   // subrequest budget anymore: either a subrequest-limit deferral (a long-lived instance has stopped
   // hibernating, so its budget never resets) or the transition into finalize (which needs ~20
   // subrequests at once to post the review). A fresh instance's first step always gets a clean budget.
-  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number; jobId?: string; freshInstance?: boolean };
+  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize' | 'critic'; delaySeconds: number; jobId?: string; freshInstance?: boolean };
 
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
 const JOB_LEASE_SECONDS = 15 * 60;
@@ -440,10 +442,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
     if (error instanceof NextPhaseError) {
       await releaseJobLease(env, job.id, leaseOwner);
-      // Finalize needs a fresh instance for a clean subrequest budget to post the review; other
-      // phase transitions (e.g. the per-chunk review yield) stay in this instance and rely on the
-      // normal step.sleep hibernation to reset the budget.
-      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds, jobId: job.id, freshInstance: error.phase === 'finalize' };
+      // Finalize AND critic each need a fresh instance for a clean subrequest budget: finalize posts
+      // the review (~20 subrequests at once) and critic makes its single whole-set model call on its
+      // OWN budget (D-07 — the critic must never share finalize's budget). Other phase transitions
+      // (e.g. the per-chunk review yield) stay in this instance and rely on the normal step.sleep
+      // hibernation to reset the budget.
+      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds, jobId: job.id, freshInstance: error.phase === 'finalize' || error.phase === 'critic' };
     }
 
     if (isRetryableModelError(error)) {
@@ -494,16 +498,18 @@ async function continueOrFailWedgedJob(
   job: PersistedReviewJob,
   vcs: VcsProvider,
   leaseOwner: string,
-  phase: 'prepare' | 'review' | 'finalize',
+  phase: 'prepare' | 'review' | 'finalize' | 'critic',
   delaySeconds: number,
   reason: string,
 ): Promise<ReviewJobRunResult> {
   const continuationCount = await markJobContinuationQueued(env, job.id, delaySeconds);
 
-  // Finalize burns its low ceiling fast so a saturated instance that can't post the review fails
-  // within a few minutes instead of looping ~20 min against the review-sized ceiling; every other
-  // phase keeps the generous ceiling because it makes real per-file progress.
-  const ceiling = phase === 'finalize' ? MAX_FINALIZE_CONTINUATIONS : MAX_JOB_CONTINUATIONS;
+  // Finalize AND critic burn their low ceiling fast so a saturated instance that can't post the
+  // review / can't run the critic on a clean budget fails over within a few minutes instead of
+  // looping ~20 min against the review-sized ceiling; review keeps the generous ceiling because it
+  // makes real per-file progress. (Critic never terminal-fails on exceed — it fails OPEN to finalize
+  // in the branch below — but it still uses the low ceiling to bound its fresh-instance retries.)
+  const ceiling = phase === 'finalize' || phase === 'critic' ? MAX_FINALIZE_CONTINUATIONS : MAX_JOB_CONTINUATIONS;
 
   if (continuationCount > ceiling) {
     if (phase === 'review') {
@@ -535,7 +541,24 @@ async function continueOrFailWedgedJob(
       // and fail terminally -- exactly the large-PR "Too many subrequests" failure this guards.
       await resetJobContinuationCount(env, job.id);
       await releaseJobLease(env, job.id, leaseOwner);
-      // Finalize on a fresh instance/budget -- this instance is the one that hit the wall.
+      // Route the degrade through the SAME selector as a healthy review completion: when the critic
+      // pass is enabled a degraded review must still enter the critic (never bypass it straight to
+      // finalize), so a partial review is critiqued exactly like a full one (MP-03). Critic-off keeps
+      // the pre-critic behavior byte-identically (nextPhaseAfterReview -> 'finalize', NREG-01).
+      const configFromJob = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+      return { action: 'next_phase', phase: nextPhaseAfterReview(configFromJob), delaySeconds: FRESH_INVOCATION_YIELD_SECONDS, jobId: job.id, freshInstance: true };
+    } else if (phase === 'critic') {
+      // FAIL-OPEN ceiling (MP-03): a wedged critic (repeated subrequest-budget exhaustion on its
+      // fresh-instance retries) must NEVER terminal-fail the job. Reset the continuation counter and
+      // hand finalize its own fresh instance/budget; finalize's null-critic_result branch (10-07)
+      // reconstructs the deduped candidate set, so no finding is lost by skipping the critic.
+      logger.error(`Critic phase exceeded the continuation ceiling; failing OPEN to finalize (no critique applied): ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        phase,
+        continuationCount,
+        reason,
+      });
+      await resetJobContinuationCount(env, job.id);
+      await releaseJobLease(env, job.id, leaseOwner);
       return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS, jobId: job.id, freshInstance: true };
     } else {
       const message = `Review could not make progress after ${continuationCount} continuation attempts (${reason}). Failing the job to avoid an endless retry loop; re-run it once the underlying provider issue clears.`;
@@ -561,17 +584,17 @@ async function continueOrFailWedgedJob(
 async function resolveQueuedJob(
   env: AppBindings,
   message: ReviewJobMessage,
-): Promise<{ job: PersistedReviewJob; phase: 'prepare' | 'review' | 'finalize' } | null> {
-  // The WIRE contract (reviewJobMessageSchema.phase) now includes 'critic' (D-07), but Phase 7 does
-  // NOT add critic dispatch — the internal ReviewJobRunResult.phase union and the phase switch stay
-  // prepare|review|finalize (Phase 10 owns critic handling). REJECT a premature/spoofed phase:'critic'
-  // message HERE at the boundary (return null → runReviewJob acks it) rather than coercing it to
-  // 'review'/'prepare', so a stray critic message can NEVER silently run main review. Capturing into a
-  // local const also control-flow-narrows the type back to 'prepare'|'review'|'finalize'|undefined for
-  // the two `?? '...'` sites below, which is what makes the narrow return type typecheck.
+): Promise<{ job: PersistedReviewJob; phase: 'prepare' | 'review' | 'finalize' | 'critic' } | null> {
+  // The WIRE contract (reviewJobMessageSchema.phase) includes 'critic' (D-07). Phase 10 DISPATCHES it
+  // — but ONLY for a jobId-bearing message. A critic phase is only ever reached AFTER a job exists
+  // (review→critic hands off keyed on the resolved jobId), so a phase:'critic' message WITHOUT a jobId
+  // can only be a spoof/premature delivery (Pitfall 5, T-10-11): REJECT it HERE at the boundary
+  // (return null → runReviewJob acks it) so a stray critic message can never resolve a job by webhook
+  // payload and run against it. A jobId-bearing critic message falls through to the getJobForProcessing
+  // branch below and is dispatched normally.
   const requestedPhase = message.phase;
-  if (requestedPhase === 'critic') {
-    logger.warn('Queue message ignored: phase "critic" is not dispatched in this phase (Phase 10 owns critic dispatch).');
+  if (requestedPhase === 'critic' && !message.jobId) {
+    logger.warn('Queue message ignored: phase "critic" requires a jobId (a jobId-less critic message is treated as a spoof).');
     return null;
   }
 
@@ -1075,12 +1098,15 @@ async function runReviewPhase(
 
   if (completedUnitCount >= units.length) {
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
-    // Finalize (post the GitHub review, labels, check run) needs its OWN fresh subrequest budget.
-    // Always hibernate into a new invocation first: the review phase that just finished spent this
-    // invocation's budget, and TokenTracker under-reports real usage (it doesn't see Hyperdrive/
-    // GitHub subrequests), so a conditional yield let finalize run in the exhausted invocation and
-    // die with "Too many subrequests". Unconditional yield trades a one-time delay for reliability.
-    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    // The next phase (critic when enabled, else finalize) needs its OWN fresh subrequest budget:
+    // finalize posts the GitHub review/labels/check run, and the critic makes its single whole-set
+    // model call on a clean budget (D-07). Always hibernate into a new invocation first: the review
+    // phase that just finished spent this invocation's budget, and TokenTracker under-reports real
+    // usage (it doesn't see Hyperdrive/GitHub subrequests), so a conditional yield let the next phase
+    // run in the exhausted invocation and die with "Too many subrequests". Unconditional yield trades
+    // a one-time delay for reliability. nextPhaseAfterReview routes through the critic when enabled so
+    // a healthy completion can never bypass it (MP-03); critic-off stays 'finalize' (NREG-01).
+    await enqueueJobPhase(env, job.id, nextPhaseAfterReview(config), FRESH_INVOCATION_YIELD_SECONDS);
     return;
   }
 
@@ -1105,7 +1131,9 @@ async function runReviewPhase(
         });
       }
       await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
-      throw new NextPhaseError('finalize', FRESH_INVOCATION_YIELD_SECONDS);
+      // Async-batch exhaustion degrade: route through the critic selector exactly like a healthy
+      // completion so a degraded review still enters the critic when enabled (never bypasses it).
+      throw new NextPhaseError(nextPhaseAfterReview(config), FRESH_INVOCATION_YIELD_SECONDS);
     }
     throw new NextPhaseError('review', ASYNC_BATCH_POLL_DELAY_SECONDS);
   }
@@ -1754,15 +1782,28 @@ async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leas
 }
 
 export class NextPhaseError extends Error {
-  constructor(public phase: 'prepare' | 'review' | 'finalize', public delaySeconds: number) {
+  constructor(public phase: 'prepare' | 'review' | 'finalize' | 'critic', public delaySeconds: number) {
     super(`NextPhase: ${phase}`);
   }
+}
+
+/**
+ * Single source of truth for where the review phase hands off (D-07 / MP-03). When the critic pass is
+ * enabled the critic runs as its OWN fresh-budget phase BETWEEN review and finalize; otherwise the
+ * review goes straight to finalize exactly as it did pre-critic. EVERY review-exit path — normal
+ * completion, async-batch exhaustion, and the continuation-ceiling degrade in continueOrFailWedgedJob
+ * — routes through this selector, so a degraded review can NEVER bypass the critic when it is enabled.
+ * With passes.critic off this returns 'finalize' unconditionally, so routing is byte-identical to the
+ * pre-critic engine (NREG-01).
+ */
+function nextPhaseAfterReview(config: RepoConfig): 'critic' | 'finalize' {
+  return config.review.passes?.critic?.enabled ? 'critic' : 'finalize';
 }
 
 async function enqueueJobPhase(
   env: AppBindings,
   jobId: string,
-  phase: 'prepare' | 'review' | 'finalize',
+  phase: 'prepare' | 'review' | 'finalize' | 'critic',
   delaySeconds = 0,
 ) {
   await markJobContinuationQueued(env, jobId, delaySeconds);
