@@ -142,7 +142,7 @@ export async function upsertFileReview(
           async_model
         )
         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-        ON CONFLICT (job_id, file_path) DO UPDATE SET
+        ON CONFLICT (job_id, file_path, pass) DO UPDATE SET
           file_status = EXCLUDED.file_status,
           model_used = EXCLUDED.model_used,
           diff_line_count = EXCLUDED.diff_line_count,
@@ -247,7 +247,7 @@ export async function recordRetryableFileReviewFailure(
           transient_error_count
         )
         VALUES ($1::uuid, $2, 'failed', $3, $4, $5, $6, NULL, NULL, NULL, $7, NULL, NULL, NULL, NULL, $8, 1)
-        ON CONFLICT (job_id, file_path) DO UPDATE SET
+        ON CONFLICT (job_id, file_path, pass) DO UPDATE SET
           file_status = 'failed',
           model_used = EXCLUDED.model_used,
           model_provider = EXCLUDED.model_provider,
@@ -311,7 +311,7 @@ export async function bulkInheritFileReviews(
           file_summary, overall_correctness, confidence_score, error_msg, model_provider
         FROM file_reviews
         WHERE job_id = $2::uuid AND file_status = 'done' AND file_path = ANY($3::text[])
-        ON CONFLICT (job_id, file_path) DO NOTHING
+        ON CONFLICT (job_id, file_path, pass) DO NOTHING
         RETURNING id, file_path
       `,
       [input.jobId, input.parentJobId, input.filePaths],
@@ -358,7 +358,7 @@ export async function bulkMarkFilesFailed(
       INSERT INTO file_reviews (job_id, file_path, file_status, model_used, diff_line_count, diff_input, error_msg, duration_ms)
       SELECT $1::uuid, u.file_path, 'failed', $2, u.diff_line_count, '', $3, 0
       FROM UNNEST($4::text[], $5::int[]) AS u(file_path, diff_line_count)
-      ON CONFLICT (job_id, file_path) DO NOTHING
+      ON CONFLICT (job_id, file_path, pass) DO NOTHING
     `,
     [jobId, opts.modelUsed, opts.errorMessage, files.map((f) => f.filePath), files.map((f) => f.diffLineCount)],
   );
@@ -394,6 +394,7 @@ export async function getFileReviewsForJobs(env: Pick<AppBindings, 'HYPERDRIVE'>
     id: string;
     job_id: string;
     file_path: string;
+    pass: 'main' | 'security';
     file_status: 'pending' | 'done' | 'skipped' | 'failed';
     model_used: string;
     diff_line_count: number;
