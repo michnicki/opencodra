@@ -29,6 +29,7 @@ import {
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
 import { parseSummaryResponse } from './model-output';
+import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
 
 import { VcsService } from '../services/vcs';
 import type { VcsProvider, VcsPullRequest, VcsUpdateStatusCheckInput } from '../vcs/types';
@@ -758,6 +759,20 @@ async function runPreparePhase(
     return;
   }
 
+  // WT-01/WT-05: post the standalone walkthrough placeholder once we know there is ≥1 reviewable
+  // file (D-11: never when files.length === 0 — hence inside the files.length > 0 path). Best-effort,
+  // mirroring the check-run cosmetics below: a placeholder failure must not block enqueuing the
+  // review phase that does the actual work. postWalkthroughPlaceholder is itself gated on
+  // walkthrough.enabled and idempotent on the durable jobs.walkthrough_comment_ref, so a retried
+  // prepare / fresh-instance handoff never double-posts. The ACCEPTED RESIDUAL (create-success then
+  // ref-write throw) surfaces here as a logged warn so the residual stays observable (not swallowed
+  // inside postWalkthroughPlaceholder).
+  try {
+    await postWalkthroughPlaceholder({ env, job, config, fileCount: files.length, vcs });
+  } catch (error) {
+    logger.warn(`Failed to post walkthrough placeholder for job ${job.id}; continuing to the review phase anyway`, error instanceof Error ? error : new Error(String(error)));
+  }
+
   if (checkRunId) {
     // Best-effort progress cosmetics only (see runReviewPhase): don't let a failed check-run
     // update block enqueuing the review phase that does the actual work.
@@ -1476,6 +1491,50 @@ async function runFinalizePhase(
   if (!Number.isFinite(numericReviewId)) {
     throw new Error(`Provider ${vcs.name} returned a non-numeric review ref: ${review.ref}`);
   }
+
+  // WT-01/WT-05/D-06: edit the placeholder into the complete walkthrough. This runs AFTER
+  // submitReview (the review is already posted, and the finalizeRetriedPastPost double-post guard
+  // above covers a finalize retry) and BEFORE completeJob (the job is still `running`, so the
+  // supersede re-check is EFFECTIVE and a natural finalize re-run re-attempts the idempotent edit) —
+  // cross-AI blockers 1 + 3. It is its OWN best-effort try/catch, separate from the cosmetics block
+  // below: a walkthrough failure must NEVER re-throw out of finalize, because a generic throw here
+  // would fail an already-posted review at the runReviewJob catch (review.ts failJobAndCheckRun).
+  //
+  // Gated on files.length > 0 to stay symmetric with the D-11 placeholder gate: a 0-file job posts
+  // no placeholder in prepare, so finalize must not fall into editWalkthroughComment's defensive
+  // "no ref -> create" branch and post a walkthrough for a job that legitimately has nothing to show.
+  // (The defensive branch still fires for the real case — files exist but the ref write failed in
+  // prepare — because files.length > 0 there.)
+  if (config.review.walkthrough.enabled && files.length > 0) try {
+    // (a) Supersede re-check INLINE (D-06): the private heartbeatAndCheckSuperseded is already in
+    // scope here, so core/walkthrough.ts never imports it (no core/ module cycle — cross-AI blocker
+    // 4). A superseded (stale-commit) job must not edit the walkthrough; catch JOB_SUPERSEDED
+    // LOCALLY and skip only the edit — the already-posted review must still reach completeJob, so we
+    // never re-throw.
+    let superseded = false;
+    try {
+      await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'JOB_SUPERSEDED') {
+        superseded = true;
+        logger.info(`Job ${job.id} superseded at the walkthrough edit; skipping the walkthrough (review already posted)`);
+      } else {
+        throw error;
+      }
+    }
+    if (!superseded) {
+      // (b) deterministic aggregation over the main-pass reviews + the floored/capped finalComments.
+      const data = buildWalkthroughData({ reviews, finalComments });
+      // (c) single in-place edit (delete-recovery + bounded transient retry live in the helper).
+      // mermaid stays null this plan; Plan 09-03 fills the seam.
+      await editWalkthroughComment({ env, job, config, vcs, formatter, data, mermaid: null });
+    }
+  } catch (error) {
+    // (d) Best-effort: the review is posted; a persistent walkthrough failure logs a warn and the
+    // job still completes. The block MUST NOT re-throw.
+    logger.warn(`Walkthrough edit failed for job ${job.id}; review is posted, leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
+  }
+
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
