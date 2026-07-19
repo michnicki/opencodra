@@ -294,14 +294,14 @@ dbDescribe('Review Flow Lifecycle', () => {
     });
 
     await bulkMarkFilesFailed(env, job.id, [
-      { filePath: 'src/a.ts', diffLineCount: 10 },
-      { filePath: 'src/b.ts', diffLineCount: 20 },
+      { filePath: 'src/a.ts', pass: 'main', diffLineCount: 10 },
+      { filePath: 'src/b.ts', pass: 'main', diffLineCount: 20 },
     ], { modelUsed: 'gemini-3.1-flash-lite', errorMessage: 'infra limit' });
 
     // Second call including an existing path must not duplicate or overwrite it (ON CONFLICT DO NOTHING).
     await bulkMarkFilesFailed(env, job.id, [
-      { filePath: 'src/a.ts', diffLineCount: 10 },
-      { filePath: 'src/c.ts', diffLineCount: 5 },
+      { filePath: 'src/a.ts', pass: 'main', diffLineCount: 10 },
+      { filePath: 'src/c.ts', pass: 'main', diffLineCount: 5 },
     ], { modelUsed: 'other-model', errorMessage: 'second call' });
 
     const reviews = await getFileReviewsForJobs(env, [job.id]);

@@ -854,19 +854,21 @@ async function runReviewPhase(
       .map((file) => file.path);
 
     if (inheritablePaths.length > 0) {
-      const inheritedPaths = await bulkInheritFileReviews(env, {
+      // This inheritance path is the existing main-pass retry flow; every unit is pass='main'.
+      // (Phase 10-05/06 will key these maps on reviewUnitKey to inherit security units too.)
+      const inheritedUnits = await bulkInheritFileReviews(env, {
         jobId: job.id,
         parentJobId: job.retryOfJobId,
-        filePaths: inheritablePaths,
+        units: inheritablePaths.map((path) => ({ filePath: path, pass: 'main' as const })),
       });
       // Mark the just-copied files handled so the loop below skips them (no per-file re-work).
-      for (const path of inheritedPaths) {
+      for (const { filePath: path } of inheritedUnits) {
         const parent = parentReviews.get(path);
         if (parent) currentReviews.set(path, parent);
       }
-      terminalProgress += inheritedPaths.length;
-      if (inheritedPaths.length > 0) {
-        logger.info(`Bulk-inherited ${inheritedPaths.length} parent file reviews for job ${job.id} in one pass`);
+      terminalProgress += inheritedUnits.length;
+      if (inheritedUnits.length > 0) {
+        logger.info(`Bulk-inherited ${inheritedUnits.length} parent file reviews for job ${job.id} in one pass`);
       }
     }
   }
@@ -1325,7 +1327,7 @@ async function runFinalizePhase(
       await bulkMarkFilesFailed(
         env,
         job.id,
-        missingFiles.map((file) => ({ filePath: file.path, diffLineCount: file.lineCount })),
+        missingFiles.map((file) => ({ filePath: file.path, pass: 'main' as const, diffLineCount: file.lineCount })),
         { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'This file was not reviewed before the review run completed.' },
       );
 

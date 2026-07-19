@@ -1,4 +1,4 @@
-import type { ParsedReviewComment } from '@shared/schema';
+import type { FileReviewPass, ParsedReviewComment } from '@shared/schema';
 import type { AppBindings } from '@server/env';
 import { parseJsonColumn, queryRows, queryTransaction } from './client';
 
@@ -7,6 +7,10 @@ export async function insertFileReview(
   input: {
     jobId: string;
     filePath: string;
+    // Optional review pass, defaults to 'main'. Existing call sites omit it -> the persisted row is
+    // identical to today (NREG-01). Only Phase 10's security scheduling passes 'security'. (Binding
+    // pass explicitly changes the SQL TEXT but not the persisted row — no byte-identical-SQL claim.)
+    pass?: FileReviewPass;
     fileStatus: 'pending' | 'done' | 'skipped' | 'failed';
     modelUsed: string;
     modelProvider?: string | null;
@@ -43,9 +47,10 @@ export async function insertFileReview(
           overall_correctness,
           confidence_score,
           error_msg,
-          model_provider
+          model_provider,
+          pass
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING id
       `,
       [
@@ -65,6 +70,7 @@ export async function insertFileReview(
         input.confidenceScore ?? null,
         input.errorMessage,
         input.modelProvider ?? null,
+        input.pass ?? 'main',
       ],
     );
 
@@ -97,6 +103,9 @@ export async function upsertFileReview(
   jobId: string,
   input: {
     filePath: string;
+    // Optional review pass, defaults to 'main' (NREG-01: existing call sites omit it and persist an
+    // identical row). The ON CONFLICT (job_id, file_path, pass) arbiter distinguishes the passes.
+    pass?: FileReviewPass;
     fileStatus: 'pending' | 'done' | 'skipped' | 'failed';
     modelUsed: string;
     modelProvider?: string | null;
@@ -139,9 +148,10 @@ export async function upsertFileReview(
           error_msg,
           model_provider,
           async_request_id,
-          async_model
+          async_model,
+          pass
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         ON CONFLICT (job_id, file_path, pass) DO UPDATE SET
           file_status = EXCLUDED.file_status,
           model_used = EXCLUDED.model_used,
@@ -181,6 +191,7 @@ export async function upsertFileReview(
         input.modelProvider ?? null,
         input.asyncRequestId ?? null,
         input.asyncModel ?? null,
+        input.pass ?? 'main',
       ],
     );
 
@@ -216,6 +227,9 @@ export async function recordRetryableFileReviewFailure(
   jobId: string,
   input: {
     filePath: string;
+    // Optional review pass, defaults to 'main' (NREG-01). A missing security unit records its OWN
+    // retryable failure row keyed on (job_id, file_path, 'security') rather than colliding with main.
+    pass?: FileReviewPass;
     modelUsed: string;
     modelProvider?: string | null;
     diffLineCount: number;
@@ -244,9 +258,10 @@ export async function recordRetryableFileReviewFailure(
           overall_correctness,
           confidence_score,
           error_msg,
-          transient_error_count
+          transient_error_count,
+          pass
         )
-        VALUES ($1::uuid, $2, 'failed', $3, $4, $5, $6, NULL, NULL, NULL, $7, NULL, NULL, NULL, NULL, $8, 1)
+        VALUES ($1::uuid, $2, 'failed', $3, $4, $5, $6, NULL, NULL, NULL, $7, NULL, NULL, NULL, NULL, $8, 1, $9)
         ON CONFLICT (job_id, file_path, pass) DO UPDATE SET
           file_status = 'failed',
           model_used = EXCLUDED.model_used,
@@ -274,6 +289,7 @@ export async function recordRetryableFileReviewFailure(
         input.diffInput,
         input.durationMs,
         input.errorMessage,
+        input.pass ?? 'main',
       ],
     );
 
@@ -288,52 +304,63 @@ export async function recordRetryableFileReviewFailure(
  * them one file at a time through the budget-limited review loop (~5 files/chunk, hibernating a
  * fresh invocation between chunks), turning a fully-inheritable retry into a many-minute crawl.
  * This collapses all of them into one transaction (a couple of subrequests total, regardless of
- * file count) so the review phase finishes in a single invocation. `filePaths` must already be
- * filtered to files that are inheritable under the current model strategy and have no row yet in
- * the target job. Returns the file paths that were actually inserted.
+ * file count) so the review phase finishes in a single invocation. `units` must already be
+ * filtered to (file_path, pass) UNITS that are inheritable under the current model strategy and have
+ * no row yet in the target job. Returns the units that were actually inserted.
+ *
+ * UNIT-keyed (not path-keyed) so a file's 'main' and 'security' rows never conflate: the copy SELECTs
+ * and RETURNs pass, the WHERE matches the requested (file_path, pass) tuples, and the comment
+ * re-attach JOIN matches parent rows on BOTH file_path AND pass. A main parent's comments therefore
+ * can never attach to an inherited security row (or vice-versa), and a security-disabled retry that
+ * passes only its 'main' unit provably inherits no security row.
  */
 export async function bulkInheritFileReviews(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
-  input: { jobId: string; parentJobId: string; filePaths: string[] },
-): Promise<string[]> {
-  if (input.filePaths.length === 0) return [];
+  input: { jobId: string; parentJobId: string; units: Array<{ filePath: string; pass: FileReviewPass }> },
+): Promise<Array<{ filePath: string; pass: FileReviewPass }>> {
+  if (input.units.length === 0) return [];
+
+  const filePaths = input.units.map((u) => u.filePath);
+  const passes = input.units.map((u) => u.pass);
 
   return await queryTransaction(env, async (tx) => {
-    const inserted = await tx.query<{ id: string; file_path: string }>(
+    const inserted = await tx.query<{ id: string; file_path: string; pass: FileReviewPass }>(
       `
         INSERT INTO file_reviews (
-          job_id, file_path, file_status, model_used, diff_line_count, diff_input,
+          job_id, file_path, pass, file_status, model_used, diff_line_count, diff_input,
           raw_ai_output, input_tokens, output_tokens, duration_ms, verdict,
           file_summary, overall_correctness, confidence_score, error_msg, model_provider
         )
-        SELECT $1::uuid, file_path, file_status, model_used, diff_line_count, diff_input,
+        SELECT $1::uuid, file_path, pass, file_status, model_used, diff_line_count, diff_input,
           raw_ai_output, input_tokens, output_tokens, duration_ms, verdict,
           file_summary, overall_correctness, confidence_score, error_msg, model_provider
         FROM file_reviews
-        WHERE job_id = $2::uuid AND file_status = 'done' AND file_path = ANY($3::text[])
+        WHERE job_id = $2::uuid AND file_status = 'done'
+          AND (file_path, pass) IN (SELECT * FROM UNNEST($3::text[], $4::text[]))
         ON CONFLICT (job_id, file_path, pass) DO NOTHING
-        RETURNING id, file_path
+        RETURNING id, file_path, pass
       `,
-      [input.jobId, input.parentJobId, input.filePaths],
+      [input.jobId, input.parentJobId, filePaths, passes],
     );
 
     if (inserted.length > 0) {
-      // Re-attach each inherited review's comments, mapping the parent's rows to the new ids by path.
+      // Re-attach each inherited review's comments, mapping parent rows to the new ids by (path, pass)
+      // so a comment is only ever attached to the SAME pass it came from.
       await tx.query(
         `
           INSERT INTO review_comments (
             file_review_id, path, line, position, severity, category, title, body, code_suggestion, confidence
           )
           SELECT nw.new_id, rc.path, rc.line, rc.position, rc.severity, rc.category, rc.title, rc.body, rc.code_suggestion, rc.confidence
-          FROM UNNEST($1::uuid[], $2::text[]) AS nw(new_id, file_path)
-          JOIN file_reviews pf ON pf.job_id = $3::uuid AND pf.file_path = nw.file_path
+          FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS nw(new_id, file_path, pass)
+          JOIN file_reviews pf ON pf.job_id = $4::uuid AND pf.file_path = nw.file_path AND pf.pass = nw.pass
           JOIN review_comments rc ON rc.file_review_id = pf.id
         `,
-        [inserted.map((r) => r.id), inserted.map((r) => r.file_path), input.parentJobId],
+        [inserted.map((r) => r.id), inserted.map((r) => r.file_path), inserted.map((r) => r.pass), input.parentJobId],
       );
     }
 
-    return inserted.map((r) => r.file_path);
+    return inserted.map((r) => ({ filePath: r.file_path, pass: r.pass }));
   });
 }
 
@@ -344,23 +371,27 @@ export async function bulkInheritFileReviews(
  * large/growing PR can blow the per-invocation subrequest budget right before the review is posted.
  * This collapses the whole backfill into one statement (one subrequest). Skips files that already
  * have a row (ON CONFLICT DO NOTHING) so it never clobbers a real review.
+ *
+ * UNIT-keyed: each entry carries its own `pass`, so a missing 'security' unit gets its OWN failed
+ * backfill row keyed on (job_id, file_path, 'security') rather than being silently absorbed by the
+ * existing 'main' row for the same file.
  */
 export async function bulkMarkFilesFailed(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   jobId: string,
-  files: Array<{ filePath: string; diffLineCount: number }>,
+  files: Array<{ filePath: string; pass: FileReviewPass; diffLineCount: number }>,
   opts: { modelUsed: string; errorMessage: string },
 ): Promise<void> {
   if (files.length === 0) return;
   await queryRows(
     env,
     `
-      INSERT INTO file_reviews (job_id, file_path, file_status, model_used, diff_line_count, diff_input, error_msg, duration_ms)
-      SELECT $1::uuid, u.file_path, 'failed', $2, u.diff_line_count, '', $3, 0
-      FROM UNNEST($4::text[], $5::int[]) AS u(file_path, diff_line_count)
+      INSERT INTO file_reviews (job_id, file_path, pass, file_status, model_used, diff_line_count, diff_input, error_msg, duration_ms)
+      SELECT $1::uuid, u.file_path, u.pass, 'failed', $2, u.diff_line_count, '', $3, 0
+      FROM UNNEST($4::text[], $5::text[], $6::int[]) AS u(file_path, pass, diff_line_count)
       ON CONFLICT (job_id, file_path, pass) DO NOTHING
     `,
-    [jobId, opts.modelUsed, opts.errorMessage, files.map((f) => f.filePath), files.map((f) => f.diffLineCount)],
+    [jobId, opts.modelUsed, opts.errorMessage, files.map((f) => f.filePath), files.map((f) => f.pass), files.map((f) => f.diffLineCount)],
   );
 }
 
