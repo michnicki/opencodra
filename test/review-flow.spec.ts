@@ -1,10 +1,13 @@
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, getTerminalJobsNeedingCheckRunCompletion, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, getTerminalJobsNeedingCheckRunCompletion, insertJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
-import { defaultRepoConfig, type ParsedReviewComment } from '@shared/schema';
+import { defaultRepoConfig, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
+import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder, type WalkthroughReviewRow } from '@server/core/walkthrough';
+import { FormatterService } from '@server/services/formatter';
+import type { VcsProvider } from '@server/vcs/types';
 
 const sha = (char: string) => char.repeat(40);
 
@@ -34,6 +37,11 @@ vi.mock('@server/services/github', () => {
         async createCheckRun() { return { id: 123 }; }
         async updateCheckRun() { return {}; }
         async createReview() { return { id: 456 }; }
+        // Phase 9 walkthrough PR-comment primitives (GitHubAdapter.createPrComment/editPrComment map
+        // onto these). Defaults: create returns a fresh numeric comment id; edit echoes success.
+        // Individual walkthrough tests spy/override these on the prototype.
+        async createIssueComment() { return { id: 700 }; }
+        async updateIssueComment() { return { id: 700 }; }
         async findBotReviewForCommit() { return null; }
         async ensureLabel() { return {}; }
         async addIssueLabels() { return {}; }
@@ -1118,4 +1126,507 @@ dbDescribe('Review Flow Lifecycle', () => {
     createSpy.mockRestore();
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
+
+  // --- Phase 9 streaming walkthrough (WT-01/WT-02/WT-05, NREG-01/02) ------------------------------
+  describe('streaming walkthrough', () => {
+    const walkthroughConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        walkthrough: { enabled: true, sequence_diagram: { enabled: true } },
+      },
+    });
+
+    const baseJob = (repo: string, prNumber: number) => ({
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prAuthor: 'author',
+      baseSha: sha('b'),
+      trigger: 'auto' as const,
+      headRef: 'feature',
+      baseRef: 'main',
+      prNumber,
+      prTitle: `WT ${prNumber}`,
+      commitSha: sha('a'),
+    });
+
+    const mainComment = (
+      severity: ParsedReviewComment['severity'],
+      path = 'src/app.ts',
+    ): ParsedReviewComment => ({
+      path,
+      line: 1,
+      position: 1,
+      severity,
+      category: 'quality',
+      title: 'Finding',
+      body: 'finding body',
+      confidence: 0.95,
+    });
+
+    async function seedFinalizeJob(
+      repo: string,
+      prNumber: number,
+      opts: { ref?: string; comments?: ParsedReviewComment[] } = {},
+    ) {
+      const job = await insertJob(env, { ...baseJob(repo, prNumber), configSnapshot: walkthroughConfig() });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+      await upsertFileReview(env, job.id, {
+        filePath: 'src/app.ts',
+        fileStatus: 'done',
+        modelUsed: 'test-model',
+        modelProvider: 'test-provider',
+        diffLineCount: 1,
+        diffInput: 'diff',
+        rawAiOutput: '{}',
+        parsedComments: opts.comments ?? [],
+        inputTokens: 1,
+        outputTokens: 1,
+        durationMs: 1,
+        verdict: 'comment',
+        fileSummary: 'one-line file summary',
+        errorMessage: null,
+      });
+      if (opts.ref) await updateJobWalkthroughCommentRef(env, job.id, opts.ref);
+      return job;
+    }
+
+    it('WT-01: posts the placeholder once in prepare and edits it once in finalize (github)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-happy`;
+      const job = await insertJob(env, { ...baseJob(repo, 40), configSnapshot: walkthroughConfig() });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-happy', phase: 'prepare' });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).toHaveBeenCalledTimes(1); // placeholder posted once in prepare
+      expect(editSpy).toHaveBeenCalledTimes(1); // single edit in finalize, never re-posted
+      expect(finalJob?.walkthrough_comment_ref).toBe('700');
+
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 idempotent create: a prepare with a ref already set does NOT re-post', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-idem`;
+      const job = await insertJob(env, { ...baseJob(repo, 44), configSnapshot: walkthroughConfig() });
+      // Simulate a prior prepare that already posted the placeholder.
+      await updateJobWalkthroughCommentRef(env, job.id, '4242');
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-idem', phase: 'prepare' });
+        // prepare enqueues the review phase (next_phase) -- it does not re-post the placeholder.
+        expect(res.action).toBe('next_phase');
+      });
+
+      expect(createSpy).not.toHaveBeenCalled();
+      const row = await getJobForProcessing(env, job.id);
+      expect(row?.walkthrough_comment_ref).toBe('4242'); // unchanged
+
+      createSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 delete-recovery: a null edit re-posts + updates the ref; the job still completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockResolvedValue(null);
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment').mockResolvedValue({ id: 808, user: { id: 1, login: 'bot' } });
+      const repo = `test-repo-${Date.now()}-wt-del`;
+      const job = await seedFinalizeJob(repo, 41, { ref: '555', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-del', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(editSpy).toHaveBeenCalledTimes(1); // attempted the edit -> null
+      expect(createSpy).toHaveBeenCalledTimes(1); // re-posted
+      expect(finalJob?.status).toBe('done'); // job still completes
+      expect(finalJob?.walkthrough_comment_ref).toBe('808'); // ref re-pointed
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('D-11: a job with zero reviewable files posts NO placeholder and NO edit', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue('');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-nofiles`;
+      const job = await insertJob(env, { ...baseJob(repo, 45), configSnapshot: walkthroughConfig() });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-nofiles', phase: 'prepare' });
+
+      expect(createSpy).not.toHaveBeenCalled(); // D-11: no placeholder
+      expect(editSpy).not.toHaveBeenCalled(); // and no defensive finalize create either
+      const row = await getJobForProcessing(env, job.id);
+      expect(row?.walkthrough_comment_ref).toBeNull();
+
+      getDiffSpy.mockRestore();
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('D-06: a superseded job skips the walkthrough edit yet the posted review still completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-sup`;
+      const job = await seedFinalizeJob(repo, 42, { ref: '321', comments: [mainComment('P2')] });
+      // Flip to superseded DURING submitReview (after the pre-submit supersede check, before the
+      // walkthrough re-check) so the review posts but the walkthrough edit is skipped.
+      const createReviewSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementationOnce(async () => {
+        await queryRows(env, `UPDATE jobs SET status = 'superseded' WHERE id = $1`, [job.id]);
+        return { id: 456 };
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-sup', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(createReviewSpy).toHaveBeenCalledTimes(1); // review posted
+      expect(editSpy).not.toHaveBeenCalled(); // walkthrough edit skipped (superseded)
+      expect(createSpy).not.toHaveBeenCalled(); // no re-post
+      expect(finalJob?.status).toBe('done'); // completeJob still ran; walkthrough did not fail the job
+      expect(Number(finalJob?.review_id)).toBe(456);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+      createReviewSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('ordering: the finalize walkthrough edit runs BEFORE completeJob (job still running)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const jobsMod = await import('@server/db/jobs');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const repo = `test-repo-${Date.now()}-wt-order`;
+      const job = await seedFinalizeJob(repo, 43, { ref: '321', comments: [mainComment('P2')] });
+      let statusAtEdit: string | null = null;
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(async () => {
+        const row = await getJobForProcessing(env, job.id);
+        statusAtEdit = row?.status ?? null;
+        return { id: 700 };
+      });
+      const completeSpy = vi.spyOn(jobsMod, 'completeJob');
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-order', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // The edit observed the job still 'running' -> it ran before completeJob marked it done.
+      expect(statusAtEdit).toBe('running');
+      expect(editSpy).toHaveBeenCalledTimes(1);
+      expect(completeSpy).toHaveBeenCalledTimes(1);
+      expect(editSpy.mock.invocationCallOrder[0]).toBeLessThan(completeSpy.mock.invocationCallOrder[0]);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      completeSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('recovery: a transient edit failure is retried within the invocation, then succeeds', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment')
+        .mockRejectedValueOnce(new Error('transient blip'))
+        .mockResolvedValue({ id: 700 });
+      const repo = `test-repo-${Date.now()}-wt-retry`;
+      const job = await seedFinalizeJob(repo, 46, { ref: '777', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-retry', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(editSpy).toHaveBeenCalledTimes(2); // first throw retried, second succeeds
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(finalJob?.review_id).not.toBeNull();
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('best-effort: a persistently-failing edit never fails the job (review still posted)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockRejectedValue(new Error('provider down'));
+      const repo = `test-repo-${Date.now()}-wt-persist`;
+      const job = await seedFinalizeJob(repo, 47, { ref: '888', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-persist', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(editSpy).toHaveBeenCalledTimes(2); // bounded in-invocation retry (EDIT_MAX_ATTEMPTS)
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done'); // best-effort: the job is not failed
+      expect(finalJob?.review_id).not.toBeNull(); // the review is posted
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-02: the finalize edit body carries per-severity counts and a coverage row per file', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_owner: string, _repo: string, _id: number, body: string) => {
+          capturedBody = body;
+          return { id: 700 };
+        },
+      );
+      const repo = `test-repo-${Date.now()}-wt-body`;
+      const job = await seedFinalizeJob(repo, 48, { ref: '901', comments: [mainComment('P0'), mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-body', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      expect(capturedBody).toContain('src/app.ts'); // coverage row for the reviewed file
+      expect(capturedBody).toMatch(/×2|×1/); // per-severity counts rendered
+      expect(capturedBody).toContain('1 file reviewed');
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with the walkthrough OFF there are zero comment side effects and no ref write', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-off`;
+      // defaultRepoConfig has walkthrough.enabled === false.
+      const job = await insertJob(env, { ...baseJob(repo, 49), configSnapshot: defaultRepoConfig });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-off', phase: 'prepare' });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(editSpy).not.toHaveBeenCalled();
+      expect(finalJob?.walkthrough_comment_ref).toBeNull();
+
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 handoff: prepare + finalize as SEPARATE runReviewJob calls edit the SAME ref (DB-backed)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment').mockResolvedValue({ id: 1234, user: { id: 1, login: 'bot' } });
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockResolvedValue({ id: 1234 });
+      const repo = `test-repo-${Date.now()}-wt-handoff`;
+      const job = await insertJob(env, { ...baseJob(repo, 51), configSnapshot: walkthroughConfig() });
+
+      // Drive prepare + review to completion (placeholder posts + ref persists in prepare).
+      await runWithDb(env, async () => {
+        let msg: any = { jobId: job.id, deliveryId: 'delivery-wt-handoff', phase: 'prepare' };
+        while (msg && msg.phase !== 'finalize') {
+          const res = await runReviewJob(env, msg);
+          if (res.action === 'next_phase') {
+            await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [job.id]);
+            if (res.phase === 'finalize') { msg = null; break; }
+            msg = { ...msg, phase: res.phase };
+          } else {
+            msg = null;
+          }
+        }
+      });
+
+      // The placeholder ref is now durable in Postgres.
+      const afterPrepare = await getJobForProcessing(env, job.id);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(afterPrepare?.walkthrough_comment_ref).toBe('1234');
+
+      // A FRESH finalize invocation re-reads the job row from the DB and edits the SAME comment.
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-handoff-final', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).toHaveBeenCalledTimes(1); // NO second placeholder across the handoff
+      expect(editSpy).toHaveBeenCalledTimes(1); // the same comment edited once
+      // The GitHub adapter converts the opaque ref '1234' -> numeric commentId before the service
+      // call, so the service-level spy sees the number; the durable ref (asserted below) is '1234'.
+      expect(editSpy.mock.calls[0][2]).toBe(1234); // edited by the ref read from the DB
+      expect(finalJob?.walkthrough_comment_ref).toBe('1234');
+
+      getDiffSpy.mockRestore();
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    // NREG-02: the placeholder create, single edit, and delete-recovery are asserted directly on the
+    // provider-agnostic core/walkthrough helpers for BOTH provider names (opaque ref, D-13). Driving a
+    // full Bitbucket runReviewJob would require the Bitbucket client fixtures; the core helpers are the
+    // provider seam, so a hand-rolled VcsProvider per name is the precise both-provider proof.
+    describe.each(['github', 'bitbucket'] as const)('NREG-02 core helpers (%s)', (providerName) => {
+      const makeVcs = (createRef: string, editResult: { ref: string } | null | 'throw' = { ref: createRef }) => {
+        const create = vi.fn(async () => ({ ref: createRef }));
+        const edit = vi.fn(async (_o: string, _r: string, ref: string) => {
+          if (editResult === 'throw') throw new Error('transient');
+          return editResult === null ? null : { ref };
+        });
+        const vcs = {
+          name: providerName,
+          capabilities: { supportsMermaid: providerName === 'github' },
+          createPrComment: create,
+          editPrComment: edit,
+        } as unknown as VcsProvider;
+        return { vcs, create, edit };
+      };
+
+      it('posts the placeholder once, persists the ref, and edits in place', async () => {
+        const ref = providerName === 'bitbucket' ? '10:20' : '700';
+        const { vcs, create, edit } = makeVcs(ref);
+        const repo = `test-repo-${Date.now()}-nreg2-${providerName}`;
+        const job = await insertJob(env, { ...baseJob(repo, 52), configSnapshot: walkthroughConfig() });
+        const formatter = new FormatterService(env.APP_URL);
+
+        await runWithDb(env, async () => {
+          await postWalkthroughPlaceholder({ env, job: { ...job, walkthroughCommentRef: null }, config: walkthroughConfig(), fileCount: 2, vcs });
+        });
+        expect(create).toHaveBeenCalledTimes(1);
+        const afterCreate = await getJobForProcessing(env, job.id);
+        expect(afterCreate?.walkthrough_comment_ref).toBe(ref);
+
+        // Idempotent: a second placeholder call with the ref set does not re-create.
+        await runWithDb(env, async () => {
+          await postWalkthroughPlaceholder({ env, job: { ...job, walkthroughCommentRef: ref }, config: walkthroughConfig(), fileCount: 2, vcs });
+        });
+        expect(create).toHaveBeenCalledTimes(1);
+
+        // Single in-place edit.
+        const data = buildWalkthroughData({
+          reviews: [{ file_path: 'src/app.ts', file_summary: 'ok', file_status: 'done', error_msg: null, verdict: 'comment', diff_line_count: 3, pass: 'main' }],
+          finalComments: [mainComment('P2')],
+        });
+        await runWithDb(env, async () => {
+          await editWalkthroughComment({ env, job: { ...job, walkthroughCommentRef: ref }, config: walkthroughConfig(), vcs, formatter, data, mermaid: null });
+        });
+        expect(edit).toHaveBeenCalledTimes(1);
+        expect(edit.mock.calls[0][2]).toBe(ref);
+      });
+
+      it('delete-recovery: a null edit re-posts and re-points the ref', async () => {
+        const oldRef = providerName === 'bitbucket' ? '10:20' : '700';
+        const newRef = providerName === 'bitbucket' ? '10:99' : '999';
+        const { vcs, create, edit } = makeVcs(newRef, null);
+        const repo = `test-repo-${Date.now()}-nreg2del-${providerName}`;
+        const job = await insertJob(env, { ...baseJob(repo, 53), configSnapshot: walkthroughConfig() });
+        await updateJobWalkthroughCommentRef(env, job.id, oldRef);
+        const formatter = new FormatterService(env.APP_URL);
+        const data = buildWalkthroughData({
+          reviews: [{ file_path: 'src/app.ts', file_summary: 'ok', file_status: 'done', error_msg: null, verdict: 'comment', diff_line_count: 3, pass: 'main' }],
+          finalComments: [mainComment('P2')],
+        });
+
+        await runWithDb(env, async () => {
+          await editWalkthroughComment({ env, job: { ...job, walkthroughCommentRef: oldRef }, config: walkthroughConfig(), vcs, formatter, data, mermaid: null });
+        });
+
+        expect(edit).toHaveBeenCalledTimes(1); // attempted the edit -> null
+        expect(create).toHaveBeenCalledTimes(1); // re-posted
+        const row = await getJobForProcessing(env, job.id);
+        expect(row?.walkthrough_comment_ref).toBe(newRef);
+      });
+    });
+
+    // Pure aggregation invariants (WT-04): pass filter, sort order, deterministic fallback.
+    describe('buildWalkthroughData (pure)', () => {
+      const row = (over: Partial<WalkthroughReviewRow>): WalkthroughReviewRow => ({
+        file_path: 'f',
+        file_summary: 'summary',
+        file_status: 'done',
+        error_msg: null,
+        verdict: 'comment',
+        diff_line_count: 0,
+        pass: 'main',
+        ...over,
+      });
+
+      it('excludes non-main-pass rows (forward-compat with Phase 10 security pass)', () => {
+        const data = buildWalkthroughData({
+          reviews: [
+            row({ file_path: 'main.ts', pass: 'main' }),
+            row({ file_path: 'sec.ts', pass: 'security' }),
+          ],
+          finalComments: [],
+        });
+        expect(data.filesReviewed).toBe(1);
+        expect(data.files.map((f) => f.path)).toEqual(['main.ts']);
+      });
+
+      it('sorts by highest severity present then most-changed (diff_line_count ?? 0)', () => {
+        const data = buildWalkthroughData({
+          reviews: [
+            row({ file_path: 'low.ts', diff_line_count: 5 }),
+            row({ file_path: 'high.ts', diff_line_count: 1 }),
+            row({ file_path: 'big.ts', diff_line_count: 100 }),
+          ],
+          finalComments: [
+            mainComment('nit', 'low.ts'),
+            mainComment('P0', 'high.ts'),
+            // big.ts has no findings -> sorts last despite the largest diff.
+          ],
+        });
+        expect(data.files.map((f) => f.path)).toEqual(['high.ts', 'low.ts', 'big.ts']);
+      });
+
+      it('renders a coverage row with a deterministic summary even when file_summary is empty', () => {
+        const data = buildWalkthroughData({
+          reviews: [row({ file_path: 'empty.ts', file_summary: '' })],
+          finalComments: [],
+        });
+        expect(data.files).toHaveLength(1);
+        expect(data.files[0].path).toBe('empty.ts');
+        expect(data.files[0].summary).toBe('');
+      });
+
+      it('uses the Review-failed fallback text for a failed row', () => {
+        const data = buildWalkthroughData({
+          reviews: [row({ file_path: 'boom.ts', file_status: 'failed', error_msg: 'kaboom', file_summary: null })],
+          finalComments: [],
+        });
+        expect(data.files[0].summary).toBe('Review failed: kaboom');
+      });
+    });
+  });
 });
