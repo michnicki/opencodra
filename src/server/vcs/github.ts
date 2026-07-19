@@ -192,8 +192,15 @@ export class GithubAdapter implements VcsProvider {
       if (!c.user || typeof c.user.id !== 'number' || !Number.isFinite(c.user.id)) {
         continue;
       }
+      // IN-01: guard c.id the same way as author.id -- the list is an unchecked `as`-cast, so a
+      // non-numeric/NaN comment id would stringify into a corrupt ref. Skip such rows.
+      if (typeof c.id !== 'number' || !Number.isFinite(c.id)) {
+        continue;
+      }
       // author.id is String(c.user.id), the immutable numeric user id, never login (NREG-02, D-03).
-      results.push({ ref: String(c.id), body: c.body, author: { id: String(c.user.id), login: c.user.login } });
+      // login is best-effort (only author.id is load-bearing); default to '' so it is never
+      // undefined, matching the Bitbucket sibling's `?? ''` normalization (IN-01).
+      results.push({ ref: String(c.id), body: c.body, author: { id: String(c.user.id), login: c.user.login ?? '' } });
     }
     return results;
   }
