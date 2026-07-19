@@ -1,6 +1,6 @@
 import type { AppBindings } from '@server/env';
 import { parseJsonColumn, queryRows } from './client';
-import { defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type RepoConfig } from '@shared/schema';
+import { defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type CriticResult, type RepoConfig } from '@shared/schema';
 import { getOrCreateRepository } from './repositories';
 
 export type JobRow = {
@@ -54,6 +54,14 @@ export type JobRow = {
   // 003; this is the first row-type exposure so mapJob can surface it on the JobSummary and
   // updateJobStatusCheckRef can write it without Number(ref) coercion.
   status_check_ref: string | null;
+  // Pattern 5 (status_check_ref precedent): pass-through for the migration-007 jobs columns.
+  // Both are NULLABLE and NOT written by insertJob's explicit column list, so every existing
+  // insert reads them back as null (behaviorally inert). walkthrough_comment_ref is the Phase 9
+  // streamed-walkthrough comment ref (opaque VCS ref, TEXT); critic_result is the Phase 10 critic
+  // pass result, stored JSONB -- parsed on read via parseJsonColumn and validated against
+  // criticResultSchema. In Phase 7 no writer is wired, so critic_result is always null.
+  walkthrough_comment_ref: string | null;
+  critic_result: CriticResult | string | null;
 };
 
 type JobStep = {
@@ -165,6 +173,12 @@ export function mapJob(row: JobRow) {
     // REV-R-E: pass-through for jobs.status_check_ref (Bitbucket Code Insights report key /
     // generic status reference). Plan 03's runFinalizePhase gate reads it via this field.
     statusCheckRef: row.status_check_ref,
+    // Pattern 5: publish the migration-007 jobs columns. walkthrough_comment_ref is a plain TEXT
+    // ref; critic_result is JSONB, parsed on read (mirroring config_snapshot/steps) then validated
+    // by jobSummarySchema against criticResultSchema. Both are null on every existing insert this
+    // phase (no writer wired) -- additive, behaviorally inert.
+    walkthroughCommentRef: row.walkthrough_comment_ref,
+    criticResult: parseJsonColumn<CriticResult | null>(row.critic_result, null),
   });
 }
 
@@ -1156,6 +1170,42 @@ export async function updateJobStatusCheckRef(
     env,
     `UPDATE jobs SET status_check_ref = $2 WHERE id = $1`,
     [jobId, statusCheckRef],
+  );
+}
+
+/**
+ * Pattern 5 (status_check_ref precedent): single writer of jobs.walkthrough_comment_ref. Phase 9's
+ * streamed walkthrough persists the created comment's opaque VCS ref here so a fresh Workflow
+ * instance can idempotently edit-or-repost it across hibernation. No consumer is wired in Phase 7;
+ * this establishes the typed writer surface. Single parameterized UPDATE, no string interpolation.
+ */
+export async function updateJobWalkthroughCommentRef(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  walkthroughCommentRef: string | null,
+) {
+  await queryRows(
+    env,
+    `UPDATE jobs SET walkthrough_comment_ref = $2 WHERE id = $1`,
+    [jobId, walkthroughCommentRef],
+  );
+}
+
+/**
+ * Pattern 5: single writer of jobs.critic_result. Phase 10's critic pass persists its result blob
+ * here (JSONB). The value is JSON.stringify'd on write and cast $2::jsonb; mapJob parses it back and
+ * validates against criticResultSchema on read. No consumer is wired in Phase 7. Single
+ * parameterized UPDATE, no string interpolation.
+ */
+export async function updateJobCriticResult(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  criticResult: CriticResult | null,
+) {
+  await queryRows(
+    env,
+    `UPDATE jobs SET critic_result = $2::jsonb WHERE id = $1`,
+    [jobId, criticResult === null ? null : JSON.stringify(criticResult)],
   );
 }
 
