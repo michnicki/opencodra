@@ -55,6 +55,7 @@ const JOB: JobDetail = {
       id: '33333333-3333-3333-3333-333333333333',
       jobId: JOB_ID,
       filePath: 'src/index.ts',
+      pass: 'main',
       fileStatus: 'done',
       modelUsed: 'gpt-4o-mini',
       diffLineCount: 12,

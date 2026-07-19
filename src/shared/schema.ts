@@ -186,7 +186,15 @@ export const repoConfigSchema = z.object({
 export const reviewJobMessageSchema = z.object({
   jobId: z.uuid().optional(),
   deliveryId: z.string().min(1),
-  phase: z.enum(['prepare', 'review', 'finalize']).optional(),
+  // WIRE contract widened with 'critic' (D-07). The INTERNAL ReviewJobRunResult.phase union
+  // (review.ts:57) and the dispatch switch (review.ts:412-417) intentionally stay
+  // prepare|review|finalize — Phase 10 owns critic dispatch. A stray phase:'critic' message is
+  // REJECTED at the resolveQueuedJob boundary (return null → acked), never coerced/run.
+  phase: z.enum(['prepare', 'review', 'finalize', 'critic']).optional(),
+  // Optional multi-pass routing fields (D-07). Kept `.optional()` (no default) so every
+  // pre-widening producer/fixture — and ReviewJobMessage = z.input<...> — keeps compiling.
+  kind: z.enum(['review', 'qa', 'command']).optional(),
+  reviewScope: z.enum(['all', 'rest', 'head']).optional(),
   eventName: z.string().min(1).optional(),
   payload: z.unknown().optional(),
   installationId: z.string().min(1).optional(),
@@ -216,6 +224,27 @@ export const reviewJobMessageSchema = z.object({
     path: ['jobId'],
   });
 });
+
+// Critic-pass result (D-08). The critic re-judges main-review findings, keeping some and pruning
+// others (each pruned finding carries a human-readable reason). `.passthrough()` so Phase 10 can
+// add prune/audit metadata fields WITHOUT a breaking contract edit (the D-08 additive guardrail).
+// Metadata scalars are optional/tolerant for the same reason. Reuses parsedReviewCommentSchema for
+// kept/pruned findings so the critic speaks the same finding vocabulary as the main review.
+export const criticResultSchema = z
+  .object({
+    kept: z.array(parsedReviewCommentSchema),
+    pruned: z.array(
+      z.object({
+        finding: parsedReviewCommentSchema,
+        reason: z.string(),
+      }),
+    ),
+    model: z.string().optional(),
+    inputTokens: z.number().int().optional(),
+    outputTokens: z.number().int().optional(),
+  })
+  .passthrough();
+export type CriticResult = z.infer<typeof criticResultSchema>;
 
 export const jobSummarySchema = z.object({
   id: z.uuid(),
@@ -258,6 +287,11 @@ export const jobSummarySchema = z.object({
   // report key / generic status reference). Used by Plan 03's runPreparePhase writer and the
   // runFinalizePhase gate widening. Optional so pre-widening fixtures still parse.
   statusCheckRef: z.string().nullable().optional(),
+  // Phase 7 pass-through for the new jobs.walkthrough_comment_ref / jobs.critic_result columns
+  // (Plan 04 adds the accessors; Phase 8/10 wire the writers). Optional so pre-widening fixtures
+  // still parse; `.nullable()` because the DB columns are nullable and unset until a later phase.
+  walkthroughCommentRef: z.string().nullable().optional(),
+  criticResult: criticResultSchema.nullable().optional(),
 });
 
 export const jobsQuerySchema = z.object({
@@ -273,10 +307,21 @@ export const jobsQuerySchema = z.object({
 export type JobsQuery = z.infer<typeof jobsQuerySchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 
+// D-07 pass value-set, locked contract-first (closes the file_reviews.pass gap so Phase 10 needs
+// no cross-layer contract edit). 'main' is today's single review pass; 'security' is Phase 10's
+// dedicated pass. Widen this enum when a new pass is introduced.
+export const fileReviewPassSchema = z.enum(['main', 'security']);
+export type FileReviewPass = z.infer<typeof fileReviewPassSchema>;
+
 export const fileReviewRecordSchema = z.object({
   id: z.uuid(),
   jobId: z.uuid(),
   filePath: z.string(),
+  // `.default('main')` is REQUIRED for inertness: jobDetailSchema.parse (jobs.ts) builds `files`
+  // from a JSON_BUILD_OBJECT that omits `pass`, so a required-no-default field would break that
+  // parse — with the default it resolves to 'main' and the job-detail read path stays byte-identical
+  // (Plan 02 surfaces the real value via getFileReviewsForJobs; Phase 10 may then emit `pass`).
+  pass: fileReviewPassSchema.default('main'),
   fileStatus: z.enum(fileStatuses),
   modelUsed: z.string(),
   modelProvider: z.string().optional(),

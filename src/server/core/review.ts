@@ -551,9 +551,22 @@ async function resolveQueuedJob(
   env: AppBindings,
   message: ReviewJobMessage,
 ): Promise<{ job: PersistedReviewJob; phase: 'prepare' | 'review' | 'finalize' } | null> {
+  // The WIRE contract (reviewJobMessageSchema.phase) now includes 'critic' (D-07), but Phase 7 does
+  // NOT add critic dispatch — the internal ReviewJobRunResult.phase union and the phase switch stay
+  // prepare|review|finalize (Phase 10 owns critic handling). REJECT a premature/spoofed phase:'critic'
+  // message HERE at the boundary (return null → runReviewJob acks it) rather than coercing it to
+  // 'review'/'prepare', so a stray critic message can NEVER silently run main review. Capturing into a
+  // local const also control-flow-narrows the type back to 'prepare'|'review'|'finalize'|undefined for
+  // the two `?? '...'` sites below, which is what makes the narrow return type typecheck.
+  const requestedPhase = message.phase;
+  if (requestedPhase === 'critic') {
+    logger.warn('Queue message ignored: phase "critic" is not dispatched in this phase (Phase 10 owns critic dispatch).');
+    return null;
+  }
+
   if (message.jobId) {
     const row = await getJobForProcessing(env, message.jobId);
-    return row ? { job: mapJob(row), phase: message.phase ?? 'review' } : null;
+    return row ? { job: mapJob(row), phase: requestedPhase ?? 'review' } : null;
   }
 
   if (!message.eventName) {
@@ -650,7 +663,7 @@ async function resolveQueuedJob(
   if (duplicateJob) {
     if (duplicateJob.status === 'queued' || duplicateJob.status === 'running') {
       logger.info(`Resuming duplicate in-flight job ${duplicateJob.id} for ${resolved.owner}/${resolved.repo} PR #${resolved.prNumber}.`);
-      return { job: duplicateJob, phase: message.phase ?? 'prepare' };
+      return { job: duplicateJob, phase: requestedPhase ?? 'prepare' };
     }
 
     logger.info(`Duplicate terminal job found for ${resolved.owner}/${resolved.repo} PR #${resolved.prNumber}, skipping.`);
