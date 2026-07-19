@@ -537,6 +537,9 @@ describe('ModelService', () => {
               on_file_types: ['.ts'],
               command: 'npm run lint',
             },
+            walkthrough: { enabled: false },
+            passes: { security: { enabled: false }, critic: { enabled: false } },
+            interactive: { commands: { enabled: false }, qa: { enabled: false } },
           },
           model: {
             main: '@cf/zai-org/glm-4.7-flash',

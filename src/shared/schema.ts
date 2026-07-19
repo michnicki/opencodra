@@ -109,6 +109,24 @@ export const reviewConfigSchema = z.object({
       on_file_types: ['.ts', '.tsx', '.js'],
       command: 'npm run lint && npm run typecheck',
     }),
+  // Phase 7 contract-first feature toggles (D-04/D-05/D-06). Every block and every `enabled`
+  // carries an explicit `false` default so `repoConfigSchema.parse({})` yields all-off (NREG-01
+  // inertness). Grouped (never a flat boolean namespace, never a single master switch) so later
+  // phases (8-11) can wire each capability behind its own toggle without a breaking contract edit.
+  // Uniform `{ enabled: boolean }` shape leaves room for per-toggle config fields later.
+  walkthrough: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  passes: z
+    .object({
+      security: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+      critic: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+    })
+    .default({ security: { enabled: false }, critic: { enabled: false } }),
+  interactive: z
+    .object({
+      commands: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+      qa: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+    })
+    .default({ commands: { enabled: false }, qa: { enabled: false } }),
 });
 
 export const repoConfigSchema = z.object({
@@ -136,6 +154,12 @@ export const repoConfigSchema = z.object({
       on_file_types: ['.ts', '.tsx', '.js'],
       command: 'npm run lint && npm run typecheck',
     },
+    // Mirror the Phase 7 toggle blocks all-off in the inline literal default too, so
+    // `repoConfigSchema.parse({})` yields every toggle false regardless of Zod default
+    // short-circuit semantics for the nested `review` object (RESEARCH Open Q2).
+    walkthrough: { enabled: false },
+    passes: { security: { enabled: false }, critic: { enabled: false } },
+    interactive: { commands: { enabled: false }, qa: { enabled: false } },
   }),
   model: z
     .object({
