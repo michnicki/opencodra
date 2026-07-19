@@ -537,7 +537,7 @@ describe('ModelService', () => {
               on_file_types: ['.ts'],
               command: 'npm run lint',
             },
-            walkthrough: { enabled: false },
+            walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
             passes: { security: { enabled: false }, critic: { enabled: false } },
             interactive: { commands: { enabled: false }, qa: { enabled: false } },
           },

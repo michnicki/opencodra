@@ -114,7 +114,17 @@ export const reviewConfigSchema = z.object({
   // inertness). Grouped (never a flat boolean namespace, never a single master switch) so later
   // phases (8-11) can wire each capability behind its own toggle without a breaking contract edit.
   // Uniform `{ enabled: boolean }` shape leaves room for per-toggle config fields later.
-  walkthrough: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  // D-09: `sequence_diagram` defaults ON so that enabling the walkthrough gets a Mermaid diagram on
+  // GitHub by default — it stays inert while `walkthrough.enabled` is false (the whole feature is off),
+  // and is additionally hard-gated at render time by provider (Bitbucket never emits a Mermaid fence).
+  // So the sub-toggle's `true` default cannot regress NREG-01: `repoConfigSchema.parse({})` still has
+  // `walkthrough.enabled === false`, i.e. no walkthrough is produced at all.
+  walkthrough: z
+    .object({
+      enabled: z.boolean().default(false),
+      sequence_diagram: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
+    })
+    .default({ enabled: false, sequence_diagram: { enabled: true } }),
   passes: z
     .object({
       security: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
@@ -157,7 +167,7 @@ export const repoConfigSchema = z.object({
     // Mirror the Phase 7 toggle blocks all-off in the inline literal default too, so
     // `repoConfigSchema.parse({})` yields every toggle false regardless of Zod default
     // short-circuit semantics for the nested `review` object (RESEARCH Open Q2).
-    walkthrough: { enabled: false },
+    walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
     passes: { security: { enabled: false }, critic: { enabled: false } },
     interactive: { commands: { enabled: false }, qa: { enabled: false } },
   }),

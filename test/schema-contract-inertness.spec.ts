@@ -70,6 +70,9 @@ describe('SC3: reviewConfig feature toggles all default off (NREG-01 inertness)'
     expect(cfg.review.passes.security.enabled).toBe(false);
     expect(cfg.review.passes.critic.enabled).toBe(false);
     expect(cfg.review.walkthrough.enabled).toBe(false);
+    // D-09: the walkthrough sequence_diagram sub-toggle defaults ON, but is inert while the parent
+    // walkthrough.enabled is false. Pin the default here so a future flip is caught by a named test.
+    expect(cfg.review.walkthrough.sequence_diagram.enabled).toBe(true);
     expect(cfg.review.interactive.commands.enabled).toBe(false);
     expect(cfg.review.interactive.qa.enabled).toBe(false);
   });
@@ -78,6 +81,7 @@ describe('SC3: reviewConfig feature toggles all default off (NREG-01 inertness)'
     expect(defaultRepoConfig.review.passes.security.enabled).toBe(false);
     expect(defaultRepoConfig.review.passes.critic.enabled).toBe(false);
     expect(defaultRepoConfig.review.walkthrough.enabled).toBe(false);
+    expect(defaultRepoConfig.review.walkthrough.sequence_diagram.enabled).toBe(true);
     expect(defaultRepoConfig.review.interactive.commands.enabled).toBe(false);
     expect(defaultRepoConfig.review.interactive.qa.enabled).toBe(false);
   });
