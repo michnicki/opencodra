@@ -118,6 +118,10 @@ type BitbucketCommentRecord = {
     to?: number;
     from?: number;
   };
+  // Additive author block (Phase 8). `account_id` is the IMMUTABLE provider id used as the author
+  // self-filter key (NREG-02); `nickname` is the renameable @mention handle. Bitbucket comment
+  // authors have NO `username` field (removed from the API in 2019) — never read it (Pitfall 4).
+  user?: { account_id?: string; nickname?: string; display_name?: string };
 };
 
 function repositoryPath(workspace: string, repoSlug: string) {
@@ -193,14 +197,30 @@ export class BitbucketClient {
   }
 
   async listPullRequestComments(workspace: string, repoSlug: string, prNumber: number, pagelen = 100) {
+    // SINGLE page, pagelen=100, OLDEST-first (Bitbucket's default order). A consumer needing the
+    // most-recent comments must sort newest-first or paginate — the primitive does not (cap +
+    // ordering caveat, review F7). Do NOT change the query/pagelen: it is shared with submitReview's
+    // dedup (buildDedupIndex) and findExistingReviewForCommit, so any change here is a regression
+    // (NREG-01).
     const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments?pagelen=${pagelen}`;
     const response = await this.request('GET', path);
     const page = (await response.json()) as { values?: BitbucketCommentRecord[] };
 
     return (page.values ?? []).map((comment) => ({
+      // id, body, inline stay byte-identical — submitReview dedup depends on this exact shape
+      // (Pitfall 2, NREG-01). `author` is purely ADDITIVE.
       id: comment.id,
       body: comment.content?.raw ?? '',
       inline: comment.inline,
+      // author.id is `string | undefined` — a comment missing an immutable account_id must NOT be
+      // minted as '' here (a false identity would defeat the Phase 11 self-filter, review F5). The
+      // drop-missing-author policy lives in the ADAPTER (vcs/bitbucket.ts), not this shared client
+      // method, so submitReview dedup still sees every comment. author.id = account_id (immutable,
+      // NREG-02); login = nickname (@mention handle), never username (removed from the API).
+      author: {
+        id: comment.user?.account_id as string | undefined,
+        login: comment.user?.nickname ?? comment.user?.display_name ?? '',
+      },
     }));
   }
 
@@ -224,6 +244,29 @@ export class BitbucketClient {
       : { content: { raw: comment.content.raw } };
     const response = await this.request('POST', path, body);
     return (await response.json()) as { id: number };
+  }
+
+  async editPullRequestComment(
+    workspace: string,
+    repoSlug: string,
+    prNumber: number,
+    commentId: number,
+    raw: string,
+  ): Promise<{ id: number } | null> {
+    const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments/${commentId}`;
+    try {
+      // Confirmed against the Atlassian OpenAPI: PUT with body { content: { raw } }.
+      const response = await this.request('PUT', path, { content: { raw } });
+      return (await response.json()) as { id: number };
+    } catch (e) {
+      // A gone comment surfaces as 404 OR 410 (amended D-05, review F3). Map both to null INSIDE the
+      // client so the adapter maps null->null uniformly and never inspects a raw HTTP status (D-05).
+      // Any OTHER status (e.g. 403/422) rethrows.
+      if (e instanceof BitbucketError && (e.status === 404 || e.status === 410)) {
+        return null;
+      }
+      throw e;
+    }
   }
 
   async approvePullRequest(workspace: string, repoSlug: string, prNumber: number): Promise<void> {

@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BitbucketClient, BitbucketError } from '@server/core/bitbucket';
 import type { AppBindings } from '@server/env';
 import {
+  BITBUCKET_FIXTURE_ACCOUNT_ID,
+  BITBUCKET_FIXTURE_EDIT_COMMENT_ID,
+  BITBUCKET_FIXTURE_NICKNAME,
   expectBitbucketGet,
   expectBitbucketPost,
   expectBitbucketPut,
@@ -71,7 +74,12 @@ describe('BitbucketClient', () => {
     const { client, tracker } = createClient();
 
     await expect(client.listPullRequestComments('acme', 'backend', 42)).resolves.toEqual([
-      { id: 7, body: 'Existing comment', inline: undefined },
+      {
+        id: 7,
+        body: 'Existing comment',
+        inline: undefined,
+        author: { id: BITBUCKET_FIXTURE_ACCOUNT_ID, login: BITBUCKET_FIXTURE_NICKNAME },
+      },
     ]);
     expectBitbucketGet(mock.calls[0], `${repoPrefix}/pullrequests/42/comments?pagelen=100`);
     expectAuthenticated(mock.calls[0]);
@@ -129,6 +137,53 @@ describe('BitbucketClient', () => {
     expect(mock.calls[0].body).toEqual({
       content: { raw: '<!-- codra:job=job-1 commit=head123 -->' },
     });
+  });
+
+  it('edits a pull request comment via PUT with body { content: { raw } }', async () => {
+    const mock = installBitbucketFetchMock();
+    const { client, tracker } = createClient();
+
+    await expect(
+      client.editPullRequestComment('acme', 'backend', 42, 8, 'Edited body'),
+    ).resolves.toEqual({ id: BITBUCKET_FIXTURE_EDIT_COMMENT_ID });
+
+    expectBitbucketPut(mock.calls[0], `${repoPrefix}/pullrequests/42/comments/8`);
+    expect(mock.calls[0].body).toEqual({ content: { raw: 'Edited body' } });
+    expectAuthenticated(mock.calls[0]);
+    expect(tracker.incrementSubrequests).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when editing a comment that is gone (404)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 404, body: { error: { message: 'Not found' } } }],
+    });
+    const { client } = createClient();
+
+    await expect(
+      client.editPullRequestComment('acme', 'backend', 42, 8, 'Edited body'),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when editing a comment that is gone (410)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 410, body: { error: { message: 'Gone' } } }],
+    });
+    const { client } = createClient();
+
+    await expect(
+      client.editPullRequestComment('acme', 'backend', 42, 8, 'Edited body'),
+    ).resolves.toBeNull();
+  });
+
+  it('throws BitbucketError on a non-gone edit status (403)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 403, body: { error: { message: 'Forbidden' } } }],
+    });
+    const { client } = createClient();
+
+    const request = client.editPullRequestComment('acme', 'backend', 42, 8, 'Edited body');
+    await expect(request).rejects.toBeInstanceOf(BitbucketError);
+    await expect(request).rejects.toMatchObject({ status: 403 });
   });
 
   it('approves a pull request with an empty POST body', async () => {
