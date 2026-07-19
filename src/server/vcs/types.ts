@@ -112,6 +112,37 @@ export interface VcsProvider {
   submitReview(owner: string, repo: string, prNumber: number, input: VcsSubmitReviewInput): Promise<{ ref: string }>;
   findExistingReviewForCommit(owner: string, repo: string, prNumber: number, commitSha: string): Promise<{ ref: string } | null>;
 
+  /**
+   * Standalone (issue/PR-level) comment primitives. REQUIRED on every adapter (not optional like
+   * `labels?`) -- both providers implement them (D-01). No consumer is wired this phase; the
+   * methods are inert (D-06). The primitives are thin -- consumers own de-duplication, there is no
+   * built-in dedup (D-04).
+   *
+   * The `ref` is PROVIDER-OPAQUE and self-encoding: the adapter alone interprets it, and a numeric
+   * provider id must NEVER cross this seam into `core/` (D-01/D-02). GitHub's ref is the bare
+   * comment id; Bitbucket packs the PR id with the comment id (e.g. `${prId}:${commentId}`) so a
+   * persisted ref stays fully self-sufficient -- `editPrComment(owner, repo, ref, body)` mirrors
+   * `updateStatusCheck(owner, repo, ref, input)` exactly, with NO separate `prNumber` argument (D-02).
+   *
+   * `editPrComment` returns `null` when the target comment no longer exists -- HTTP 404 OR 410 Gone
+   * (amended D-05, review F3) -- identically on both providers, so a consumer re-posts with a plain
+   * `if (!result)` branch rather than `try/catch`; any other status throws (existing
+   * `GitHubError` / Bitbucket error patterns), and `core/` never inspects a raw HTTP status. Its
+   * success return `{ ref }` mirrors the `findExistingReviewForCommit` nullable-return precedent.
+   *
+   * `listPrComments` author is `{ id, login }`: `id` is the IMMUTABLE provider id (GitHub numeric
+   * user id as a string / Bitbucket `account_id`) used for authorization and bot self-filter
+   * (NREG-02, Phase 11); `login` is the renameable `@mention` handle (GitHub `login` / Bitbucket
+   * `nickname`) (D-03). `author.id` is ALWAYS non-empty -- a comment missing an immutable id is
+   * OMITTED from the result rather than surfaced as `''` (review F5), so a consumer can trust it as
+   * a self-filter key. The result is a SINGLE oldest-first page (GitHub `per_page=100` / Bitbucket
+   * `pagelen=100`); a consumer needing the most-recent comments MUST sort newest-first or paginate
+   * (cap + ordering caveat -- review F7).
+   */
+  createPrComment(owner: string, repo: string, prNumber: number, body: string): Promise<{ ref: string }>;
+  editPrComment(owner: string, repo: string, ref: string, body: string): Promise<{ ref: string } | null>;
+  listPrComments(owner: string, repo: string, prNumber: number): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>>;
+
   labels?: {
     ensure(owner: string, repo: string, name: string, color: string): Promise<void>;
     add(owner: string, repo: string, prNumber: number, labels: string[]): Promise<void>;
