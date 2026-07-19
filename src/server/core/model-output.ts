@@ -446,6 +446,60 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
   };
 }
 
+// Hard cap on the returned Mermaid diagram source (chars). Keeps a hostile/huge model diagram from
+// blowing the walkthrough comment-size budget (the formatter fences it under WALKTHROUGH_BODY_MAX);
+// over-length source is rejected (returns null -> diagram omitted).
+const DIAGRAM_SOURCE_MAX = 20_000;
+
+/**
+ * Best-effort, tolerant parse of a model's Mermaid sequence-diagram output for the walkthrough
+ * (WT-04, D-04a, Pitfall #6). Returns the trimmed RAW diagram source WITHOUT any ```mermaid fence
+ * (the formatter is the sole fence-adder, GitHub-only — see formatWalkthrough's fence contract), or
+ * `null` on empty, `<think>`-only, non-diagram, over-length, or garbage output. NEVER throws and
+ * never uses bare `JSON.parse` — this is the fall-back-to-omit contract the Plan 03 best-effort
+ * diagram call relies on (a null diagram -> the walkthrough simply posts without a diagram).
+ */
+export function parseWalkthroughDiagram(raw: string): string | null {
+  try {
+    if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+
+    // (1) Strip <think>...</think> reasoning block(s). NET-NEW logic: no <think> stripper exists in
+    // src/server today (cleanText only strips leading prefix tags/emoji and flattens newlines). This
+    // is tolerant of a missing close tag — a lone opening <think> with no </think> drops the rest.
+    let text = raw
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<think>[\s\S]*$/i, '');
+
+    // (2) If the model wrapped the diagram in a ```mermaid (or bare ```) fence, take the fence body;
+    // otherwise use the stripped text as-is.
+    const fenceMatch = text.match(/```(?:mermaid)?[ \t]*\r?\n?([\s\S]*?)```/i);
+    if (fenceMatch) {
+      text = fenceMatch[1];
+    }
+
+    const source = text.trim();
+    if (source.length === 0) return null;
+
+    // (3) Strict validation: after dropping leading blank / `%%`-comment lines, the FIRST
+    // non-comment token must be `sequenceDiagram` (reject surrounding prose or a mid-paragraph
+    // mention — "contains sequenceDiagram somewhere" is NOT enough).
+    const meaningful = source
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && !line.startsWith('%%'));
+    if (!meaningful) return null;
+    if (meaningful.split(/\s+/)[0] !== 'sequenceDiagram') return null;
+
+    // (4) Hard length cap — reject an over-length diagram outright.
+    if (source.length > DIAGRAM_SOURCE_MAX) return null;
+
+    return source;
+  } catch {
+    // Best-effort: any unexpected failure -> omit the diagram, never fail the walkthrough.
+    return null;
+  }
+}
+
 export function parseSummaryResponse(raw: string): string {
   const extracted = extractJson(raw);
   const preprocessed = preprocessJson(extracted);
