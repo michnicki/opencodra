@@ -5,8 +5,9 @@ import { reviewWithOpenAI } from '../models/openai';
 import { reviewWithAnthropic } from '../models/anthropic';
 import { buildFileReviewPrompts } from '../prompts/file-review';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '../prompts/summary';
+import { WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT, buildWalkthroughDiagramPrompt } from '../prompts/walkthrough-diagram';
 import { parseFileReviewResponse } from '../core/model-output';
-import { truncateFileDiff, chunkFileDiff } from '../core/diff';
+import { truncateFileDiff, chunkFileDiff, type FileDiff } from '../core/diff';
 import type { RepoConfig } from '@shared/schema';
 import type { TokenTracker } from '../core/token-tracker';
 import { UnparseableModelResponseError, type ModelResponse } from '../models/types';
@@ -667,5 +668,48 @@ export class ModelService {
     // As in reviewFile: guard against `throw undefined` when every summary model was skipped via
     // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
     throw lastError ?? new Error('No summary model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * WT-03 (Plan 09-03): the OPTIONAL, best-effort Mermaid sequence-diagram call. Unlike
+   * generateSummary/reviewFile this tries ONLY the selected PRIMARY model — there is NO
+   * `...fallbacks` iteration — so the "one whole-diff diagram call" is literally exactly ONE outbound
+   * inference request (cross-AI budget MEDIUM: "one model call" must not fan out across a fallback
+   * chain in the budget-fragile finalize phase). It is fed the ACTUAL bounded whole-diff (FileDiff[]),
+   * not per-file correctness summaries (cross-AI blocker 2) — see buildWalkthroughDiagramPrompt.
+   *
+   * The method itself may throw (resolveModel not configured / provider error) and does NOT retry;
+   * the finalize call site wraps it in a best-effort try/catch and simply OMITS the diagram on any
+   * failure (D-07, WT-04). Returns the raw model text plus its token counts + modelUsed so the caller
+   * can fold the diagram's tokens into the job's completeJob totals (token-accounting MEDIUM).
+   */
+  async generateWalkthroughDiagram(params: {
+    prTitle: string | null;
+    files: FileDiff[];
+    fileSummaries: Array<{ path: string; summary: string; verdict: string }>;
+    config: RepoConfig;
+  }): Promise<ModelResponse> {
+    // Primary model ONLY — deliberately NOT `[primary, ...fallbacks]`. One outbound request.
+    const { primary } = this.selectModel({ totalLineCount: 0, config: params.config });
+    const resolved = await this.resolveModel(primary);
+
+    const response = await this.callResolvedModel(
+      resolved,
+      {
+        systemPrompt: WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT,
+        userPrompt: buildWalkthroughDiagramPrompt({
+          prTitle: params.prTitle,
+          files: params.files,
+          fileSummaries: params.fileSummaries,
+        }),
+      },
+      adaptiveModelTimeoutMs(0),
+    );
+
+    if (this.tracker) {
+      this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+    }
+
+    return response;
   }
 }
