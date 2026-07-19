@@ -471,8 +471,12 @@ export function parseWalkthroughDiagram(raw: string): string | null {
       .replace(/<think>[\s\S]*$/i, '');
 
     // (2) If the model wrapped the diagram in a ```mermaid (or bare ```) fence, take the fence body;
-    // otherwise use the stripped text as-is.
-    const fenceMatch = text.match(/```(?:mermaid)?[ \t]*\r?\n?([\s\S]*?)```/i);
+    // otherwise use the stripped text as-is. Anchor the fence to the START of the stripped text
+    // (^\s*```) so a bare, unfenced diagram that merely CONTAINS a stray ```…``` pair somewhere in
+    // its body is not mistakenly unwrapped to the content between those inner backticks — which would
+    // drop the leading `sequenceDiagram` line and fail (3), discarding an otherwise-usable diagram
+    // (IN-02). Still tolerant: no match -> use the stripped text as-is, never throws.
+    const fenceMatch = text.match(/^\s*```(?:mermaid)?[ \t]*\r?\n?([\s\S]*?)```/i);
     if (fenceMatch) {
       text = fenceMatch[1];
     }
