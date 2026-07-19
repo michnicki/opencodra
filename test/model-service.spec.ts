@@ -23,10 +23,12 @@ describe('ModelService', () => {
     });
 
     const service = new ModelService(env);
-    const response = await (service as any).callModel('@cf/moonshotai/kimi-k2.5', {
-      systemPrompt: 'system',
-      userPrompt: 'user',
-    });
+    // callResolvedModel(resolveModel(id)) is the exact path the (now-removed) private
+    // callModel wrapper took — exercises legacy-id routing through the real dispatch method.
+    const response = await (service as any).callResolvedModel(
+      await (service as any).resolveModel('@cf/moonshotai/kimi-k2.5'),
+      { systemPrompt: 'system', userPrompt: 'user' },
+    );
 
     expect(requestedModel).toBe('@cf/moonshotai/kimi-k2.6');
     expect(response.modelUsed).toBe('@cf/moonshotai/kimi-k2.6');

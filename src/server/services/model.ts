@@ -300,10 +300,6 @@ export class ModelService {
     );
   }
 
-  private async callModel(model: string, input: { systemPrompt: string; userPrompt: string }, timeoutMs?: number): Promise<ModelResponse> {
-    return this.callResolvedModel(await this.resolveModel(model), input, timeoutMs);
-  }
-
   async reviewFile(params: {
     file: any;
     prTitle: string | null;
