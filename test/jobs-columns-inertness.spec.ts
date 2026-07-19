@@ -6,6 +6,7 @@ import {
   updateJobWalkthroughCommentRef,
   updateJobCriticResult,
 } from '@server/db/jobs';
+import { queryRows } from '@server/db/client';
 import { defaultRepoConfig, type CriticResult } from '@shared/schema';
 import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 
@@ -82,6 +83,31 @@ dbDescribe('jobs.walkthrough_comment_ref / critic_result inertness (SC1 jobs por
     expect(row).not.toBeNull();
     const mapped = mapJob(row!);
     expect(mapped.criticResult).toEqual(critic);
+  });
+
+  it('WR-01: a malformed critic_result blob degrades to null instead of throwing the whole read', async () => {
+    const job = await insertJob(env, {
+      ...baseJob,
+      repo: `test-repo-${Date.now()}-cols-malformed`,
+      prNumber: 5,
+      commitSha: sha('e'),
+      baseSha: sha('0'),
+    });
+
+    // Write a structurally-invalid critic_result directly (bypassing the schema-validating updater)
+    // to simulate a Phase-10 writer persisting a bad/partial LLM blob: `kept`/`pruned` are required
+    // arrays, so an object missing them fails criticResultSchema. Before WR-01 this made mapJob's
+    // strict jobSummarySchema.parse THROW and fail the entire job read; now it degrades to null.
+    await queryRows(
+      env,
+      `UPDATE jobs SET critic_result = $2::jsonb WHERE id = $1`,
+      [job.id, JSON.stringify({ not: 'a valid critic result' })],
+    );
+
+    const row = await getJobForProcessing(env, job.id);
+    expect(row).not.toBeNull();
+    expect(() => mapJob(row!)).not.toThrow();
+    expect(mapJob(row!).criticResult).toBeNull();
   });
 
   it('updateJobWalkthroughCommentRef can clear the ref back to null', async () => {

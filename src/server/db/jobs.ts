@@ -1,6 +1,7 @@
 import type { AppBindings } from '@server/env';
 import { parseJsonColumn, queryRows } from './client';
-import { defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type CriticResult, type RepoConfig } from '@shared/schema';
+import { criticResultSchema, defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type CriticResult, type RepoConfig } from '@shared/schema';
+import { logger } from '@server/core/logger';
 import { getOrCreateRepository } from './repositories';
 
 export type JobRow = {
@@ -132,6 +133,24 @@ export function mapJob(row: JobRow) {
     row.last_queue_message_at,
   ) ?? row.created_at;
 
+  // WR-01: fail-soft the critic_result read. mapJob is on every hot read path (listJobs,
+  // getJobDetail, the runReviewJob claim). Once Phase 10 persists LLM-derived critic output into
+  // this JSONB column, a single malformed blob (or a finding missing a required field) would make
+  // the strict jobSummarySchema.parse THROW and fail the ENTIRE job-list page / detail read / job
+  // claim -- not just this field. Validate it out-of-band with safeParse and degrade a bad blob to
+  // null (logged) rather than poisoning the whole row parse. critic_result is always null in Phase
+  // 7 (no writer wired), so this stays behaviorally inert until a writer lands.
+  const rawCritic = parseJsonColumn<unknown>(row.critic_result, null);
+  const criticParsed = rawCritic === null ? null : criticResultSchema.safeParse(rawCritic);
+  let criticResult: CriticResult | null = null;
+  if (criticParsed !== null) {
+    if (criticParsed.success) {
+      criticResult = criticParsed.data;
+    } else {
+      logger.warn(`Ignoring unparseable critic_result for job ${row.id}`);
+    }
+  }
+
   return jobSummarySchema.parse({
     id: row.id,
     owner: row.owner,
@@ -178,7 +197,9 @@ export function mapJob(row: JobRow) {
     // by jobSummarySchema against criticResultSchema. Both are null on every existing insert this
     // phase (no writer wired) -- additive, behaviorally inert.
     walkthroughCommentRef: row.walkthrough_comment_ref,
-    criticResult: parseJsonColumn<CriticResult | null>(row.critic_result, null),
+    // WR-01: pass the out-of-band-validated value (see above); a bad blob has already degraded to
+    // null so the strict schema field never throws on the whole-row parse.
+    criticResult,
   });
 }
 
