@@ -1504,7 +1504,15 @@ async function runFinalizePhase(
   } else {
     reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
   }
-  const fileSummaries = reviews.map((review) => ({
+  // Pitfall 3 (NREG): split the reviews into the main pass for every Phase-9 surface. mainReviews
+  // feeds fileSummaries, the verdict aggregation, successfulReviews/confidence/correctness, and the
+  // walkthrough — so toggling passes.security/critic never changes the summary narrative inputs, the
+  // verdict, or the walkthrough coverage/counts/ordering. ALL `reviews` rows feed ONLY the token
+  // totals (security tokens were really spent) and the finding candidate union (reviewedComments).
+  // When passes.security is off, mainReviews === reviews so everything below is byte-identical (NREG-01).
+  const mainReviews = reviews.filter((review) => review.pass === 'main');
+
+  const fileSummaries = mainReviews.map((review) => ({
     path: review.file_path,
     summary: review.file_status === 'failed'
       ? `Review failed: ${review.error_msg ?? 'Unknown file review error'}`
@@ -1535,7 +1543,28 @@ async function runFinalizePhase(
     finalComments = finalComments.slice(0, effectiveMaxComments);
   }
 
-  const verdictSummary = formatter.summarizeVerdict(finalComments, hasFailures);
+  // Pitfall 3 (corrected): buildWalkthroughData ALREADY filters its `reviews` arg to pass==='main'
+  // internally (walkthrough.ts), but it derives per-file counts and global severity counts from its
+  // `finalComments` arg — so passing the MIXED finalComments (main + security + critic-kept) would
+  // leak security findings into the Phase-9 walkthrough counts and file ordering. Compute a SEPARATE
+  // main-only finalComments by applying the EXACT SAME floor block (min_severity rank filter ->
+  // confidence floor -> severity sort -> slice to effectiveMaxComments) to the main-pass findings.
+  // This is the exact v1.0 main-only finalComments computation, so the walkthrough coverage, per-file
+  // + global severity counts, and file ordering are identical whether or not security/critic is on.
+  // The verdict is likewise driven by this main-only set (a Phase-9 surface — security findings post
+  // as inline comments but must not change the overall approve/comment verdict). When both toggles are
+  // off, mainReviews === reviews and reviewedComments is the main-only flatMap, so mainFinalComments
+  // is element-wise identical to finalComments (NREG-01).
+  const mainCandidateComments = mainReviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  let mainFinalComments = mainCandidateComments
+    .filter(c => (severityRanks[c.severity] ?? 4) <= minRank)
+    .filter(c => passesConfidenceFloor(c, config.review.min_confidence));
+  mainFinalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
+  if (mainFinalComments.length > effectiveMaxComments) {
+    mainFinalComments = mainFinalComments.slice(0, effectiveMaxComments);
+  }
+
+  const verdictSummary = formatter.summarizeVerdict(mainFinalComments, hasFailures);
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
@@ -1545,7 +1574,7 @@ async function runFinalizePhase(
   // passed them, so both columns were always null. Only successfully-reviewed (non-failed) files
   // count toward the aggregate -- a failed file's null confidence/correctness would otherwise
   // silently drag the average/verdict down.
-  const successfulReviews = reviews.filter((review) => review.file_status !== 'failed');
+  const successfulReviews = mainReviews.filter((review) => review.file_status !== 'failed');
   const confidenceScores = successfulReviews
     .map((review) => review.confidence_score)
     .filter((score): score is number => score !== null && score !== undefined);
@@ -1740,7 +1769,7 @@ async function runFinalizePhase(
         }
       }
       // (c) deterministic aggregation over the main-pass reviews + the floored/capped finalComments.
-      const data = buildWalkthroughData({ reviews, finalComments });
+      const data = buildWalkthroughData({ reviews: mainReviews, finalComments: mainFinalComments });
       // (d) single in-place edit (delete-recovery + bounded transient retry live in the helper). The
       // mermaid fence is added GitHub-only by formatWalkthrough (Plan 01), filling the Plan 02 seam.
       await editWalkthroughComment({ env, job, config, vcs, formatter, data, mermaid });
