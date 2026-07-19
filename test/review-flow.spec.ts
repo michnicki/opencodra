@@ -95,6 +95,18 @@ vi.mock('@server/services/model', () => {
                 outputTokens: 2,
             };
         }
+        // Phase 9 Plan 03 WT-03: the optional whole-diff Mermaid diagram call. Default returns a
+        // valid sequenceDiagram so the GitHub finalize path renders a ```mermaid fence; individual
+        // tests spy/override this on the prototype to assert args, count, tokens, and failure omit.
+        async generateWalkthroughDiagram() {
+            return {
+                modelUsed: 'diagram-model',
+                provider: 'google',
+                rawText: 'sequenceDiagram\n  participant A\n  A->>B: call()',
+                inputTokens: 7,
+                outputTokens: 4,
+            };
+        }
     }
     class MockRetryableModelError extends Error {
         readonly retryable = true;

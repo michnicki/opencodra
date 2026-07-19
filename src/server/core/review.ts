@@ -28,7 +28,7 @@ import {
   updateJobStep,
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
-import { parseSummaryResponse } from './model-output';
+import { parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
 import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
 
 import { VcsService } from '../services/vcs';
@@ -1505,6 +1505,13 @@ async function runFinalizePhase(
   // "no ref -> create" branch and post a walkthrough for a job that legitimately has nothing to show.
   // (The defensive branch still fires for the real case — files exist but the ref write failed in
   // prepare — because files.length > 0 there.)
+  // WT-03 (Plan 09-03): the optional Mermaid diagram is ONE whole-diff, best-effort model call whose
+  // tokens must reach completeJob. These accumulate 0 unless the diagram is actually attempted AND
+  // succeeds — so with the diagram gated off they stay 0 and the completeJob totals are byte-identical
+  // to before (NREG-01). Declared here (function scope) so they are in scope at completeJob below.
+  let diagramInputTokens = 0;
+  let diagramOutputTokens = 0;
+
   if (config.review.walkthrough.enabled && files.length > 0) try {
     // (a) Supersede re-check INLINE (D-06): the private heartbeatAndCheckSuperseded is already in
     // scope here, so core/walkthrough.ts never imports it (no core/ module cycle — cross-AI blocker
@@ -1523,11 +1530,42 @@ async function runFinalizePhase(
       }
     }
     if (!superseded) {
-      // (b) deterministic aggregation over the main-pass reviews + the floored/capped finalComments.
+      // (b) WT-03: the OPTIONAL Mermaid diagram. Gated on BOTH the provider capability
+      // (capabilities.supportsMermaid — GitHub true / Bitbucket false, D-13) AND the sequence_diagram
+      // sub-toggle (D-09). When gated OFF the diagram model call is NOT made at all — Bitbucket and the
+      // sub-toggle-off path skip the outbound request entirely (Pitfall #7, saves the subrequest), and
+      // mermaid stays null so formatWalkthrough emits no fence. Its OWN best-effort try/catch: any model
+      // error OR a null parse (WT-04) omits the diagram and posts the walkthrough without it — it never
+      // fails the job (D-07, D-04a). It is exactly ONE outbound request (generateWalkthroughDiagram is
+      // primary-model-only) and never touches the per-file subrequest budget (Pitfall #1).
+      let mermaid: string | null = null;
+      if (vcs.capabilities.supportsMermaid && config.review.walkthrough.sequence_diagram.enabled) {
+        try {
+          const diagramTracker = new TokenTracker();
+          const diagramModelService = new ModelService(env, diagramTracker, { jobId: job.id });
+          const diagramResponse = await diagramModelService.generateWalkthroughDiagram({
+            prTitle: pr.title,
+            files, // the ACTUAL parsed diff (FileDiff[]), not only fileSummaries (cross-AI blocker 2)
+            fileSummaries,
+            config,
+          });
+          mermaid = parseWalkthroughDiagram(diagramResponse.rawText); // tolerant parse -> null on garbage
+          // Fold the diagram call's tokens into the completeJob totals (token-accounting MEDIUM).
+          diagramInputTokens = diagramResponse.inputTokens;
+          diagramOutputTokens = diagramResponse.outputTokens;
+        } catch (error) {
+          logger.warn(
+            `generateWalkthroughDiagram failed for job ${job.id}; posting the walkthrough without a diagram`,
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          mermaid = null;
+        }
+      }
+      // (c) deterministic aggregation over the main-pass reviews + the floored/capped finalComments.
       const data = buildWalkthroughData({ reviews, finalComments });
-      // (c) single in-place edit (delete-recovery + bounded transient retry live in the helper).
-      // mermaid stays null this plan; Plan 09-03 fills the seam.
-      await editWalkthroughComment({ env, job, config, vcs, formatter, data, mermaid: null });
+      // (d) single in-place edit (delete-recovery + bounded transient retry live in the helper). The
+      // mermaid fence is added GitHub-only by formatWalkthrough (Plan 01), filling the Plan 02 seam.
+      await editWalkthroughComment({ env, job, config, vcs, formatter, data, mermaid });
     }
   } catch (error) {
     // (d) Best-effort: the review is posted; a persistent walkthrough failure logs a warn and the
@@ -1539,8 +1577,10 @@ async function runFinalizePhase(
     verdict: verdictSummary.verdict,
     fileCount: files.length,
     commentCount: finalComments.length,
-    totalInputTokens: fileInputTokens,
-    totalOutputTokens: fileOutputTokens,
+    // Diagram tokens (0 unless the WT-03 diagram was attempted and succeeded) are folded in here so
+    // the optional diagram's usage is not lost from persisted job accounting (token-accounting MEDIUM).
+    totalInputTokens: fileInputTokens + diagramInputTokens,
+    totalOutputTokens: fileOutputTokens + diagramOutputTokens,
     summaryMarkdown: formattedSummary,
     // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
     reviewId: numericReviewId,
