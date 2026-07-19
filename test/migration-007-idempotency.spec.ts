@@ -52,15 +52,14 @@ dbDescribe('migration 007_multipass_contract_foundation is idempotent', () => {
     );
     expect(check.exists).toBe(true);
 
-    // Sanity 3: EXPAND/CONTRACT -- BOTH the new 3-col index AND the retained old 2-col index exist.
+    // Sanity 3: the new 3-col arbiter index (EXPAND, created here in 007) exists. The old 2-col index
+    // is NO LONGER asserted present: migration 008 (the CONTRACT step) drops it, and the migrate step
+    // applies 008 before this suite runs, so file_reviews_job_file_path_key is gone by now. 008's own
+    // idempotency spec asserts the legacy index is dropped and the second-pass rows coexist.
     const [newIndex] = await getDb(env).query<{ exists: boolean }>(
       `SELECT to_regclass('public.file_reviews_job_file_path_pass_key') IS NOT NULL AS exists`,
     );
-    const [oldIndex] = await getDb(env).query<{ exists: boolean }>(
-      `SELECT to_regclass('public.file_reviews_job_file_path_key') IS NOT NULL AS exists`,
-    );
     expect(newIndex.exists).toBe(true);
-    expect(oldIndex.exists).toBe(true);
 
     // Sanity 4: pr_review_state.workspace is NOT NULL (Codex HIGH #2 -- one-row-per-PR for GitHub).
     const [workspaceCol] = await getDb(env).query<{ is_nullable: string }>(
