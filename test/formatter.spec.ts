@@ -310,3 +310,117 @@ describe('FormatterService.formatReviewOverview', () => {
     expect(output).toContain('automatically reviews pull requests');
   });
 });
+
+describe('FormatterService.formatWalkthrough (WT-02/WT-03/D-04/D-13)', () => {
+  type Severity = ParsedReviewComment['severity'];
+  const zeroCounts = (): Record<Severity, number> => ({ P0: 0, P1: 0, P2: 0, P3: 0, nit: 0 });
+
+  function walkInput(
+    overrides: Partial<Parameters<FormatterService['formatWalkthrough']>[0]> = {},
+  ): Parameters<FormatterService['formatWalkthrough']>[0] {
+    return {
+      files: [
+        { path: 'src/a.ts', summary: 'Explains change A.', counts: { ...zeroCounts(), P1: 1 } },
+        { path: 'src/b.ts', summary: 'Explains change B.', counts: { ...zeroCounts(), nit: 2 } },
+      ],
+      severityCounts: { ...zeroCounts(), P1: 1, nit: 2 },
+      filesReviewed: 2,
+      mermaid: null,
+      ...overrides,
+    };
+  }
+
+  const MERMAID = 'sequenceDiagram\n  A->>B: hello';
+
+  it('renders a ```mermaid fence on GitHub when a non-null mermaid arg is passed', () => {
+    const body = formatter.formatWalkthrough(walkInput({ mermaid: MERMAID }));
+    expect(body).toContain('```mermaid');
+    expect(body).toContain('A->>B: hello');
+  });
+
+  it('NEVER renders a mermaid fence on Bitbucket even when a mermaid arg is passed (WT-03/D-13)', () => {
+    const body = formatter.formatWalkthrough(walkInput({ mermaid: MERMAID }), {
+      provider: 'bitbucket',
+    });
+    expect(body).not.toContain('```mermaid');
+    expect(body).not.toContain('A->>B: hello');
+  });
+
+  it.each(['github', 'bitbucket'] as const)(
+    'renders per-severity counts and one row per file on %s (WT-02)',
+    (provider) => {
+      const body = formatter.formatWalkthrough(walkInput(), { provider });
+      // per-severity totals line present (emoji counts)
+      expect(body).toContain('×1');
+      expect(body).toContain('×2');
+      // a table row per file
+      expect(body).toContain('src/a.ts');
+      expect(body).toContain('src/b.ts');
+      expect(body).toContain('| File | Summary | Findings |');
+    },
+  );
+
+  it('renders a summary containing |, backtick, and newline as exactly one intact row', () => {
+    const hostile = 'first | col `code`\nsecond line | more';
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/x.ts', summary: hostile, counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+      }),
+    );
+    // the raw pipe/backtick are escaped; the newline is flattened
+    expect(body).not.toContain('first | col');
+    expect(body).toContain('first \\| col');
+    expect(body).toContain('\\`code\\`');
+    expect(body).not.toContain('second line | more');
+    expect(body).toContain('second line \\| more');
+    // exactly one data row: header + separator + 1 row => the src/x.ts path appears once
+    const rowLines = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('src/x.ts'));
+    expect(rowLines).toHaveLength(1);
+  });
+
+  it('caps at WALKTHROUGH_FILE_CAP rows and collapses the remainder (D-04)', () => {
+    const CAP = 30;
+    const files = Array.from({ length: CAP + 5 }, (_, i) => ({
+      path: `src/file-${i}.ts`,
+      summary: `summary ${i}`,
+      counts: zeroCounts(),
+    }));
+    const body = formatter.formatWalkthrough(
+      walkInput({ files, severityCounts: zeroCounts(), filesReviewed: files.length }),
+    );
+    const dataRows = body
+      .split('\n')
+      .filter((l) => l.startsWith('| src/file-'));
+    expect(dataRows).toHaveLength(CAP);
+    expect(body).toContain('+5 more files reviewed');
+  });
+
+  it('keeps the body under WALKTHROUGH_BODY_MAX for a pathological large-summary input', () => {
+    const bigSummary = 'x'.repeat(8_000);
+    const files = Array.from({ length: 30 }, (_, i) => ({
+      path: `src/file-${i}.ts`,
+      summary: bigSummary,
+      counts: zeroCounts(),
+    }));
+    const body = formatter.formatWalkthrough(
+      walkInput({ files, severityCounts: zeroCounts(), filesReviewed: files.length }),
+    );
+    expect(body.length).toBeLessThanOrEqual(60_000);
+  });
+
+  it('renders coverage + counts with an empty summary and null mermaid, no throw (D-02/D-04a)', () => {
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/empty.ts', summary: '', counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+        mermaid: null,
+      }),
+    );
+    expect(body).toContain('src/empty.ts');
+    expect(body).toContain('1 file reviewed');
+    expect(body).not.toContain('```mermaid');
+  });
+});
