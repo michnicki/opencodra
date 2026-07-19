@@ -2,7 +2,7 @@ import { budgetAwareFileLimit, runReviewJob } from '@server/core/review';
 import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, insertJob, mapJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob, mapJob, updateJobCriticResult, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
 import { defaultRepoConfig, REVIEW_CONCURRENCY_LIMITS, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
@@ -2327,5 +2327,430 @@ dbDescribe('Review Flow Lifecycle', () => {
         expect(data.files[0].summary).toBe('Review failed: kaboom');
       });
     });
+  });
+
+  // --- Phase 10 finalize multi-pass pipeline (MP-02 / MP-04 / NREG-01 / NREG-02) -------------------
+  describe('finalize multi-pass pipeline (MP-02 / MP-04 / NREG)', () => {
+    const finding = (over: Partial<ParsedReviewComment>): ParsedReviewComment => ({
+      path: 'src/app.ts',
+      line: 1,
+      position: 1,
+      severity: 'P1',
+      category: 'security',
+      title: 'Finding',
+      body: 'Finding body',
+      confidence: 0.9,
+      ...over,
+    });
+
+    // security on, critic off
+    const securityConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: { security: { enabled: true }, critic: { enabled: false } },
+      },
+    });
+
+    // critic on (security optionally on)
+    const criticEnabledConfig = (security: boolean): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: { security: { enabled: security }, critic: { enabled: true } },
+      },
+    });
+
+    // walkthrough on, diagram off (deterministic body), security optionally on
+    const walkthroughSecurityConfig = (security: boolean): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        walkthrough: { enabled: true, sequence_diagram: { enabled: false } },
+        passes: { security: { enabled: security }, critic: { enabled: false } },
+      },
+    });
+
+    async function seedReadyJob(
+      repo: string,
+      prNumber: number,
+      opts: {
+        config: RepoConfig;
+        mainComments?: ParsedReviewComment[];
+        securityComments?: ParsedReviewComment[];
+        criticResult?: Parameters<typeof updateJobCriticResult>[2];
+        completingStarted?: boolean;
+        ref?: string;
+        commitChar?: string;
+      },
+    ) {
+      const job = await insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber,
+        prTitle: 'MP finalize',
+        prAuthor: 'author',
+        commitSha: sha(opts.commitChar ?? 'a'),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: opts.config,
+      });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+      // The (file,'main') row is always present.
+      await upsertFileReview(env, job.id, {
+        filePath: 'src/app.ts',
+        pass: 'main',
+        fileStatus: 'done',
+        modelUsed: 'test-model',
+        modelProvider: 'test-provider',
+        diffLineCount: 1,
+        diffInput: 'diff',
+        rawAiOutput: '{}',
+        parsedComments: opts.mainComments ?? [],
+        inputTokens: 10,
+        outputTokens: 5,
+        durationMs: 1,
+        verdict: 'comment',
+        fileSummary: 'main summary',
+        overallCorrectness: 'issues found',
+        confidenceScore: 0.9,
+        errorMessage: null,
+      });
+      // The (file,'security') row exists only when the security pass ran.
+      if (opts.securityComments) {
+        await upsertFileReview(env, job.id, {
+          filePath: 'src/app.ts',
+          pass: 'security',
+          fileStatus: 'done',
+          modelUsed: 'test-model',
+          modelProvider: 'test-provider',
+          diffLineCount: 1,
+          diffInput: 'diff',
+          rawAiOutput: '{}',
+          parsedComments: opts.securityComments,
+          inputTokens: 8,
+          outputTokens: 4,
+          durationMs: 1,
+          verdict: 'comment',
+          fileSummary: 'security summary',
+          overallCorrectness: 'issues found',
+          confidenceScore: 0.9,
+          errorMessage: null,
+        });
+      }
+      if (opts.criticResult) await updateJobCriticResult(env, job.id, opts.criticResult);
+      if (opts.ref) await updateJobWalkthroughCommentRef(env, job.id, opts.ref);
+      // Marks a prior finalize attempt that reached the posting stage (finalizeRetriedPastPost).
+      if (opts.completingStarted) await updateJobStep(env, job.id, 'Completing', { status: 'running' });
+      return job;
+    }
+
+    it('MP-02: a finding duplicated across the main and security passes posts exactly once', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-mp02-dedup`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+
+      const dupBody = 'User input flows into the SQL query without sanitization.';
+      const job = await seedReadyJob(repo, 70, {
+        config: securityConfig(),
+        mainComments: [finding({ title: 'SQL injection in query', body: dupBody })],
+        securityComments: [
+          finding({ title: 'SQL injection in query', body: dupBody }), // duplicate of the main finding
+          finding({ title: 'XSS in template render', body: 'Unescaped user data rendered into HTML.' }), // distinct
+        ],
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp02', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // union = [SQL(main), SQL(security-dup), XSS(security)] = 3; dedup collapses the two SQL findings
+      // to one while keeping the distinct XSS finding.
+      expect(captured).toHaveLength(2);
+      expect(captured.filter((c: any) => c.body.includes('SQL injection in query'))).toHaveLength(1);
+      expect(captured.filter((c: any) => c.body.includes('XSS in template render'))).toHaveLength(1);
+
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('MP-04: finalize consumes criticResult.kept (not the raw union) and folds critic tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-mp04-consume`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const kept = finding({ title: 'Kept finding', body: 'This one survives the critic.' });
+      const pruned = finding({ title: 'Pruned finding', body: 'This one was dropped by the critic.' });
+      // The main row carries BOTH findings; the persisted critic result keeps only one. If finalize
+      // re-derived the set from the rows it would post 2 — so posting exactly `kept` proves consumption.
+      const job = await seedReadyJob(repo, 71, {
+        config: criticEnabledConfig(false),
+        mainComments: [kept, pruned],
+        criticResult: {
+          kept: [kept],
+          pruned: [{ finding: pruned, reason: 'duplicate' }],
+          model: 'critic-model',
+          inputTokens: 11,
+          outputTokens: 7,
+          skipped: false,
+          dedupedCount: 2,
+        },
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp04-consume', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Posts ONLY the critic's kept set; the pruned finding never re-surfaces (D-08).
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body).toContain('Kept finding');
+      expect(captured.some((c: any) => c.body.includes('Pruned finding'))).toBe(false);
+      // Finalize NEVER calls the critic model (D-07); it only READS the persisted result.
+      expect(critiqueSpy).not.toHaveBeenCalled();
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      // Critic tokens folded in: file(10) + summary(3) + critic(11) in; file(5) + summary(2) + critic(7) out.
+      expect(finalJob?.total_input_tokens).toBe(10 + 3 + 11);
+      expect(finalJob?.total_output_tokens).toBe(5 + 2 + 7);
+
+      critiqueSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('MP-04: a finalize retry past the posting stage reuses the review and issues ZERO critic calls (non-vacuous)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-mp04-retry`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      // A prior finalize attempt already posted this review (id 999) but died before recording it.
+      const findSpy = vi.spyOn(GitHubService.prototype, 'findBotReviewForCommit').mockResolvedValue({ id: 999 });
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview');
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const kept = finding({ title: 'Kept finding', body: 'survives' });
+      // Seed a RUNNING job (NOT completed) with the 'Completing' step already started and a persisted
+      // critic result — so finalize actually EXECUTES its body (a completed job would be acked before
+      // phase execution, making the assertion vacuous).
+      const job = await seedReadyJob(repo, 72, {
+        config: criticEnabledConfig(true),
+        mainComments: [kept],
+        securityComments: [finding({ title: 'Security finding', body: 'sec' })],
+        criticResult: {
+          kept: [kept],
+          pruned: [],
+          model: 'critic-model',
+          inputTokens: 11,
+          outputTokens: 7,
+          skipped: false,
+          dedupedCount: 2,
+        },
+        completingStarted: true,
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp04-retry', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // D-07: finalize never calls the critic model. The existing review is reused, not double-posted.
+      expect(critiqueSpy).not.toHaveBeenCalled();
+      expect(findSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy).not.toHaveBeenCalled();
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(Number(finalJob?.review_id)).toBe(999);
+      // Critic tokens are still folded on the reuse path: main(10) + security(8) + summary(3) + critic(11).
+      expect(finalJob?.total_input_tokens).toBe(10 + 8 + 3 + 11);
+
+      critiqueSpy.mockRestore();
+      findSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG: toggling passes.security never changes the Phase-9 walkthrough (coverage/counts/ordering)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-wt-invariance`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      const walkBodies: string[] = [];
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: any, _r: any, _id: any, body: string) => { walkBodies.push(body); return { id: 700 }; },
+      );
+      const reviewCommentCounts: number[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { reviewCommentCounts.push(input.comments.length); return { id: 456 }; },
+      );
+
+      const mainFinding = finding({ title: 'Main finding', body: 'main body' });
+
+      // Run 1: security OFF, main finding only.
+      const jobOff = await seedReadyJob(repo, 73, {
+        config: walkthroughSecurityConfig(false),
+        mainComments: [mainFinding],
+        ref: '801',
+        commitChar: 'a',
+      });
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: jobOff.id, deliveryId: 'delivery-wt-inv-off', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Run 2: security ON, same main finding + an extra distinct security finding.
+      const jobOn = await seedReadyJob(`${repo}-2`, 74, {
+        config: walkthroughSecurityConfig(true),
+        mainComments: [mainFinding],
+        securityComments: [finding({ title: 'Security finding', body: 'sec body' })],
+        ref: '802',
+        commitChar: 'b',
+      });
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: jobOn.id, deliveryId: 'delivery-wt-inv-on', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // The walkthrough body is byte-identical whether or not the security pass ran (Pitfall 3, corrected).
+      expect(walkBodies).toHaveLength(2);
+      expect(walkBodies[0]).toBe(walkBodies[1]);
+      // Non-vacuous: the security pass really did add a posted comment, so the invariance is meaningful.
+      expect(reviewCommentCounts).toEqual([1, 2]);
+
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with security AND critic both off, finalize posts the main-only set and folds no critic tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-nreg01-finalize`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+
+      const a = finding({ title: 'Alpha finding', body: 'alpha' });
+      const b = finding({ title: 'Beta finding', body: 'beta' });
+      const job = await seedReadyJob(repo, 75, {
+        config: defaultRepoConfig, // security off, critic off, walkthrough off
+        mainComments: [a, b],
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-nreg01-finalize', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Posted set == the main-only flatMap (no dedup, no critic consumption) — byte-identical to v1.0.
+      expect(captured).toHaveLength(2);
+      expect(captured.map((c: any) => c.path)).toEqual(['src/app.ts', 'src/app.ts']);
+      expect(captured.some((c: any) => c.body.includes('Alpha finding'))).toBe(true);
+      expect(captured.some((c: any) => c.body.includes('Beta finding'))).toBe(true);
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.pass === 'security')).toHaveLength(0);
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(mapJob(finalJob!).criticResult).toBeNull();
+      // No critic tokens folded (critic off -> +0): main(10) + summary(3) in, main(5) + summary(2) out.
+      expect(finalJob?.total_input_tokens).toBe(10 + 3);
+      expect(finalJob?.total_output_tokens).toBe(5 + 2);
+
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-02: the same deduped candidate set posts the same comments on GitHub and Bitbucket', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { VcsService } = await import('@server/services/vcs');
+
+      const dupBody = 'user input flows into the query';
+      const seed = {
+        mainComments: [finding({ title: 'SQL injection', body: dupBody })],
+        securityComments: [
+          finding({ title: 'SQL injection', body: dupBody }), // dup of the main finding -> collapses
+          finding({ title: 'Missing authz check', body: 'no permission check on the route' }), // distinct
+        ],
+      };
+
+      const capture = async (repo: string, prNumber: number, commitChar: string, asBitbucket: boolean) => {
+        const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+          generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+        );
+        let captured: any[] = [];
+        const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+          async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+        );
+        let forRepoSpy: any = null;
+        if (asBitbucket) {
+          // Explicit provider mock: reuse the GitHub adapter plumbing but present as Bitbucket, so
+          // finalize formats through the Bitbucket branch and posts via the same submitReview seam.
+          forRepoSpy = vi.spyOn(VcsService, 'forRepo').mockImplementation(async (e: any, j: any, t: any) => {
+            const { GithubAdapter } = await import('@server/vcs/github');
+            const adapter = new GithubAdapter(e, j.installationId ?? '', t);
+            Object.defineProperty(adapter, 'name', { value: 'bitbucket', configurable: true });
+            Object.defineProperty(adapter, 'capabilities', { value: { supportsMermaid: false }, configurable: true });
+            return adapter;
+          });
+        }
+        const job = await seedReadyJob(repo, prNumber, { config: securityConfig(), ...seed, commitChar });
+        await runWithDb(env, async () => {
+          const res = await runReviewJob(env, { jobId: job.id, deliveryId: `delivery-nreg02-${asBitbucket ? 'bb' : 'gh'}`, phase: 'finalize' });
+          expect(res).toEqual({ action: 'ack' });
+        });
+        createSpy.mockRestore();
+        getDiffSpy.mockRestore();
+        if (forRepoSpy) forRepoSpy.mockRestore();
+        return captured;
+      };
+
+      const gh = await capture(`test-repo-${Date.now()}-nreg02-gh`, 76, 'a', false);
+      const bb = await capture(`test-repo-${Date.now()}-nreg02-bb`, 77, 'b', true);
+
+      // Same candidate set -> same count, paths, and positions on both providers (D-11 / NREG-02).
+      expect(gh).toHaveLength(2);
+      expect(bb).toHaveLength(2);
+      expect(bb.map((c: any) => c.path)).toEqual(gh.map((c: any) => c.path));
+      expect(bb.map((c: any) => c.position)).toEqual(gh.map((c: any) => c.position));
+      // The same findings surface on both (only the provider-specific severity icon differs).
+      for (const title of ['SQL injection', 'Missing authz check']) {
+        expect(gh.filter((c: any) => c.body.includes(title))).toHaveLength(1);
+        expect(bb.filter((c: any) => c.body.includes(title))).toHaveLength(1);
+      }
+      // Non-vacuous: bitbucket really went through the provider override (emoji icon, not the GitHub <img>).
+      expect(gh.some((c: any) => c.body.includes('<img'))).toBe(true);
+      expect(bb.some((c: any) => c.body.includes('<img'))).toBe(false);
+    }, REVIEW_FLOW_TIMEOUT_MS);
   });
 });
