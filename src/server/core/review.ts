@@ -1,6 +1,6 @@
 import { logger } from './logger';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHubWebhookPayload, type IssueCommentWebhookPayload, type PullRequestWebhookPayload } from '@shared/github';
-import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
+import { defaultRepoConfig, normalizeModelId, reviewUnitKey, type FileReviewPass, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
 import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
 import { bulkInheritFileReviews, bulkMarkFilesFailed, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
@@ -100,20 +100,30 @@ const MAX_FINALIZE_CONTINUATIONS = 3;
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
 // hits every retryable-failure backoff (up to 15 min each, several times over).
 const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
-// Estimated subrequest cost of reviewing one file, used only to size how many files can
-// safely be reviewed concurrently in a chunk given the job's remaining subrequest budget for
-// this invocation (see budgetAwareChunkFileLimit below). A file walks a fallback chain of up
+// Estimated subrequest cost of reviewing one (file, pass) WORK UNIT, used only to size how many
+// units can safely run concurrently in a chunk given the job's remaining subrequest budget for
+// this invocation (see budgetAwareFileLimit below). A unit walks a fallback chain of up
 // to ~3 models, but the per-model model-config lookup is now cached per invocation
-// (ModelService.resolveModel), so the recurring cost per file is ~1 provider call per model
+// (ModelService.resolveModel), so the recurring cost per unit is ~1 provider call per model
 // tried plus the persisted-review write -- roughly 5 in the worst case rather than 9. Lower
-// estimate => more files reviewed in parallel per chunk within the same 50-subrequest cap.
+// estimate => more units reviewed in parallel per chunk within the same 50-subrequest cap.
+//
+// This is a per-(file,pass)-UNIT cost that governs CONCURRENCY (how many units run in one chunk),
+// NOT a per-file cost. Phase 10's security pass is modelled as a SEPARATE (file,'security') unit
+// alongside (file,'main'), so enabling it DOUBLES the unit-list LENGTH (more hibernating chunks),
+// it does NOT raise this per-unit estimate. A single unit may still fan out internally to
+// MAX_CHUNKS (=4) chunks inside ModelService.reviewFile, but that intra-unit fan-out is bounded
+// WITHIN the unit by tracker.isNearLimit() (model.ts:320-337) -- the 5-estimate governs how many
+// units run concurrently; the isNearLimit guard governs a single unit's internal chunk fan-out.
 //
 // Sized to the ~5 worst-case figure above (not padded higher): with the TokenTracker's
 // SAFE_MARGIN reserve of 25 the fresh-budget headroom is 25, and 25 / 5 == 5 keeps even the
 // highest configured concurrency level (max == 4) fully honored at a healthy budget. Padding
 // this to 8 would make floor(25 / 8) == 3 silently cap the "max" slider to 3 -- the exact
 // "concurrency slider is dead above medium" regression pinned by chunk-concurrency.spec.ts.
-const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
+// Raising it to ~10 to "absorb" the second pass would make floor(25/10) == 2 cap the slider to 2:
+// the second pass is absorbed by a longer unit list, never by a higher per-unit cost.
+export const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
 
 /**
  * How many files a single review chunk may process concurrently: the configured concurrency
@@ -826,11 +836,27 @@ async function runReviewPhase(
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
+  // Build the (file, pass) WORK-UNIT list once. Every eligible file always yields a 'main' unit;
+  // when the repo's security pass is enabled it ALSO yields a 'security' unit, scheduled as a
+  // separate budget-visible unit alongside main (D-01 / MP-01) rather than a hidden inline second
+  // model call. With security off the list is main-only and every downstream path (scheduling,
+  // skip, inherit, completion) is byte-identical to v1.0 (NREG-01).
+  const securityPassEnabled = config.review.passes?.security?.enabled ?? false;
+  const units: Array<{ file: (typeof files)[number]; pass: FileReviewPass }> = [];
+  for (const file of files) {
+    units.push({ file, pass: 'main' });
+    if (securityPassEnabled) units.push({ file, pass: 'security' });
+  }
+
   const jobIdsToQuery = [job.id];
   if (job.retryOfJobId) jobIdsToQuery.push(job.retryOfJobId);
   const allExistingReviews = await getFileReviewsForJobs(env, jobIdsToQuery);
-  const currentReviews = new Map(allExistingReviews.filter((review) => review.job_id === job.id).map((review) => [review.file_path, review]));
-  const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [review.file_path, review]));
+  // Maps are keyed on reviewUnitKey(file_path, pass) -- NOT file_path -- so a file's 'main' and
+  // 'security' rows are distinct entries: one pass can never overwrite, skip, or inherit the other
+  // (tuple identity, 10-01). Keying on file_path alone here would let a security row clobber a main
+  // row and leak orphan security rows into finalize.
+  const currentReviews = new Map(allExistingReviews.filter((review) => review.job_id === job.id).map((review) => [reviewUnitKey(review.file_path, review.pass), review]));
+  const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [reviewUnitKey(review.file_path, review.pass), review]));
 
   const reviewTasks: Array<Promise<void>> = [];
   // Counters shared across the concurrent review tasks below (single-threaded JS, so ++ is safe):
@@ -845,45 +871,55 @@ async function runReviewPhase(
   // (which handles its own inherit/re-review decision). This lets a fully-inheritable retry finish
   // the whole review phase in a single invocation rather than crawling through ~12 hibernated chunks.
   if (job.retryOfJobId && parentReviews.size > 0) {
-    const inheritablePaths = files
-      .filter((file) => {
-        if (currentReviews.has(file.path)) return false;
-        const parent = parentReviews.get(file.path);
+    // Build a UNIT list (only the (file, pass) units THIS job actually expects) so the inherit is
+    // tuple-keyed: a security-DISABLED retry's unit list is main-only, so it requests only main
+    // units and can never inherit a stray parent 'security' row (no orphan security row leaks into
+    // finalize). Each unit is inheritable only when it has no current row AND a done parent row for
+    // the SAME (path, pass) exists under the current model strategy.
+    const inheritableUnits = units
+      .filter((unit) => {
+        const key = reviewUnitKey(unit.file.path, unit.pass);
+        if (currentReviews.has(key)) return false;
+        const parent = parentReviews.get(key);
         return Boolean(parent && canInheritParentFileReview(config, parent));
       })
-      .map((file) => file.path);
+      .map((unit) => ({ filePath: unit.file.path, pass: unit.pass }));
 
-    if (inheritablePaths.length > 0) {
-      // This inheritance path is the existing main-pass retry flow; every unit is pass='main'.
-      // (Phase 10-05/06 will key these maps on reviewUnitKey to inherit security units too.)
+    if (inheritableUnits.length > 0) {
       const inheritedUnits = await bulkInheritFileReviews(env, {
         jobId: job.id,
         parentJobId: job.retryOfJobId,
-        units: inheritablePaths.map((path) => ({ filePath: path, pass: 'main' as const })),
+        units: inheritableUnits,
       });
-      // Mark the just-copied files handled so the loop below skips them (no per-file re-work).
-      for (const { filePath: path } of inheritedUnits) {
-        const parent = parentReviews.get(path);
-        if (parent) currentReviews.set(path, parent);
+      // Mark the just-copied units handled (by unit key) so the loop below skips them.
+      for (const { filePath, pass } of inheritedUnits) {
+        const key = reviewUnitKey(filePath, pass);
+        const parent = parentReviews.get(key);
+        if (parent) currentReviews.set(key, parent);
       }
       terminalProgress += inheritedUnits.length;
       if (inheritedUnits.length > 0) {
-        logger.info(`Bulk-inherited ${inheritedUnits.length} parent file reviews for job ${job.id} in one pass`);
+        logger.info(`Bulk-inherited ${inheritedUnits.length} parent file review units for job ${job.id} in one pass`);
       }
     }
   }
 
-  for (const file of files) {
-    const existingReview = currentReviews.get(file.path);
+  for (const unit of units) {
+    const { file, pass } = unit;
+    const unitKey = reviewUnitKey(file.path, pass);
+    const existingReview = currentReviews.get(unitKey);
     // An in-flight async submission must be polled (not skipped as "handled" and not resubmitted).
+    // The skip check is per-UNIT: a completed (file,'main') row never skips the (file,'security')
+    // unit and vice-versa, because existingReview is looked up by unitKey.
     const awaitingReview = existingReview && isAwaitingAsyncReview(existingReview) ? existingReview : null;
     if (existingReview && countsAsHandledFileReview(existingReview) && !awaitingReview) {
       continue;
     }
 
-    const inherited = parentReviews.get(file.path);
+    const inherited = parentReviews.get(unitKey);
     const reviewTask = async () => {
-      // (0) Poll an already-submitted async batch review.
+      // (0) Poll an already-submitted async batch review. Only the main pass ever submits to the
+      // async batch queue (see below), so awaitingReview is main-only; the pass is threaded anyway.
       if (awaitingReview) {
         const poll = await model.pollReviewBatch({
           model: awaitingReview.async_model ?? awaitingReview.model_used,
@@ -899,7 +935,7 @@ async function runReviewPhase(
           logger.warn(`Async batch poll failed for ${file.path}; falling back to synchronous review`, {
             error: poll.error instanceof Error ? poll.error.message : String(poll.error),
           });
-          await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+          await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
           terminalProgress += 1;
           return;
         }
@@ -909,51 +945,57 @@ async function runReviewPhase(
       }
 
       if (!inherited) {
-        // (1) Try the async batch queue first; on any unavailability fall back to sync review.
-        const submitted = await model.submitReviewBatch({
-          file,
-          prTitle: pr.title ?? null,
-          prDescription: pr.body ?? null,
-          config,
-          totalLineCount,
-          compactPrompt: (existingReview?.transient_error_count ?? 0) > 0,
-        });
-        if (submitted) {
-          await upsertFileReview(env, job.id, {
-            filePath: file.path,
-            fileStatus: 'pending',
-            modelUsed: submitted.model,
-            modelProvider: null,
-            diffLineCount: file.lineCount,
-            diffInput: null,
-            rawAiOutput: null,
-            parsedComments: [],
-            inputTokens: null,
-            outputTokens: null,
-            durationMs: null,
-            verdict: null,
-            fileSummary: null,
-            overallCorrectness: null,
-            confidenceScore: null,
-            errorMessage: null,
-            asyncRequestId: submitted.requestId,
-            asyncModel: submitted.model,
+        // (1) The MAIN pass tries the async batch queue first; on any unavailability it falls back
+        // to a synchronous review. The SECURITY pass is a separate scheduled unit that always runs
+        // through the synchronous reviewFile path -- it is never submitted to the async batch queue.
+        if (pass === 'main') {
+          const submitted = await model.submitReviewBatch({
+            file,
+            prTitle: pr.title ?? null,
+            prDescription: pr.body ?? null,
+            config,
+            totalLineCount,
+            compactPrompt: (existingReview?.transient_error_count ?? 0) > 0,
           });
-          awaitingAsync += 1;
-          return;
+          if (submitted) {
+            await upsertFileReview(env, job.id, {
+              filePath: file.path,
+              pass,
+              fileStatus: 'pending',
+              modelUsed: submitted.model,
+              modelProvider: null,
+              diffLineCount: file.lineCount,
+              diffInput: null,
+              rawAiOutput: null,
+              parsedComments: [],
+              inputTokens: null,
+              outputTokens: null,
+              durationMs: null,
+              verdict: null,
+              fileSummary: null,
+              overallCorrectness: null,
+              confidenceScore: null,
+              errorMessage: null,
+              asyncRequestId: submitted.requestId,
+              asyncModel: submitted.model,
+            });
+            awaitingAsync += 1;
+            return;
+          }
         }
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
         terminalProgress += 1;
         return;
       }
 
       if (!canInheritParentFileReview(config, inherited)) {
-        logger.info(`Ignoring inherited review for ${file.path}; parent model ${inherited.model_used} is not in the current model strategy`);
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        logger.info(`Ignoring inherited review for ${file.path} (${pass}); parent model ${inherited.model_used} is not in the current model strategy`);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
         terminalProgress += 1;
       } else {
         await upsertFileReview(env, job.id, {
           filePath: file.path,
+          pass,
           fileStatus: 'done',
           modelUsed: inherited.model_used,
           modelProvider: inherited.model_provider,
@@ -970,7 +1012,7 @@ async function runReviewPhase(
           confidenceScore: inherited.confidence_score,
           errorMessage: null,
         });
-        currentReviews.set(file.path, inherited);
+        currentReviews.set(unitKey, inherited);
         terminalProgress += 1;
       }
     };
@@ -1015,14 +1057,23 @@ async function runReviewPhase(
   }
 
   const latestReviews = await getFileReviewsForJobs(env, [job.id]);
-  // A file still awaiting its async batch result is NOT complete yet -- exclude it so the job
+  // A unit still awaiting its async batch result is NOT complete yet -- exclude it so the job
   // doesn't finalize with pending reviews.
-  const reviewedPaths = new Set(
-    latestReviews.filter((review) => countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => review.file_path),
+  const terminalUnitKeys = new Set(
+    latestReviews.filter((review) => countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => reviewUnitKey(review.file_path, review.pass)),
   );
-  const completedCount = files.filter((file) => reviewedPaths.has(file.path)).length;
+  // COMPLETION counts terminal (file,pass) UNITS against units.length: with security on, the phase
+  // must not finalize until BOTH passes of every eligible file are terminal.
+  const completedUnitCount = units.filter((unit) => terminalUnitKeys.has(reviewUnitKey(unit.file.path, unit.pass))).length;
+  // PROGRESS stays FILE-based (distinct main-pass terminal files over files.length) so the check-run
+  // never shows a value like 3/2 when security doubles the unit count. This is a SEPARATE counter
+  // from the completion check above.
+  const terminalMainFilePaths = new Set(
+    latestReviews.filter((review) => review.pass === 'main' && countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => review.file_path),
+  );
+  const completedCount = files.filter((file) => terminalMainFilePaths.has(file.path)).length;
 
-  if (completedCount >= files.length) {
+  if (completedUnitCount >= units.length) {
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
     // Finalize (post the GitHub review, labels, check run) needs its OWN fresh subrequest budget.
     // Always hibernate into a new invocation first: the review phase that just finished spent this
@@ -1046,6 +1097,7 @@ async function runReviewPhase(
       for (const review of latestReviews.filter(isAwaitingAsyncReview)) {
         await persistFailedFileReview(env, job.id, {
           filePath: review.file_path,
+          pass: review.pass,
           modelUsed: review.async_model ?? review.model_used,
           diffLineCount: review.diff_line_count,
           errorMessage: 'Async batch review did not complete in time.',
@@ -1134,6 +1186,9 @@ async function persistFailedFileReview(
   jobId: string,
   input: {
     filePath: string;
+    // Defaults to 'main' (NREG-01). A failed security unit records its OWN failed row keyed on
+    // (job_id, file_path, 'security') rather than clobbering the main row for the same file.
+    pass?: FileReviewPass;
     modelUsed: string;
     modelProvider?: string | null;
     diffLineCount: number;
@@ -1144,6 +1199,7 @@ async function persistFailedFileReview(
 ) {
   await upsertFileReview(env, jobId, {
     filePath: input.filePath,
+    pass: input.pass ?? 'main',
     fileStatus: 'failed',
     modelUsed: input.modelUsed,
     modelProvider: input.modelProvider ?? null,
@@ -1171,6 +1227,11 @@ async function reviewAndPersistFile(
   model: ModelService,
   resolveFailureModelProvider: () => Promise<string | null>,
   previousReview?: { transient_error_count: number },
+  // Which review PASS this call persists. Defaults to 'main' (NREG-01: existing behavior). 'security'
+  // routes the SAME resolved model through the security prompt (10-04) and persists a row keyed on
+  // (job_id, file_path, 'security'); all failure bookkeeping below is threaded with this pass so a
+  // security-unit failure never touches the main row.
+  pass: FileReviewPass = 'main',
 ) {
   const startedAt = Date.now();
   const compactPrompt = (previousReview?.transient_error_count ?? 0) > 0;
@@ -1182,10 +1243,12 @@ async function reviewAndPersistFile(
       config,
       totalLineCount,
       compactPrompt,
+      pass,
     });
 
     await upsertFileReview(env, job.id, {
       filePath: file.path,
+      pass,
       fileStatus: 'done',
       modelUsed: response.modelUsed,
       modelProvider: response.provider,
@@ -1226,6 +1289,7 @@ async function reviewAndPersistFile(
     if (isRetryableModelError(error)) {
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
+        pass,
         modelUsed: modelId,
         modelProvider,
         diffLineCount: file.lineCount,
@@ -1238,6 +1302,7 @@ async function reviewAndPersistFile(
         const finalError = `Review skipped after ${failureCount} repeated model provider outages.`;
         await persistFailedFileReview(env, job.id, {
           filePath: file.path,
+          pass,
           modelUsed: modelId,
           modelProvider,
           diffLineCount: file.lineCount,
@@ -1280,6 +1345,7 @@ async function reviewAndPersistFile(
 
     await persistFailedFileReview(env, job.id, {
       filePath: file.path,
+      pass,
       modelUsed: modelId,
       modelProvider,
       diffLineCount: file.lineCount,
