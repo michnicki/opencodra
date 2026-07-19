@@ -1424,20 +1424,44 @@ async function runFinalizePhase(
   const files = await getDiffFiles(env, job, vcs, config);
   let reviews = await getFileReviewsForJobs(env, [job.id]);
 
-  if (reviews.length < files.length) {
-    const reviewedPaths = new Set(reviews.map((r) => r.file_path));
-    const missingFiles = files.filter((f) => !reviewedPaths.has(f.path));
-    
-    if (missingFiles.length > 0) {
-      logger.warn(`Job ${job.id} reached finalize phase with ${missingFiles.length} missing file reviews. Forcing them to failed state.`);
-      // Batch the backfill into one INSERT. Doing it per-file (a transaction each) scales the
-      // subrequest cost with the number of missing files and, on a large/growing PR, exhausts the
+  // MP-04 / Pitfall 2: pass-aware missing-row reconciliation. Build the EXPECTED set of (path, pass)
+  // UNITS — every file has a 'main' unit, plus a 'security' unit when the security pass is on — and
+  // compare it against the PRESENT reviewUnitKey(file_path, pass) rows. This replaces the old
+  // `reviews.length < files.length` + path-Set check, which could not distinguish passes: once a file
+  // can carry both a 'main' and a 'security' row, a security row would pad the count and mask an absent
+  // main row (or vice versa). A security row must NEVER satisfy a missing main unit.
+  const securityEnabled = config.review.passes?.security?.enabled ?? false;
+  const expectedUnits: Array<{ filePath: string; pass: FileReviewPass; diffLineCount: number }> = files.flatMap(
+    (file) => {
+      const units: Array<{ filePath: string; pass: FileReviewPass; diffLineCount: number }> = [
+        { filePath: file.path, pass: 'main', diffLineCount: file.lineCount },
+      ];
+      if (securityEnabled) {
+        units.push({ filePath: file.path, pass: 'security', diffLineCount: file.lineCount });
+      }
+      return units;
+    },
+  );
+
+  if (reviews.length < expectedUnits.length) {
+    const presentUnitKeys = new Set(reviews.map((review) => reviewUnitKey(review.file_path, review.pass)));
+    const missingUnits = expectedUnits.filter(
+      (unit) => !presentUnitKeys.has(reviewUnitKey(unit.filePath, unit.pass)),
+    );
+
+    if (missingUnits.length > 0) {
+      logger.warn(`Job ${job.id} reached finalize phase with ${missingUnits.length} missing (file, pass) review units. Forcing them to failed state.`);
+      // Batch the backfill into one INSERT. Doing it per-unit (a transaction each) scales the
+      // subrequest cost with the number of missing units and, on a large/growing PR, exhausts the
       // per-invocation budget right before the review is posted (finalize can't safely hibernate --
-      // it posts the GitHub review -- so it must stay within one invocation's budget).
+      // it posts the review -- so it must stay within one invocation's budget). The UNIT-keyed
+      // bulkMarkFilesFailed (10-01) writes one 'failed' row per (path, pass), so a missing main unit
+      // and a missing security unit are backfilled independently — a security row never satisfies a
+      // missing main unit.
       await bulkMarkFilesFailed(
         env,
         job.id,
-        missingFiles.map((file) => ({ filePath: file.path, pass: 'main' as const, diffLineCount: file.lineCount })),
+        missingUnits,
         { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'This file was not reviewed before the review run completed.' },
       );
 
@@ -1458,7 +1482,28 @@ async function runFinalizePhase(
   // no-ops the timestamp when the review phase already marked it done.
   await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
 
-  const reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  // D-09 / MP-04: resolve the finalize candidate set that feeds the (untouched) deterministic floor
+  // block below. Precedence:
+  //   (i)   a persisted critic result  -> reviewedComments = criticResult.kept. This is READ-ONLY:
+  //         finalize NEVER issues a critic model call (D-07); the kept set was computed once in the
+  //         critic phase (10-06) and is consumed here (and on any finalize retry) idempotently.
+  //   (ii)  else, security pass on      -> dedupeFindings(union(main, security)). This also covers a
+  //         FAIL-OPEN wedged critic that left criticResult null (10-06): nothing is lost — the deduped
+  //         union still posts. Dedup is gated on passes.security (Pitfall 4): deduping a single main
+  //         source would suppress two genuinely similar main-pass findings that post today (NREG).
+  //   (iii) else                        -> the v1.0 main-only flatMap, byte-identical to the
+  //         pre-multipass engine (NREG-01).
+  // Pruned findings are never re-surfaced here (D-08): they live only in jobs.critic_result.pruned.
+  let reviewedComments: ParsedReviewComment[];
+  if (job.criticResult) {
+    reviewedComments = job.criticResult.kept;
+  } else if (securityEnabled) {
+    reviewedComments = dedupeFindings(
+      reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]),
+    );
+  } else {
+    reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  }
   const fileSummaries = reviews.map((review) => ({
     path: review.file_path,
     summary: review.file_status === 'failed'
@@ -1712,8 +1757,12 @@ async function runFinalizePhase(
     commentCount: finalComments.length,
     // Diagram tokens (0 unless the WT-03 diagram was attempted and succeeded) are folded in here so
     // the optional diagram's usage is not lost from persisted job accounting (token-accounting MEDIUM).
-    totalInputTokens: fileInputTokens + diagramInputTokens,
-    totalOutputTokens: fileOutputTokens + diagramOutputTokens,
+    // Critic tokens (0 when the critic is off — criticResult is null — so byte-identical to v1.0) are
+    // folded in alongside the file, summary, and diagram tokens so the critic's usage is not dropped
+    // from persisted job accounting (token-accounting MEDIUM). Finalize only READS these persisted
+    // values; it never re-calls the critic model (D-07).
+    totalInputTokens: fileInputTokens + diagramInputTokens + (job.criticResult?.inputTokens ?? 0),
+    totalOutputTokens: fileOutputTokens + diagramOutputTokens + (job.criticResult?.outputTokens ?? 0),
     summaryMarkdown: formattedSummary,
     // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
     reviewId: numericReviewId,
