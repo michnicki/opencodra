@@ -170,7 +170,12 @@ export class GithubAdapter implements VcsProvider {
     const result = await this.gh.updateIssueComment(owner, repo, commentId, body);
     // null flows straight through from the client for both 404 and 410 (amended D-05 / review F3);
     // the adapter never inspects a raw HTTP status.
-    return result ? { ref: String(result.id) } : null;
+    // WR-01: echo the already-validated input ref instead of re-deriving from `result.id`.
+    // `updateIssueComment` casts its body with an unchecked `as { id: number }`, so a malformed/absent
+    // id would otherwise stringify into a corrupt ref ("undefined"/"NaN") that gets persisted and
+    // breaks the next edit. `ref` was validated as a canonical positive safe-integer above; echoing
+    // it matches the Bitbucket sibling and needs no extra guard.
+    return result ? { ref } : null;
   }
 
   async listPrComments(
