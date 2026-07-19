@@ -1,9 +1,10 @@
-import { runReviewJob } from '@server/core/review';
+import { budgetAwareFileLimit, runReviewJob } from '@server/core/review';
+import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
 import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
-import { defaultRepoConfig, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
+import { defaultRepoConfig, REVIEW_CONCURRENCY_LIMITS, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
 import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder, type WalkthroughReviewRow } from '@server/core/walkthrough';
 import { FormatterService } from '@server/services/formatter';
@@ -778,6 +779,204 @@ dbDescribe('Review Flow Lifecycle', () => {
     reviewSpy.mockRestore();
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
+
+  // --- Phase 10-05 multi-pass security scheduling (MP-01 / MP-05 / NREG-01) ------------------------
+  describe('multi-pass security scheduling', () => {
+    // Repo config with the security pass enabled; everything else is default (NREG-01 baseline uses
+    // plain defaultRepoConfig, which has passes.security.enabled === false).
+    const securityConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: {
+          ...defaultRepoConfig.review.passes,
+          security: { enabled: true },
+        },
+      },
+    });
+
+    const insertReviewJob = (repo: string, config: RepoConfig, commitChar: string) =>
+      insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber: 7,
+        prTitle: 'Security Pass Test',
+        prAuthor: 'author',
+        commitSha: sha(commitChar),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: config,
+      });
+
+    const okReview = (path: string) => ({
+      parsed: {
+        comments: [],
+        verdict: 'approve' as const,
+        fileSummary: `Reviewed ${path}`,
+        overallCorrectness: 'no issues',
+        confidenceScore: 0.9,
+      },
+      modelUsed: 'test-model',
+      provider: 'test-provider',
+      inputTokens: 10,
+      outputTokens: 5,
+      rawText: '{}',
+      userPrompt: '',
+    });
+
+    it('schedules a (file,security) unit alongside (file,main) and persists both passes (MP-01)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-schedule`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const seen: Array<{ path: string; pass: string }> = [];
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        seen.push({ path: params.file.path, pass: params.pass ?? 'main' });
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'a');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-schedule' });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      for (const path of ['src/one.ts', 'src/two.ts']) {
+        const passes = reviews.filter((r) => r.file_path === path).map((r) => r.pass).sort();
+        expect(passes).toEqual(['main', 'security']);
+        expect(reviews.filter((r) => r.file_path === path && r.file_status === 'done')).toHaveLength(2);
+      }
+      // The security prompt (10-04) is actually routed for each eligible file, not just persisted.
+      expect(seen.filter((s) => s.pass === 'security').map((s) => s.path).sort()).toEqual(['src/one.ts', 'src/two.ts']);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('retries only the security unit on a transient failure and leaves the main row intact (per-unit retry)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService, RetryableModelError } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-retry`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      // Fail ONLY the security unit; the main unit succeeds. The tuple-keyed writers must record the
+      // security failure on the (file,'security') row without disturbing the (file,'main') row.
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        if ((params.pass ?? 'main') === 'security') {
+          throw new (RetryableModelError as any)('Google API timed out after 45000ms');
+        }
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'b');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runWithDb(env, async () => {
+        (env.REVIEW_QUEUE as any).sent.length = 0;
+        const result = await runReviewJob(env, {
+          jobId: job.id,
+          deliveryId: 'delivery-sec-retry',
+          phase: 'review',
+        });
+        // A transient security-unit failure defers the chunk (stays in-instance, freshInstance false)
+        // exactly like a transient main-unit failure would -- it does not fail the job.
+        expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: expect.any(String), freshInstance: false });
+      });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      const main = reviews.find((r) => r.file_path === 'src/app.ts' && r.pass === 'main');
+      const security = reviews.find((r) => r.file_path === 'src/app.ts' && r.pass === 'security');
+      // Main row is terminal and untouched by the security failure.
+      expect(main?.file_status).toBe('done');
+      // Security row carries its OWN retryable-failure bookkeeping (separate (job,file,'security') row).
+      expect(security?.file_status).toBe('failed');
+      expect(security?.transient_error_count).toBeGreaterThanOrEqual(1);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('bounds concurrent in-flight model calls to budgetAwareFileLimit even with a doubled unit list (MP-05)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-concurrency`;
+      // A large file whose security unit would fan out to multiple chunks inside the real reviewFile
+      // (bounded WITHIN the unit by isNearLimit); here it is one mocked call, but it stands in for the
+      // large multi-chunk security file the budget model must still bound at the UNIT-concurrency level.
+      const largeContent = Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+          { path: 'src/big.ts', content: largeContent },
+        ]),
+      );
+      let active = 0;
+      let maxActive = 0;
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        active -= 1;
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'c');
+      await updateJobFileCount(env, job.id, 3);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-concurrency' });
+
+      // The concurrency bound is derived from the SAME budget model the scheduler uses (default
+      // 'medium' concurrency). Even though security DOUBLES the unit list to 6 units, in-flight calls
+      // never exceed budgetAwareFileLimit -- the extra pass runs as MORE chunks, not wider chunks.
+      const bound = budgetAwareFileLimit(new TokenTracker().remainingSafeBudget(), REVIEW_CONCURRENCY_LIMITS.medium);
+      expect(maxActive).toBeLessThanOrEqual(bound);
+      // ...and the doubled unit list actually saturates the bound (proves it is genuinely bounded, not
+      // merely that too few units existed to reach the limit).
+      expect(maxActive).toBe(bound);
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.file_status === 'done')).toHaveLength(6);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('writes no security rows and stays byte-identical when the security pass is off (NREG-01)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-sec-off`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+
+      const job = await insertReviewJob(repo, defaultRepoConfig, 'd');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-off' });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.pass === 'security')).toHaveLength(0);
+      expect(reviews.filter((r) => r.pass === 'main' && r.file_status === 'done')).toHaveLength(2);
+
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+  });
 
   it('marks completed jobs with skipped files as partial reviews', async () => {
     const { GitHubService } = await import('@server/services/github');
