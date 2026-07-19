@@ -137,6 +137,62 @@ export class GithubAdapter implements VcsProvider {
     return found ? { ref: String(found.id) } : null;
   }
 
+  async createPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+  ): Promise<{ ref: string }> {
+    const { id } = await this.gh.createIssueComment(owner, repo, prNumber, body);
+    // WR-04 finite-guard copied from submitReview (:123-125): createIssueComment casts its body
+    // with an unchecked `as { id: number }`, so a non-numeric/NaN id would otherwise stringify into
+    // a corrupt ref. Fail loudly at the seam.
+    if (typeof id !== 'number' || !Number.isFinite(id)) {
+      throw new Error(`createIssueComment returned a non-numeric id for ${owner}/${repo}#${prNumber}: ${String(id)}`);
+    }
+    // GitHub ref is the bare comment id (D-02).
+    return { ref: String(id) };
+  }
+
+  async editPrComment(
+    owner: string,
+    repo: string,
+    ref: string,
+    body: string,
+  ): Promise<{ ref: string } | null> {
+    // Validate the ref STRICTLY (review F4): Number.isFinite(Number(ref)) is too weak -- it accepts
+    // '', '  ', '1.5', '1e3', '-1', '0'. Require a canonical positive safe-integer string (no leading
+    // zeros, no sign, no decimal/exponent, no whitespace, > 0) BEFORE any request. No prNumber arg (D-02).
+    if (!/^[1-9][0-9]*$/.test(ref) || !Number.isSafeInteger(Number(ref))) {
+      throw new Error(`editPrComment received a malformed ref for ${owner}/${repo}: ${JSON.stringify(ref)}`);
+    }
+    const commentId = Number(ref);
+    const result = await this.gh.updateIssueComment(owner, repo, commentId, body);
+    // null flows straight through from the client for both 404 and 410 (amended D-05 / review F3);
+    // the adapter never inspects a raw HTTP status.
+    return result ? { ref: String(result.id) } : null;
+  }
+
+  async listPrComments(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>> {
+    const items = await this.gh.listIssueComments(owner, repo, prNumber);
+    const results: Array<{ ref: string; body: string; author: { id: string; login: string } }> = [];
+    for (const c of items) {
+      // OMIT any comment whose author identity is missing/invalid (review F5): a false '' /
+      // 'undefined' id would defeat the Phase 11 self-filter, which requires a non-null immutable id
+      // (core/bot-identity.ts:105-108). Skip rather than emit a forgeable empty id.
+      if (!c.user || typeof c.user.id !== 'number' || !Number.isFinite(c.user.id)) {
+        continue;
+      }
+      // author.id is String(c.user.id), the immutable numeric user id, never login (NREG-02, D-03).
+      results.push({ ref: String(c.id), body: c.body, author: { id: String(c.user.id), login: c.user.login } });
+    }
+    return results;
+  }
+
   labels = {
     ensure: (owner: string, repo: string, name: string, color: string) =>
       this.gh.ensureLabel(owner, repo, name, color),

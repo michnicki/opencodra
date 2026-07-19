@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GithubAdapter } from '@server/vcs/github';
 import { GitHubService } from '@server/services/github';
+import { GitHubError } from '@server/core/github';
 import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, seedInstallationToken } from './helpers';
 import { installGitHubFetchMock } from './github-fetch-mock';
@@ -213,6 +214,158 @@ describe('GithubAdapter (VcsProvider mapping)', () => {
             call.path === `/repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/labels/codra-reviewed`,
         ),
       ).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('createPrComment posts issues/{n}/comments with body { body } and returns the bare comment id as ref', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(buildFixtures({ commentId: 8001 }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.createPrComment(OWNER, REPO, PR_NUMBER, 'new comment text');
+
+      // GitHub ref is the bare comment id (D-02).
+      expect(result).toEqual({ ref: '8001' });
+      const postCall = calls.find(
+        (call) => call.method === 'POST' && call.path === `/repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments`,
+      );
+      // Exact wire body is { body } (review F9).
+      expect(postCall?.body).toEqual({ body: 'new comment text' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('editPrComment patches issues/comments/{id} with body { body } and returns the ref', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(
+      buildFixtures({ commentEditResponses: [{ status: 200, id: 8001 }] }),
+    );
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.editPrComment(OWNER, REPO, '8001', 'edited text');
+
+      expect(result).toEqual({ ref: '8001' });
+      const patchCall = calls.find(
+        (call) => call.method === 'PATCH' && call.path === `/repos/${OWNER}/${REPO}/issues/comments/8001`,
+      );
+      // Exact wire body is { body } (review F9).
+      expect(patchCall?.body).toEqual({ body: 'edited text' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('editPrComment returns null when the PATCH is 404 (gone comment, D-05)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(buildFixtures({ commentEditResponses: [{ status: 404 }] }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.editPrComment(OWNER, REPO, '8001', 'edited text');
+      expect(result).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('editPrComment returns null when the PATCH is 410 Gone (amended D-05, review F3)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(buildFixtures({ commentEditResponses: [{ status: 410 }] }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.editPrComment(OWNER, REPO, '8001', 'edited text');
+      expect(result).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('editPrComment THROWS GitHubError on a non-gone status (422) — it does NOT return null (review F9)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(buildFixtures({ commentEditResponses: [{ status: 422 }] }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      await expect(adapter.editPrComment(OWNER, REPO, '8001', 'edited text')).rejects.toBeInstanceOf(GitHubError);
+    } finally {
+      restore();
+    }
+  });
+
+  it('editPrComment throws before any request on a malformed ref (review F4)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(buildFixtures());
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      for (const badRef of ['', '  ', '1.5', '1e3', '-1', '0']) {
+        await expect(adapter.editPrComment(OWNER, REPO, badRef, 'edited text')).rejects.toThrow();
+      }
+      // No PATCH to the comments endpoint was ever issued (rejected before the client call).
+      expect(calls.some((call) => call.method === 'PATCH' && call.path.includes('/issues/comments/'))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('listPrComments maps author.id from the immutable numeric user.id, never the login (NREG-02, D-07)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(
+      buildFixtures({
+        commentListItems: [
+          { id: 8001, body: 'existing comment body', user: { id: 424242, login: 'commenter-login' } },
+        ],
+      }),
+    );
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const comments = await adapter.listPrComments(OWNER, REPO, PR_NUMBER);
+
+      expect(comments).toEqual([
+        { ref: '8001', body: 'existing comment body', author: { id: '424242', login: 'commenter-login' } },
+      ]);
+      // author.id is the numeric user id as a string, NOT the login.
+      expect(comments[0].author.id).toBe('424242');
+      expect(comments[0].author.id).not.toBe('commenter-login');
+    } finally {
+      restore();
+    }
+  });
+
+  it('listPrComments OMITS a comment with a missing/invalid author id (review F5)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(
+      buildFixtures({
+        commentListItems: [
+          { id: 1, body: 'authored', user: { id: 111, login: 'real-login' } },
+          { id: 2, body: 'user-less', user: null },
+        ],
+      }),
+    );
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const comments = await adapter.listPrComments(OWNER, REPO, PR_NUMBER);
+
+      // Only the authored comment survives; the user-less one is omitted, never surfaced with a
+      // false '' / 'undefined' id.
+      expect(comments).toEqual([{ ref: '1', body: 'authored', author: { id: '111', login: 'real-login' } }]);
+      expect(comments.every((c) => c.author.id !== '' && c.author.id !== 'undefined')).toBe(true);
     } finally {
       restore();
     }
