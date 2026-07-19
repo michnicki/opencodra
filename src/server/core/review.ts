@@ -1480,10 +1480,15 @@ async function runFinalizePhase(
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed.`
     : null;
-  // Record the posted review and mark the job done IMMEDIATELY after createReview -- before the
-  // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
-  // label/check-run calls exhaust this invocation's subrequest budget (large PR), we must not leave
-  // the job stranded as 'failed' with review_id null. This is the critical, must-not-lose write.
+  // The review is already on GitHub at this point (submitReview above). completeJob below is the
+  // critical, must-not-lose write that records the posted review id and marks the job done. Between
+  // here and completeJob run best-effort steps: the walkthrough edit (which now precedes completeJob
+  // BY DESIGN so the supersede re-check is effective — see the block comment there — NOT "immediately
+  // after createReview" as this comment once claimed), its optional one-shot diagram model call, and
+  // the remaining label/check-run cosmetics. Any of these can consume this invocation's shared
+  // subrequest budget on a large PR; we must not let them exhaust it and leave the job stranded as
+  // 'failed' with review_id null. The diagram call is additionally skipped when the finalize budget
+  // is already tight (WR-01) so it cannot push the invocation over the cap ahead of completeJob.
   // Guard the ref -> id conversion (WR-03): a non-numeric ref (the Bitbucket case this seam
   // anticipates) would otherwise write NaN into review_id unguarded. Fail loudly here until
   // review_id becomes `text` to hold opaque refs (Phase 4/5 schema decision).
@@ -1539,10 +1544,26 @@ async function runFinalizePhase(
       // fails the job (D-07, D-04a). It is exactly ONE outbound request (generateWalkthroughDiagram is
       // primary-model-only) and never touches the per-file subrequest budget (Pitfall #1).
       let mermaid: string | null = null;
-      if (vcs.capabilities.supportsMermaid && config.review.walkthrough.sequence_diagram.enabled) {
+      if (
+        vcs.capabilities.supportsMermaid &&
+        config.review.walkthrough.sequence_diagram.enabled &&
+        // WR-01: graceful omission. The diagram is one more outbound model fetch that counts against
+        // this invocation's shared Cloudflare subrequest cap AND runs BEFORE the must-not-lose
+        // completeJob write. If finalize's budget is already tight, skip the diagram entirely rather
+        // than risk pushing the invocation over the cap ahead of completeJob — the walkthrough simply
+        // posts without a diagram (best-effort, D-07). summaryTracker is finalize's own tracker,
+        // reused for the diagram call below so this guard reflects the subrequests finalize has
+        // actually spent instead of a fresh, always-empty tracker's false sense of isolation.
+        !summaryTracker.isNearLimit()
+      ) {
         try {
-          const diagramTracker = new TokenTracker();
-          const diagramModelService = new ModelService(env, diagramTracker, { jobId: job.id });
+          // Reuse summaryTracker (the finalize-level tracker) rather than a fresh one: the diagram
+          // fetch shares this invocation's subrequest budget, so it must be accounted against the
+          // same tracker the near-limit guard above reads (WR-01). It is still exactly ONE
+          // primary-model-only call (generateWalkthroughDiagram) — no fallback fan-out, and it never
+          // touches the per-file subrequest budget. Diagram tokens are read from the response below,
+          // not the tracker, so folding them into completeJob stays correct.
+          const diagramModelService = new ModelService(env, summaryTracker, { jobId: job.id });
           const diagramResponse = await diagramModelService.generateWalkthroughDiagram({
             prTitle: pr.title,
             files, // the ACTUAL parsed diff (FileDiff[]), not only fileSummaries (cross-AI blocker 2)
