@@ -37,6 +37,37 @@ describe('getBotIdentity', () => {
     expect(client.resolveIdentity).not.toHaveBeenCalled();
   });
 
+  it('WR-02: a corrupt cache value is treated as a miss and falls through to the seed path (no throw)', async () => {
+    const env = createTestEnv();
+    // A non-JSON value at the cache key would make an unguarded JSON.parse throw and abort
+    // resolution. The guard must treat it as a miss and return the seed-only identity.
+    await env.APP_KV.put('bot-identity:github', '{ this is not valid json');
+
+    const identity = await getBotIdentity(env, 'github');
+
+    expect(identity).toEqual({
+      login: env.BOT_USERNAME,
+      accountId: null,
+      provider: 'github',
+    });
+  });
+
+  it('WR-02: a corrupt cache value falls through to the client discovery path when a client is supplied', async () => {
+    const env = createTestEnv();
+    await env.APP_KV.put('bot-identity:github', 'not-json-at-all');
+    const client: BotIdentityResolver = {
+      resolveIdentity: vi.fn(async () => ({ accountId: 'recovered-acct-456', login: 'recovered-login' })),
+    };
+
+    const identity = await getBotIdentity(env, 'github', client);
+
+    expect(identity.accountId).toBe('recovered-acct-456');
+    expect(client.resolveIdentity).toHaveBeenCalledOnce();
+    // The poisoned entry self-heals: a subsequent read returns the re-`put` valid value.
+    const second = await getBotIdentity(env, 'github');
+    expect(second.accountId).toBe('recovered-acct-456');
+  });
+
   it('resolves accountId via the client on a cold cache and puts it under bot-identity:github', async () => {
     const env = createTestEnv();
     const putSpy = vi.spyOn(env.APP_KV, 'put');

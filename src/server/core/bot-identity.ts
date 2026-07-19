@@ -1,4 +1,5 @@
 import type { AppBindings } from '@server/env';
+import { logger } from '@server/core/logger';
 
 /**
  * Cached bot-identity resolver (SC4 / NREG-02).
@@ -47,8 +48,11 @@ type CachedBotIdentity = { login: string; accountId: string | null };
 
 /**
  * Resolve the bot's identity for `provider`, reading through the `APP_KV` cache keyed on
- * `bot-identity:${provider}`. Mirrors the `getAppInstallationUrl` KV read/put pattern
- * (`core/github.ts`).
+ * `bot-identity:${provider}`. Follows the same KV read/put caching shape as `getAppInstallationUrl`
+ * (`core/github.ts`), but note this value is JSON-encoded (`{ login, accountId }`) whereas
+ * `getAppInstallationUrl` caches and returns a RAW string — so this path adds a `JSON.parse` the
+ * precedent does not have, and guards it (WR-02): a corrupt/legacy-shaped cache entry is treated as
+ * a miss and falls through to the client/seed path rather than throwing.
  *
  * - Cache HIT → returns the cached `{ login, accountId, provider }` (client, if any, not called).
  * - Cache MISS with a `client` → resolves `accountId` via `client.resolveIdentity()`, writes it to
@@ -69,9 +73,18 @@ export async function getBotIdentity(
 
   const cachedRaw = await env.APP_KV.get(cacheKey);
   if (cachedRaw) {
-    const cached = JSON.parse(cachedRaw) as CachedBotIdentity;
-    // Prefer the cached login if present, but fall back to the current BOT_USERNAME.
-    return { login: cached.login ?? login, accountId: cached.accountId ?? null, provider };
+    // WR-02: guard the parse. A corrupt or legacy-shaped value would otherwise throw and abort
+    // identity resolution with no recovery. On parse failure, treat the entry as a cache MISS and
+    // fall through to the client/seed path below so a poisoned cache entry can self-heal (the
+    // client path re-`put`s a valid value; the seed path still returns a usable identity).
+    try {
+      const cached = JSON.parse(cachedRaw) as CachedBotIdentity;
+      // Prefer the cached login if present, but fall back to the current BOT_USERNAME.
+      return { login: cached.login ?? login, accountId: cached.accountId ?? null, provider };
+    } catch {
+      logger.warn(`Discarding corrupt bot-identity cache for ${provider}`);
+      // fall through to the client/seed path below.
+    }
   }
 
   if (client) {
