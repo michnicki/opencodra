@@ -9,6 +9,22 @@ export type RecordedGitHubCall = {
 
 export type ReviewResponseScript = Array<{ status: number; id?: number }>;
 
+/**
+ * Scripted status sequence for successive PATCH /issues/comments/{id} calls (the edit-comment
+ * path). Mirrors the reviewResponses precedent: a spec can script 404 and 410 (both map to the
+ * D-05 null path -- review F3) as well as a non-gone status like 403/422 (which must still THROW
+ * -- review F9). Defaults to a single 200.
+ */
+export type CommentEditResponseScript = Array<{ status: number; id?: number }>;
+
+/** A single issue-comment list fixture, mirroring GitHub's issue-comment shape. `user` may be
+ * null so a spec can prove listPrComments OMITS a comment with no immutable author id (review F5). */
+export type IssueCommentFixture = {
+  id: number;
+  body: string;
+  user: { id: number; login: string } | null;
+};
+
 export type GitHubFetchMockFixtures = {
   owner: string;
   repo: string;
@@ -25,6 +41,21 @@ export type GitHubFetchMockFixtures = {
   diff: string;
   /** Scripted status sequence for successive POST .../reviews calls. Defaults to a single 200. */
   reviewResponses?: ReviewResponseScript;
+  /** Comment id the POST /issues/{n}/comments route returns (and the PATCH default id). */
+  commentId?: number;
+  /** Numeric user id the POST/GET comment routes attach as user.id (distinct from login so a
+   * spec can assert author.id derives from the immutable numeric id, not the login -- NREG-02). */
+  commentUserId?: number;
+  /** Login the POST/GET comment routes attach as user.login. */
+  commentUserLogin?: string;
+  /** Body the default GET comment fixture carries. */
+  commentBody?: string;
+  /** Full single-page list the GET /issues/{n}/comments route returns. When omitted it defaults
+   * to a one-item list built from commentId/commentBody/commentUserId/commentUserLogin. A spec
+   * seeds a user-less entry here to exercise the missing-author omission path (review F5). */
+  commentListItems?: IssueCommentFixture[];
+  /** Scripted status sequence for successive PATCH /issues/comments/{id} calls (review F3/F9). */
+  commentEditResponses?: CommentEditResponseScript;
 };
 
 /**
@@ -39,6 +70,19 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
   const reviewsListPath = `${repoPrefix}/pulls/${fixtures.prNumber}/reviews`;
   const reviewResponses = fixtures.reviewResponses ?? [{ status: 200, id: 5150 }];
   let reviewCallIndex = 0;
+
+  // Issue-comment fixtures (net-new routes). Defaults are chosen so commentUserId != any login
+  // string, letting the adapter spec prove author.id comes from the immutable numeric user id.
+  const commentId = fixtures.commentId ?? 8001;
+  const commentUserId = fixtures.commentUserId ?? 424242;
+  const commentUserLogin = fixtures.commentUserLogin ?? 'commenter-login';
+  const commentBody = fixtures.commentBody ?? 'existing comment body';
+  const commentListItems: IssueCommentFixture[] =
+    fixtures.commentListItems ?? [
+      { id: commentId, body: commentBody, user: { id: commentUserId, login: commentUserLogin } },
+    ];
+  const commentEditResponses = fixtures.commentEditResponses ?? [{ status: 200 }];
+  let commentEditCallIndex = 0;
 
   const existingLabels = new Map<string, string>();
   const issueLabels = new Set<string>();
@@ -92,6 +136,29 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
         return json({ message: 'Unprocessable Entity' }, script.status);
       }
       return json({ id: script.id ?? 5150 }, script.status);
+    }
+
+    // --- Issue-comment routes (net-new, additive; NREG-01) ---
+    // POST create: returns the new comment id plus the authoring user { id, login }.
+    if (method === 'POST' && url.pathname === `${repoPrefix}/issues/${fixtures.prNumber}/comments`) {
+      return json({ id: commentId, user: { id: commentUserId, login: commentUserLogin } }, 201);
+    }
+
+    // GET list: single-page fixture. commentListItems may include a user-less entry so a spec can
+    // prove listPrComments OMITS comments with no immutable author id (review F5).
+    if (method === 'GET' && url.pathname === `${repoPrefix}/issues/${fixtures.prNumber}/comments`) {
+      return json(commentListItems);
+    }
+
+    // PATCH edit-by-id: scriptable status (404/410 -> null path; 403/422 -> throw). The recorded
+    // call (calls.push above) exposes the PATCH body so a spec can assert it is exactly { body }.
+    if (method === 'PATCH' && /\/issues\/comments\/\d+$/.test(url.pathname)) {
+      const script = commentEditResponses[Math.min(commentEditCallIndex, commentEditResponses.length - 1)];
+      commentEditCallIndex += 1;
+      if (script.status >= 400) {
+        return json({ message: 'Comment edit error' }, script.status);
+      }
+      return json({ id: script.id ?? commentId }, script.status);
     }
 
     const labelLookup = new RegExp(`^${repoPrefix}/labels/([^/]+)$`).exec(url.pathname);
