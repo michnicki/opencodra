@@ -80,6 +80,34 @@ function bitbucketReviewFooter(commitSha: string): string {
   return `${BITBUCKET_REVIEW_MARKER} · reviewed commit \`${commitSha.slice(0, BITBUCKET_MARKER_SHA_LENGTH)}\``;
 }
 
+/**
+ * Parse the self-encoding `prId:commentId` comment ref (D-02) back into its two numeric parts.
+ *
+ * STRICTER than `updateStatusCheck`'s `Number.isFinite` guard (review F4): accepts ONLY exactly two
+ * colon-separated CANONICAL POSITIVE SAFE INTEGERS. `Number.isFinite(Number(part))` alone is too
+ * weak — it would accept `'42:8:extra'` (split loses the tail), `'42:'`, decimals (`'4.2'`),
+ * exponent (`'4e1'`), negatives, zero, and leading zeros. Centralizing validation here means both
+ * `editPrComment` (and any future consumer) reject a malformed ref BEFORE any HTTP request.
+ */
+function parsePrCommentRef(ref: string): { prId: number; commentId: number } {
+  const parts = ref.split(':');
+  if (parts.length !== 2) {
+    throw new Error(`Invalid Bitbucket comment ref: expected exactly "prId:commentId", got "${ref}"`);
+  }
+  const [prPart, commentPart] = parts;
+  // /^[1-9][0-9]*$/ rejects '', leading zeros, sign, decimal, exponent, and whitespace.
+  const canonical = /^[1-9][0-9]*$/;
+  if (!canonical.test(prPart) || !canonical.test(commentPart)) {
+    throw new Error(`Invalid Bitbucket comment ref: both segments must be canonical positive integers, got "${ref}"`);
+  }
+  const prId = Number(prPart);
+  const commentId = Number(commentPart);
+  if (!Number.isSafeInteger(prId) || !Number.isSafeInteger(commentId)) {
+    throw new Error(`Invalid Bitbucket comment ref: segments exceed the safe integer range, got "${ref}"`);
+  }
+  return { prId, commentId };
+}
+
 export class BitbucketAdapter implements VcsProvider {
   readonly name = 'bitbucket' as const;
   // Bitbucket Cloud does not render Mermaid diagrams in PR markdown, so the walkthrough formatter
@@ -288,6 +316,64 @@ export class BitbucketAdapter implements VcsProvider {
     );
     void owner;
     return matched ? { ref: String(matched.id) } : null;
+  }
+
+  /**
+   * Standalone (issue/PR-level) comment primitives (D-01/D-02). Inert this phase — no consumer
+   * (D-06). The ref is self-encoding `prId:commentId` so a persisted ref (Phase 9's
+   * `walkthrough_comment_ref`) is editable with nothing else, mirroring `updateStatusCheck`'s
+   * opaque ref. `owner` is ignored — Bitbucket's workspace is canonical (this.job.repositoryWorkspace).
+   */
+  async createPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+  ): Promise<{ ref: string }> {
+    // Reuse the content-only post branch (no inline object) — the same path submitReview uses for
+    // its combined marker+summary. No dedup scan of listPrComments (thin primitive, D-04).
+    const posted = await this.client.postPullRequestComment(this.job.repositoryWorkspace, repo, prNumber, {
+      content: { raw: body },
+    });
+    void owner;
+    return { ref: `${prNumber}:${posted.id}` };
+  }
+
+  async editPrComment(
+    owner: string,
+    repo: string,
+    ref: string,
+    body: string,
+  ): Promise<{ ref: string } | null> {
+    // parsePrCommentRef throws on a malformed ref BEFORE any request (review F4). The self-encoding
+    // ref carries the PR id, so editPrComment needs no prNumber argument (D-02).
+    const { prId, commentId } = parsePrCommentRef(ref);
+    const result = await this.client.editPullRequestComment(this.job.repositoryWorkspace, repo, prId, commentId, body);
+    void owner;
+    // null (from a 404 OR 410 — amended D-05) flows straight through; on success echo the same ref.
+    return result ? { ref } : null;
+  }
+
+  async listPrComments(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>> {
+    const items = await this.client.listPullRequestComments(this.job.repositoryWorkspace, repo, prNumber, 100);
+    void owner;
+    const results: Array<{ ref: string; body: string; author: { id: string; login: string } }> = [];
+    for (const item of items) {
+      const id = item.author?.id;
+      // OMIT a comment lacking an immutable account_id (review F5) — never surface author.id ''.
+      // A false empty id would defeat the Phase 11 self-filter that keys on author.id (NREG-02).
+      if (id === undefined || id === '') continue;
+      results.push({
+        ref: `${prNumber}:${item.id}`,
+        body: item.body,
+        author: { id, login: item.author.login },
+      });
+    }
+    return results;
   }
 
   /**
