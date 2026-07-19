@@ -5,6 +5,7 @@ import { reviewWithOpenAI } from '../models/openai';
 import { reviewWithAnthropic } from '../models/anthropic';
 import { buildFileReviewPrompts } from '../prompts/file-review';
 import { buildSecurityReviewPrompts } from '../prompts/security-review';
+import { buildCriticPrompts, type CriticCandidateFinding } from '../prompts/critic';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '../prompts/summary';
 import { WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT, buildWalkthroughDiagramPrompt } from '../prompts/walkthrough-diagram';
 import { parseFileReviewResponse } from '../core/model-output';
@@ -691,6 +692,106 @@ export class ModelService {
     // As in reviewFile: guard against `throw undefined` when every summary model was skipped via
     // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
     throw lastError ?? new Error('No summary model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * MP-03 / D-05: the critic's single whole-set, ID-based, PRUNE-ONLY model call. Mirrors
+   * generateSummary's fallback-chain + RetryableModelError discipline (a transient failure across the
+   * whole chain defers rather than wedges), but with two critic-specific properties:
+   *   1. `applySizeOverrides: false` — the critic reviews a finding SET, not a single sized file, so
+   *      it MUST resolve the MAIN model chain and never a size-override model (review-verified HIGH:
+   *      selectModel({ totalLineCount: 0 }) would otherwise match the first override).
+   *   2. It returns only `rawText` (+ token accounting) — the id->finding mapping and
+   *      `kept = deduped minus pruned-by-id` reconciliation happen in code in runCriticPhase (10-06),
+   *      parsed by parseCriticPruneResponse. There is NO per-pass model override (D-02).
+   * Each finding is assigned a numeric id equal to its index in the input array; the critic returns
+   * ONLY { prune: [{ id, reason }] } — never a keep-list, never full findings.
+   */
+  async critiqueFindings(params: {
+    findings: Array<{ path: string; line?: number | null; severity: string; title: string; body: string }>;
+    prTitle: string | null;
+    config: RepoConfig;
+  }): Promise<{ rawText: string; modelUsed: string; inputTokens: number; outputTokens: number }> {
+    const candidates: CriticCandidateFinding[] = params.findings.map((f, index) => ({
+      id: index,
+      path: f.path,
+      line: f.line ?? null,
+      severity: f.severity,
+      title: f.title,
+      body: f.body,
+    }));
+    const { systemPrompt, userPrompt } = buildCriticPrompts({
+      findings: candidates,
+      prTitle: params.prTitle,
+      config: params.config.review,
+    });
+
+    // Size overrides DISABLED: resolve the MAIN chain, never a size-override model (D-05).
+    const { primary, fallbacks } = this.selectModel({
+      totalLineCount: 0,
+      config: params.config,
+      applySizeOverrides: false,
+    });
+    const modelsToTry = [primary, ...fallbacks];
+
+    let lastError: unknown;
+    let lastTransientError: unknown;
+    let sawTransientFailure = false;
+    for (const currentModel of modelsToTry) {
+      let resolved: ResolvedModelConfig;
+      try {
+        resolved = await this.resolveModel(currentModel);
+      } catch (error) {
+        lastError = error;
+        logger.warn(`Critic model ${currentModel} could not be resolved`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      if (resolved.apiFormat === 'cloudflare-workers-ai' && await this.isProviderUnavailable(resolved.providerId)) {
+        logger.warn(`Skipping ${resolved.providerName} critic model ${currentModel} because the provider is unavailable for job ${this.options.jobId ?? 'unknown'}`);
+        continue;
+      }
+
+      try {
+        const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt }, adaptiveModelTimeoutMs(0));
+
+        if (this.tracker) {
+          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+        }
+
+        return {
+          rawText: response.rawText,
+          modelUsed: response.modelUsed,
+          inputTokens: response.inputTokens,
+          outputTokens: response.outputTokens,
+        };
+      } catch (error) {
+        lastError = error;
+        if (isTransientModelFailure(error)) {
+          sawTransientFailure = true;
+          lastTransientError = error;
+        }
+        if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
+          await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
+        }
+        logger.warn(`Critic model ${currentModel} failed`, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (sawTransientFailure) {
+      const retryCause = lastTransientError ?? lastError;
+      const lastMessage = retryCause instanceof Error ? retryCause.message : String(retryCause ?? 'Unknown model error');
+      throw new RetryableModelError(
+        `All configured critic models failed; retrying later. Last error: ${lastMessage}`,
+        retryCause,
+      );
+    }
+
+    // As in generateSummary: guard against `throw undefined` when every critic model was skipped via
+    // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
+    throw lastError ?? new Error('No critic model produced a result; all configured models were skipped or unavailable.');
   }
 
   /**

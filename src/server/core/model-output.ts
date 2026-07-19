@@ -1,4 +1,4 @@
-import { fileReviewModelOutputSchema, parsedReviewCommentSchema, summaryModelOutputSchema, type ParsedReviewComment, reviewSeverities } from '@shared/schema';
+import { criticPruneOutputSchema, fileReviewModelOutputSchema, parsedReviewCommentSchema, summaryModelOutputSchema, type ParsedReviewComment, reviewSeverities } from '@shared/schema';
 import { z } from 'zod';
 import { logger } from './logger';
 import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPositions } from './diff';
@@ -502,6 +502,76 @@ export function parseWalkthroughDiagram(raw: string): string | null {
     // Best-effort: any unexpected failure -> omit the diagram, never fail the walkthrough.
     return null;
   }
+}
+
+// The per-item validation target for the critic's prune output (D-05). Reuses the exact item shape
+// declared on criticPruneOutputSchema (id: nonnegative int, reason: string) so validation stays in
+// one place — parseCriticPruneResponse skips malformed entries per-item instead of the schema's
+// all-or-nothing array parse.
+const criticPruneItemSchema = criticPruneOutputSchema.shape.prune.element;
+
+/**
+ * Tolerant parse of the critic's ID-based prune output (D-05). Returns the { id, reason }[] the
+ * critic wants DROPPED — never a keep-list, never full findings (runCriticPhase, 10-06, reconciles
+ * `kept = deduped minus pruned-by-id` in code). Mirrors parseFileReviewResponse's tolerant pattern
+ * (strip <think> tags, extractJson, jsonrepair fallback) and MUST live inside this module because
+ * the extractJson/preprocessJson helpers are private (the critic parser cannot be assembled from
+ * outside — review-verified HIGH). Never throws: unparseable input returns []; malformed prune
+ * entries are skipped per-item, validated against criticPruneOutputSchema's item shape.
+ */
+export function parseCriticPruneResponse(raw: string): { id: number; reason: string }[] {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return [];
+
+  // Strip <think>...</think> reasoning (tolerant of a missing close tag) before extraction, same as
+  // parseWalkthroughDiagram — reasoning text can contain JSON-looking fragments that would confuse
+  // the extractor.
+  const stripped = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/i, '');
+
+  let extracted: string;
+  try {
+    extracted = extractJson(stripped);
+  } catch {
+    return [];
+  }
+
+  let repaired = extracted;
+  try {
+    repaired = jsonrepair(preprocessJson(extracted));
+  } catch {
+    // Fall back to the raw extracted text; the JSON.parse below is the final gate.
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(repaired);
+  } catch {
+    return [];
+  }
+
+  // Accept either a { prune: [...] } object or a bare [...] array of prune items (fail-soft: a model
+  // that emits just the array still parses). An array-of-objects picks the wrapper carrying `prune`.
+  let pruneArray: unknown[];
+  if (Array.isArray(parsedJson)) {
+    const wrapper = parsedJson.find(
+      (i) => i && typeof i === 'object' && Array.isArray((i as Record<string, unknown>).prune),
+    ) as Record<string, unknown> | undefined;
+    pruneArray = wrapper ? (wrapper.prune as unknown[]) : parsedJson;
+  } else if (parsedJson && typeof parsedJson === 'object' && Array.isArray((parsedJson as Record<string, unknown>).prune)) {
+    pruneArray = (parsedJson as Record<string, unknown>).prune as unknown[];
+  } else {
+    return [];
+  }
+
+  const results: { id: number; reason: string }[] = [];
+  for (const item of pruneArray) {
+    const parsed = criticPruneItemSchema.safeParse(item);
+    if (parsed.success) {
+      results.push({ id: parsed.data.id, reason: parsed.data.reason });
+    }
+  }
+  return results;
 }
 
 export function parseSummaryResponse(raw: string): string {
