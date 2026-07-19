@@ -2,7 +2,7 @@ import { budgetAwareFileLimit, runReviewJob } from '@server/core/review';
 import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob, mapJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
 import { defaultRepoConfig, REVIEW_CONCURRENCY_LIMITS, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
@@ -106,6 +106,17 @@ vi.mock('@server/services/model', () => {
                 rawText: 'sequenceDiagram\n  participant A\n  A->>B: call()',
                 inputTokens: 7,
                 outputTokens: 4,
+            };
+        }
+        // Phase 10 Plan 06 MP-03: the critic's single whole-set, ID-based, prune-only call. Default
+        // returns an empty prune (keep-all); critic tests spy/override this on the prototype to assert
+        // it is (or isn't) called, to prune specific ids, or to inject a failure (fail-open).
+        async critiqueFindings() {
+            return {
+                rawText: '{"prune": []}',
+                modelUsed: 'critic-model',
+                inputTokens: 5,
+                outputTokens: 2,
             };
         }
     }
@@ -974,6 +985,283 @@ dbDescribe('Review Flow Lifecycle', () => {
       expect(reviews.filter((r) => r.pass === 'security')).toHaveLength(0);
       expect(reviews.filter((r) => r.pass === 'main' && r.file_status === 'done')).toHaveLength(2);
 
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+  });
+
+  describe('multi-pass critic phase (MP-03)', () => {
+    // Repo config with the critic pass enabled. skip_threshold/input_char_budget/security are
+    // overridable so a case can force the model call (skip_threshold: 0/1) or leave the default guard.
+    const criticConfig = (overrides?: { skip_threshold?: number; input_char_budget?: number; security?: boolean }): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: {
+          security: { enabled: overrides?.security ?? false },
+          critic: {
+            enabled: true,
+            ...(overrides?.skip_threshold !== undefined ? { skip_threshold: overrides.skip_threshold } : {}),
+            ...(overrides?.input_char_budget !== undefined ? { input_char_budget: overrides.input_char_budget } : {}),
+          },
+        },
+      },
+    });
+
+    const insertCriticJob = (repo: string, config: RepoConfig, commitChar: string) =>
+      insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber: 8,
+        prTitle: 'Critic Pass Test',
+        prAuthor: 'author',
+        commitSha: sha(commitChar),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: config,
+      });
+
+    // A finding per reviewed file so a multi-file diff yields a multi-finding candidate set.
+    const findingReview = (params: any) => ({
+      parsed: {
+        comments: [{
+          path: params.file.path,
+          line: 1,
+          position: 1,
+          severity: 'P2',
+          category: 'quality',
+          title: `Finding in ${params.file.path}`,
+          body: `Issue body for ${params.file.path}`,
+        }],
+        verdict: 'comment' as const,
+        fileSummary: `Reviewed ${params.file.path}`,
+        overallCorrectness: 'issues found',
+        confidenceScore: 0.9,
+      },
+      modelUsed: 'test-model',
+      provider: 'test-provider',
+      inputTokens: 10,
+      outputTokens: 5,
+      rawText: '{}',
+      userPrompt: '',
+    });
+
+    // Drain the phase loop, recording the observed next_phase sequence so a test can assert whether
+    // the critic phase was (or was not) entered.
+    async function drainCapturingPhases(message: Parameters<typeof runReviewJob>[1]) {
+      const phases: string[] = [];
+      await runWithDb(env, async () => {
+        let currentMessage: typeof message | null = message;
+        let retries = 0;
+        while (currentMessage) {
+          const result = await runReviewJob(env, currentMessage);
+          if (result.action === 'next_phase') {
+            phases.push(result.phase);
+            currentMessage = { ...currentMessage, phase: result.phase };
+            retries = 0;
+            const jobId = (currentMessage as any).jobId;
+            if (jobId) {
+              await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [jobId]);
+            }
+          } else if (result.action === 'retry') {
+            if (++retries > 5) throw new Error('Max retries exceeded');
+            break;
+          } else {
+            currentMessage = null;
+          }
+        }
+      });
+      return phases;
+    }
+
+    const readCriticResult = async (jobId: string) => {
+      const row = await getJobForProcessing(env, jobId);
+      return row ? mapJob(row).criticResult : null;
+    };
+
+    it('persists { kept, pruned } and reconciles kept = deduped minus pruned-by-id', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-persist`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      // Prune the finding at index 0; the reconciliation keeps the rest.
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings').mockResolvedValue({
+        rawText: '{"prune":[{"id":0,"reason":"duplicate of another finding"}]}',
+        modelUsed: 'critic-model',
+        inputTokens: 5,
+        outputTokens: 2,
+      });
+
+      // skip_threshold: 1 so a 2-finding set is above the threshold and the model call runs.
+      const job = await insertCriticJob(repo, criticConfig({ skip_threshold: 1 }), 'a');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-persist' });
+
+      expect(phases).toContain('critic');
+      expect(phases.indexOf('critic')).toBeLessThan(phases.indexOf('finalize'));
+      expect(critiqueSpy).toHaveBeenCalledTimes(1);
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult).not.toBeNull();
+      expect(criticResult?.skipped).toBe(false);
+      expect(criticResult?.dedupedCount).toBe(2);
+      expect(criticResult?.pruned).toHaveLength(1);
+      expect(criticResult?.kept).toHaveLength(1);
+      // kept + pruned accounts for the whole deduped candidate set (nothing invented, nothing lost).
+      expect((criticResult?.kept.length ?? 0) + (criticResult?.pruned.length ?? 0)).toBe(2);
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('a'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('skips the model call and keeps all findings when the deduped set is at/below the skip threshold', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-skip`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/one.ts', content: 'console.log(1);' }]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      // Default skip_threshold (CRITIC_SKIP_THRESHOLD = 3); a single-finding set is below it.
+      const job = await insertCriticJob(repo, criticConfig(), 'b');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-skip' });
+
+      expect(phases).toContain('critic');
+      // The critic phase ran but did NOT call the model (keep-all skip).
+      expect(critiqueSpy).not.toHaveBeenCalled();
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult?.skipped).toBe(true);
+      expect(criticResult?.pruned).toHaveLength(0);
+      expect(criticResult?.kept).toHaveLength(1);
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('fails open (keeps all findings, job completes) when the critic model call errors', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService, RetryableModelError } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-failopen`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      // Even a RetryableModelError must fail OPEN inside the critic (never fail/wedge the job).
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings').mockRejectedValue(
+        new (RetryableModelError as any)('Critic provider timed out'),
+      );
+
+      const job = await insertCriticJob(repo, criticConfig({ skip_threshold: 1 }), 'c');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-failopen' });
+
+      expect(phases).toContain('critic');
+      expect(phases).toContain('finalize');
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult?.skipped).toBe(true);
+      expect(criticResult?.pruned).toHaveLength(0);
+      // All candidate findings survive a failed critic — nothing is lost.
+      expect(criticResult?.kept).toHaveLength(2);
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('c'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('routes a continuation-ceiling review degrade INTO the critic when the critic is enabled', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-degrade`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/one.ts', content: 'console.log(1);' }]),
+      );
+      // A subrequest-budget error makes the review chunk defer; with the continuation counter already
+      // at the ceiling, continueOrFailWedgedJob degrades — and must route through the critic selector.
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockRejectedValue(
+        new Error('Too many subrequests'),
+      );
+
+      const job = await insertCriticJob(repo, criticConfig(), 'd');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      // Pre-set the continuation counter to the ceiling so the next deferral tips the degrade branch.
+      await queryRows(env, `UPDATE jobs SET continuation_count = 20 WHERE id = $1`, [job.id]);
+
+      await runWithDb(env, async () => {
+        const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-critic-degrade', phase: 'review' });
+        // A degraded review with the critic ON routes to 'critic' (not straight to 'finalize').
+        expect(result).toEqual({
+          action: 'next_phase',
+          phase: 'critic',
+          delaySeconds: expect.any(Number),
+          jobId: job.id,
+          freshInstance: true,
+        });
+      });
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with the critic off, no critic phase is entered and critic_result stays null', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-off`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const job = await insertCriticJob(repo, defaultRepoConfig, 'e');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-off' });
+
+      // review -> finalize directly; the critic phase is never observed and the model is never called.
+      expect(phases).not.toContain('critic');
+      expect(critiqueSpy).not.toHaveBeenCalled();
+      expect(await readCriticResult(job.id)).toBeNull();
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('e'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
       getDiffSpy.mockRestore();
     }, REVIEW_FLOW_TIMEOUT_MS);
   });

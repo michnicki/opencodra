@@ -88,6 +88,32 @@ describe('ReviewWorkflow: fresh instance on freshInstance flag', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('re-enqueues the critic phase as a fresh instance keyed on jobId (review -> critic)', async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = { REVIEW_QUEUE: { send } };
+    // Review completed with the critic enabled -> hand the critic phase to a fresh instance (its own
+    // subrequest budget for the single whole-set critic call, D-07).
+    runReviewJobMock.mockResolvedValueOnce({ action: 'next_phase', phase: 'critic', delaySeconds: 60, jobId: 'real-job-id', freshInstance: true });
+
+    await runWorkflow(env, { jobId: 'real-job-id', phase: 'review' });
+
+    expect(runReviewJobMock).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'real-job-id', phase: 'critic', forceFreshInstance: true }));
+  });
+
+  it('re-enqueues finalize as a fresh instance keyed on jobId (critic -> finalize)', async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = { REVIEW_QUEUE: { send } };
+    // The critic phase completed -> hand finalize its own fresh instance/budget to post the review.
+    runReviewJobMock.mockResolvedValueOnce({ action: 'next_phase', phase: 'finalize', delaySeconds: 60, jobId: 'real-job-id', freshInstance: true });
+
+    await runWorkflow(env, { jobId: 'real-job-id', phase: 'critic' });
+
+    expect(runReviewJobMock).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'real-job-id', phase: 'finalize', forceFreshInstance: true }));
+  });
+
   it('uses the payload jobId to re-enqueue when the result omits it (auto jobs)', async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const env = { REVIEW_QUEUE: { send } };
