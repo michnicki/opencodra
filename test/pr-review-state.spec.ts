@@ -66,16 +66,33 @@ dbDescribe('pr_review_state pause accessors (SC1 pause portion)', () => {
     expect(state!.paused_by).toBe('account-second');
   });
 
-  it('resume updates the SAME single row in place (no duplicate row)', async () => {
+  it('resume clears paused in place WITHOUT clobbering paused_by (IN-02)', async () => {
     const key = githubKey(`resume-${Date.now()}`);
 
     await markPrPaused(env, key, 'account-pauser');
-    await markPrResumed(env, key, 'account-resumer');
+    const resumed = await markPrResumed(env, key, 'account-resumer');
 
+    // Single row, cleared in place.
     expect(await countRows(env, key)).toBe(1);
+    expect(resumed).not.toBeNull();
+    expect(resumed!.paused).toBe(false);
     const state = await getPrReviewState(env, key);
     expect(state!.paused).toBe(false);
-    expect(state!.paused_by).toBe('account-resumer');
+    // IN-02: paused_by preserves the PAUSER's immutable account_id (NREG-02 intent), NOT the
+    // resumer -- the previous upsert-based implementation overwrote it with 'account-resumer'.
+    expect(state!.paused_by).toBe('account-pauser');
+  });
+
+  it('resuming a never-paused PR is a no-op: no row is created and null is returned (IN-02)', async () => {
+    const key = githubKey(`resume-noop-${Date.now()}`);
+
+    // IN-02: resume must NOT route through the upsert (which would INSERT a spurious paused=false
+    // row and break the "no row until first pause" lazy-creation invariant).
+    const resumed = await markPrResumed(env, key, 'account-resumer');
+
+    expect(resumed).toBeNull();
+    expect(await countRows(env, key)).toBe(0);
+    expect(await getPrReviewState(env, key)).toBeNull();
   });
 
   it('two pause attempts on the same GitHub PR tuple yield exactly one row (D-01 one-row-per-PR for GitHub)', async () => {

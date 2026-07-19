@@ -1,4 +1,5 @@
 import type { AppBindings } from '@server/env';
+import type { VcsProvider } from '@shared/schema';
 import { queryRows } from './client';
 
 /**
@@ -24,7 +25,13 @@ import { queryRows } from './client';
  * and keeps `workspace = $N` equality lookups from ever binding NULL.
  */
 export type PrReviewStateKey = {
-  vcsProvider: string;
+  // IN-01: narrowed from `string` to the shared `VcsProvider` union ('github' | 'bitbucket') so a
+  // typo'd provider ('GitHub', 'bitucket') is a compile-time error rather than silently creating a
+  // distinct, orphaned pause row that no correctly-spelled lookup will ever match. The
+  // `pr_review_state` table itself still has no DB-level CHECK on `vcs_provider`; adding
+  // `CHECK (vcs_provider IN ('github','bitbucket'))` is a DEFERRED follow-up migration decision --
+  // migration 007 is already applied to the test/dev databases, so this fix is TS-tightening only.
+  vcsProvider: VcsProvider;
   workspace: string;
   repoSlug: string;
   prNumber: number;
@@ -32,7 +39,11 @@ export type PrReviewStateKey = {
 
 export type PrReviewStateRow = {
   id: string;
-  vcs_provider: string;
+  // IN-01: tightened to the shared union to match the key type. The accessors only ever write a
+  // VcsProvider value (via PrReviewStateKey), so rows produced through this module carry a valid
+  // provider. (A DB-level CHECK is the deferred follow-up noted above; this type is not a guarantee
+  // about arbitrary externally-inserted rows.)
+  vcs_provider: VcsProvider;
   workspace: string;
   repo_slug: string;
   pr_number: number;
@@ -108,13 +119,43 @@ export async function markPrPaused(
 }
 
 /**
- * Convenience wrapper: resume a PR's review. Updates the SAME single pause row in place (no
- * duplicate row) via the shared upsert setter.
+ * Convenience wrapper: resume a PR's review.
+ *
+ * IN-02: this is an UPDATE-ONLY operation, deliberately NOT routed through upsertPrReviewState.
+ * Routing resume through the upsert INSERTed a spurious `paused=false` row for a never-paused PR
+ * (breaking the "no row until the first pause" lazy-creation invariant, and materializing a
+ * `paused=false` row where callers expect `null`), and overwrote `paused_by` with the RESUMER --
+ * leaving the column named `paused_by` holding the actor who un-paused rather than the pauser.
+ *
+ * Corrected behavior:
+ *   - No existing row  -> no-op, returns `null` (never creates a row).
+ *   - Existing row     -> clears `paused` in place WITHOUT clobbering `paused_by`, which by the
+ *                         module's NREG-02 intent records the immutable account_id of the PAUSER.
+ *
+ * `resumedByAccountId` is accepted for call-site symmetry with `markPrPaused` and forward
+ * compatibility, but is intentionally NOT persisted: preserving the resumer's identity through a
+ * resume would require a separate `resumed_by`/`last_actor` column (a deferred follow-up migration),
+ * not overwriting the pauser's `paused_by`. Fully parameterized; no string interpolation.
  */
 export async function markPrResumed(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   key: PrReviewStateKey,
   resumedByAccountId: string,
-): Promise<PrReviewStateRow> {
-  return upsertPrReviewState(env, key, { paused: false, pausedBy: resumedByAccountId });
+): Promise<PrReviewStateRow | null> {
+  void resumedByAccountId;
+  const rows = await queryRows<PrReviewStateRow>(
+    env,
+    `
+      UPDATE pr_review_state
+      SET paused = false,
+          paused_at = now()
+      WHERE vcs_provider = $1
+        AND workspace = $2
+        AND repo_slug = $3
+        AND pr_number = $4
+      RETURNING *
+    `,
+    [key.vcsProvider, key.workspace, key.repoSlug, key.prNumber],
+  );
+  return rows[0] ?? null;
 }
