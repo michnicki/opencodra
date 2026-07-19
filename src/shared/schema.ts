@@ -128,7 +128,16 @@ export const reviewConfigSchema = z.object({
   passes: z
     .object({
       security: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
-      critic: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+      // `skip_threshold` / `input_char_budget` are OPTIONAL critic tuning knobs (review suggestion):
+      // when unset, 10-06 falls back to its in-code constants, so absence is behavior-identical.
+      // Additive optional fields keep `passes.critic` all-off by default (NREG-01 inertness).
+      critic: z
+        .object({
+          enabled: z.boolean().default(false),
+          skip_threshold: z.number().int().nonnegative().optional(),
+          input_char_budget: z.number().int().positive().optional(),
+        })
+        .default({ enabled: false }),
     })
     .default({ security: { enabled: false }, critic: { enabled: false } }),
   interactive: z
@@ -252,9 +261,34 @@ export const criticResultSchema = z
     model: z.string().optional(),
     inputTokens: z.number().int().optional(),
     outputTokens: z.number().int().optional(),
+    // D-08 additive-only refinement (never touch the locked fields above). `skipped` is true when
+    // 10-06 bypasses the critic model call (skip-threshold / input-char-budget / fail-open), so the
+    // stored critic-result blob records that no pruning ran rather than looking like an empty prune.
+    // `dedupedCount` records the deduped candidate-set size the critic was shown. Both optional so
+    // every existing critic-result blob (and `criticResultSchema.parse({ kept: [], pruned: [] })`)
+    // still parses unchanged.
+    skipped: z.boolean().optional(),
+    dedupedCount: z.number().int().optional(),
   })
   .passthrough();
 export type CriticResult = z.infer<typeof criticResultSchema>;
+
+// D-05 ID-based critic MODEL-OUTPUT contract (distinct from the DB-persisted criticResultSchema
+// above). The critic returns ONLY opaque numeric ids to DROP plus a reason per id — never full
+// findings, never a keep-list — which 10-06 reconciles back to findings in code (the index-assigned
+// ids close the gap that parsedReviewCommentSchema has no stable id). `.passthrough()` so a critic
+// that emits extra metadata still parses fail-soft.
+export const criticPruneOutputSchema = z
+  .object({
+    prune: z.array(
+      z.object({
+        id: z.number().int().nonnegative(),
+        reason: z.string(),
+      }),
+    ),
+  })
+  .passthrough();
+export type CriticPruneOutput = z.infer<typeof criticPruneOutputSchema>;
 
 export const jobSummarySchema = z.object({
   id: z.uuid(),
@@ -322,6 +356,16 @@ export type JobStep = z.infer<typeof jobStepSchema>;
 // dedicated pass. Widen this enum when a new pass is introduced.
 export const fileReviewPassSchema = z.enum(['main', 'security']);
 export type FileReviewPass = z.infer<typeof fileReviewPassSchema>;
+
+// Canonical (file_path, pass) tuple identity for the multi-pass engine. The review-consensus HIGH
+// finding was that the engine introduced a second `pass` dimension while keeping identity path-only,
+// which conflates a file's main and security units. This helper is the single source of truth the
+// review maps / completion / inheritance in 10-05/10-06 key on. The separator is NUL ('\0'), which
+// cannot occur in a POSIX file path, so the key is injective over (file_path, pass).
+export type ReviewUnitKey = string;
+export function reviewUnitKey(filePath: string, pass: FileReviewPass): ReviewUnitKey {
+  return `${filePath} ${pass}`;
+}
 
 export const fileReviewRecordSchema = z.object({
   id: z.uuid(),
