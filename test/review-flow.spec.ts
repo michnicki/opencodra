@@ -1,7 +1,7 @@
 import { runReviewJob } from '@server/core/review';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, getTerminalJobsNeedingCheckRunCompletion, insertJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
 import { defaultRepoConfig, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
@@ -334,9 +334,15 @@ dbDescribe('Review Flow Lifecycle', () => {
     expect(final?.review_id).not.toBeNull();
     // The check-run update failed, so it must NOT be marked completed -- it stays pending so the
     // maintenance sweep can finish it (the check run always ends up 'completed', never stuck).
+    // Assert THIS job's own sweep-eligibility (terminal status + a check_run_id + no
+    // check_run_completed_at) rather than calling getTerminalJobsNeedingCheckRunCompletion() and
+    // checking membership. That query is windowed (ORDER BY finished_at ASC LIMIT n), so on the
+    // shared test DB a backlog of >n uncompleted terminal jobs pushes this (newest) job out of the
+    // window and the membership check flakes independently of the code under test. The query's own
+    // WHERE/ordering behavior is covered in job-recovery-provider.spec.ts; here we only need to prove
+    // this job is left in the exact state that query selects on.
+    expect(final?.check_run_id).not.toBeNull();
     expect(final?.check_run_completed_at).toBeNull();
-    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
-    expect(pending.some((j) => j.id === job.id)).toBe(true);
     checkRunSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
 
@@ -351,10 +357,12 @@ dbDescribe('Review Flow Lifecycle', () => {
 
     const final = await getJobForProcessing(env, job.id);
     expect(final?.status).toBe('done');
-    // The inline check-run update succeeded, so it's marked complete and won't be re-done by maintenance.
+    // The inline check-run update succeeded, so it's marked complete and won't be re-done by
+    // maintenance. A non-null check_run_completed_at is exactly what excludes this job from
+    // getTerminalJobsNeedingCheckRunCompletion() (its predicate requires check_run_completed_at IS
+    // NULL), so this single job-scoped assertion is the DB-cleanliness-independent equivalent of the
+    // old windowed membership check (which flaked once the shared test DB's backlog exceeded the LIMIT).
     expect(final?.check_run_completed_at).not.toBeNull();
-    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
-    expect(pending.some((j) => j.id === job.id)).toBe(false);
   }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('marks "Reviewing Files" done at finalize even when a degrade path left it running', async () => {
