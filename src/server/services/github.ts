@@ -38,6 +38,20 @@ export class GitHubService {
     return this.client.findBotReviewForCommit(owner, repo, prNumber, commitSha, botLogin);
   }
 
+  // Comment-primitive pass-throughs (Pitfall 1): REQUIRED so the GithubAdapter can reach the client
+  // AND so the vi.mock('@server/services/github') seam intercepts. Each is a one-line delegate.
+  async createIssueComment(owner: string, repo: string, issueNumber: number, body: string) {
+    return this.client.createIssueComment(owner, repo, issueNumber, body);
+  }
+
+  async listIssueComments(owner: string, repo: string, issueNumber: number) {
+    return this.client.listIssueComments(owner, repo, issueNumber);
+  }
+
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string) {
+    return this.client.updateIssueComment(owner, repo, commentId, body);
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return this.client.ensureLabel(owner, repo, name, color);
   }

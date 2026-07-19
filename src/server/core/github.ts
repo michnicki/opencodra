@@ -603,6 +603,73 @@ export class GitHubClient {
     });
   }
 
+  // --- Standalone issue/PR-level comment primitives (D-04: thin, no dedup) ---
+
+  // Net-new POST create, mirroring addIssueLabels' issues/{n}/... POST-with-JSON-body shape.
+  async createIssueComment(owner: string, repo: string, issueNumber: number, body: string) {
+    return withRetry(`createIssueComment ${owner}/${repo}#${issueNumber}`, async () => {
+      const response = await this.requestAndCheck(`${repoApiPath(owner, repo)}/issues/${issueNumber}/comments`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body }),
+      });
+      return (await response.json()) as { id: number; user: { id: number; login: string } };
+    });
+  }
+
+  // Single page of 100 issue comments. Two caveats (review F7):
+  //   (a) 100-cap: the first 100 comments suffice for any realistic PR (same rationale as
+  //       findBotReviewForCommit); a PR needing >100 scanned is pathological.
+  //   (b) ordering: GitHub returns issue comments in ASCENDING/OLDEST-first order by default, so
+  //       this returns the OLDEST <=100 comments. A future consumer needing the most-recent
+  //       comments (the Phase 11 self-filter) MUST add `&sort=created&direction=desc` or paginate.
+  //       Not added now: the method is inert this phase and newest-first is deferred to the
+  //       consumer that needs it (keeps GitHub and Bitbucket documented consistently).
+  async listIssueComments(owner: string, repo: string, issueNumber: number) {
+    return withRetry(`listIssueComments ${owner}/${repo}#${issueNumber}`, async () => {
+      const response = await this.requestAndCheck(
+        `${repoApiPath(owner, repo)}/issues/${issueNumber}/comments?per_page=100`,
+      );
+      return (await response.json()) as Array<{
+        id: number;
+        body: string;
+        user: { id: number; login: string } | null;
+      }>;
+    });
+  }
+
+  // Copies the getRepoFileOrNull NON-throwing idiom (D-05): uses this.request (NOT requestAndCheck)
+  // so 404 OR 410 Gone returns null instead of throwing -- a deleted/gone comment is a control-flow
+  // signal ("re-post"), not an error (amended D-05, review F3). Any OTHER non-2xx still throws a
+  // GitHubError, so no raw HTTP status reaches core/.
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string) {
+    return withRetry(`updateIssueComment ${owner}/${repo} comment#${commentId}`, async () => {
+      const commentPath = `${repoApiPath(owner, repo)}/issues/comments/${commentId}`;
+      const response = await this.request(commentPath, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body }),
+      });
+      if (response.status === 404 || response.status === 410) {
+        return null;
+      }
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new GitHubError(
+          response.status,
+          errText,
+          commentPath,
+          `GitHub issue comment update failed with ${response.status}: ${errText}`,
+        );
+      }
+      return (await response.json()) as { id: number };
+    });
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return withRetry(`ensureLabel ${owner}/${repo} ${name}`, async () => {
       const listResponse = await this.request(`${repoApiPath(owner, repo)}/labels/${encodeURIComponent(name)}`);
