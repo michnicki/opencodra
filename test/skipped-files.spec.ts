@@ -5,8 +5,10 @@ import {
 } from '@server/db/skipped-files';
 import { insertJob, getJobForProcessing, mapJob } from '@server/db/jobs';
 import { queryRows } from '@server/db/client';
-import { defaultRepoConfig } from '@shared/schema';
-import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
+import { defaultRepoConfig, type RepoConfig } from '@shared/schema';
+import { filterReviewableFiles, parseUnifiedDiff, partitionReviewableFiles } from '@server/core/diff';
+import { getDiffFiles, getJobDiffFiles } from '@server/core/review';
+import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 
 // CMD-02 / D-10: prove the skipped-for-size bookkeeping accessors behave as review-rest requires.
 // The lookup keys on PR identity + CURRENT head_sha across ANY job (REVIEW: Codex 11-01 HIGH), so a
@@ -140,6 +142,150 @@ dbDescribe('skipped_files bookkeeping (CMD-02 / D-10)', () => {
 
     const paths = await listSkippedFilesForHead(env, { ...identity, headSha: sha('f') });
     expect(paths).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 1 (Plan 11-05): partitionReviewableFiles wrapper — kept byte-identical to
+// filterReviewableFiles, omitted = the remainder the max_files slice discarded. Pure, no DB.
+// ---------------------------------------------------------------------------------------------
+describe('partitionReviewableFiles (CMD-02 / D-10, Pitfall 4)', () => {
+  const reviewCfg = (maxFiles: number): RepoConfig['review'] => ({
+    ...defaultRepoConfig.review,
+    max_files: maxFiles,
+  });
+
+  const files = () =>
+    parseUnifiedDiff(
+      generateMockDiff([
+        { path: 'src/a.ts', content: 'a' },
+        { path: 'src/b.ts', content: 'b' },
+        { path: 'src/c.ts', content: 'c' },
+        { path: 'src/d.ts', content: 'd' },
+      ]),
+      defaultRepoConfig.review,
+    );
+
+  it('splits kept vs omitted exactly at max_files (sorted by isNew then path)', () => {
+    const { kept, omitted } = partitionReviewableFiles(files(), reviewCfg(2));
+    expect(kept.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(omitted.map((f) => f.path)).toEqual(['src/c.ts', 'src/d.ts']);
+  });
+
+  it('kept is byte-identical (path-for-path) to filterReviewableFiles for the same config', () => {
+    const cfg = reviewCfg(2);
+    const parsed = files();
+    const { kept } = partitionReviewableFiles(parsed, cfg);
+    const filtered = filterReviewableFiles(parsed, cfg);
+    expect(kept.map((f) => f.path)).toEqual(filtered.map((f) => f.path));
+  });
+
+  it('omitted is empty when everything fits under max_files', () => {
+    const { kept, omitted } = partitionReviewableFiles(files(), reviewCfg(150));
+    expect(kept).toHaveLength(4);
+    expect(omitted).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 1 producer contract + Task 2 consumer: the prepare producer records omitted files by PR
+// identity + head, and getJobDiffFiles honors job.reviewScope (rest / undefined / all).
+// ---------------------------------------------------------------------------------------------
+const restIdentity = {
+  vcsProvider: 'github' as const,
+  workspace: 'test-owner',
+  repoSlug: 'repo-rest',
+  prNumber: 42,
+};
+const fourFileDiff = generateMockDiff([
+  { path: 'src/a.ts', content: 'a' },
+  { path: 'src/b.ts', content: 'b' },
+  { path: 'src/c.ts', content: 'c' },
+  { path: 'src/d.ts', content: 'd' },
+]);
+
+// A job-shaped object carrying only the fields getJobDiffFiles / skippedFilesKeyForJob read.
+function jobLike(overrides: Record<string, unknown> = {}) {
+  return {
+    id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    owner: 'test-owner',
+    repo: 'repo-rest',
+    prNumber: 42,
+    commitSha: sha('a'),
+    repositoryVcsProvider: 'github',
+    repositoryWorkspace: null,
+    reviewScope: null,
+    ...overrides,
+  } as any;
+}
+
+dbDescribe('getJobDiffFiles scope-aware wrapper + producer round-trip (Plan 11-05, Codex 11-05 HIGH)', () => {
+  const env = createTestEnv();
+  const restConfig = { ...defaultRepoConfig, review: { ...defaultRepoConfig.review, max_files: 2 } } as RepoConfig;
+
+  beforeEach(async () => {
+    await queryRows(env, `TRUNCATE skipped_files`);
+  });
+
+  it('producer contract: partition(max_files) omitted set persists by PR identity + head, retrievable across jobs', async () => {
+    const producer = await makeJob(env, 'producer');
+    const headSha = sha('a');
+    const { kept, omitted } = partitionReviewableFiles(parseUnifiedDiff(fourFileDiff, restConfig.review), restConfig.review);
+    expect(kept.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
+
+    await insertSkippedFiles(env, {
+      jobId: producer.id,
+      ...restIdentity,
+      headSha,
+      files: omitted.map((f) => ({ filePath: f.path, reason: 'max_files' })),
+    });
+
+    const recorded = await listSkippedFilesForHead(env, { ...restIdentity, headSha });
+    expect(recorded).toEqual(['src/c.ts', 'src/d.ts']);
+  });
+
+  it('reviewScope="rest": getJobDiffFiles returns exactly the recorded omitted files (bypassing max_files)', async () => {
+    const producer = await makeJob(env, 'producer');
+    const headSha = sha('a');
+    await insertSkippedFiles(env, {
+      jobId: producer.id,
+      ...restIdentity,
+      headSha,
+      files: [
+        { filePath: 'src/c.ts', reason: 'max_files' },
+        { filePath: 'src/d.ts', reason: 'max_files' },
+      ],
+    });
+
+    const restJob = jobLike({ reviewScope: 'rest', commitSha: headSha });
+    const vcs = { getPullRequestDiff: async () => fourFileDiff };
+    // Uses the DEFAULT (max_files 150) config: the rest set comes from skipped_files, not the slice.
+    const files = await getJobDiffFiles(env, restJob, vcs, defaultRepoConfig as RepoConfig);
+    expect(files.map((f) => f.path)).toEqual(['src/c.ts', 'src/d.ts']);
+  });
+
+  it('reviewScope="rest" with zero recorded skips is a no-op (empty set, not an error)', async () => {
+    const restJob = jobLike({ reviewScope: 'rest', commitSha: sha('9') });
+    const vcs = { getPullRequestDiff: async () => fourFileDiff };
+    const files = await getJobDiffFiles(env, restJob, vcs, defaultRepoConfig as RepoConfig);
+    expect(files).toEqual([]);
+  });
+
+  it('undefined scope is byte-identical to getDiffFiles (NREG-01)', async () => {
+    const job = jobLike({ reviewScope: null });
+    const vcs = { getPullRequestDiff: async () => fourFileDiff };
+    const viaJob = await getJobDiffFiles(env, job, vcs, restConfig);
+    const viaPlain = await getDiffFiles(env, { id: job.id, owner: job.owner, repo: job.repo, prNumber: job.prNumber }, vcs, restConfig);
+    expect(viaJob.map((f) => f.path)).toEqual(viaPlain.map((f) => f.path));
+    // max_files=2 -> only the first two kept, honoring the slice exactly like today.
+    expect(viaJob.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('reviewScope="all" reviews the full current head (delegates to getDiffFiles)', async () => {
+    const job = jobLike({ reviewScope: 'all' });
+    const vcs = { getPullRequestDiff: async () => fourFileDiff };
+    const files = await getJobDiffFiles(env, job, vcs, defaultRepoConfig as RepoConfig);
+    expect(files.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts']);
   });
 });
 

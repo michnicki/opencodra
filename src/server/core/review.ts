@@ -28,7 +28,8 @@ import {
   updateJobStatusCheckRef,
   updateJobStep,
 } from '@server/db/jobs';
-import { filterReviewableFiles, parseUnifiedDiff } from './diff';
+import { filterReviewableFiles, parseUnifiedDiff, partitionReviewableFiles } from './diff';
+import { insertSkippedFiles, listSkippedFilesForHead, type SkippedFilesHeadKey } from '@server/db/skipped-files';
 import { dedupeFindings, SEVERITY_RANK } from './dedup';
 import { parseCriticPruneResponse, parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
 import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
@@ -803,7 +804,32 @@ async function runPreparePhase(
     }
   }
 
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
+
+  // CMD-02 / D-10 skipped-for-size producer: when the commands feature is active, persist the files
+  // this full review DROPPED past max_files so a later `review-rest` job (a different job_id) can
+  // re-review exactly them via listSkippedFilesForHead by PR identity + head. Only for a NORMAL full
+  // review (scope !== 'rest' -- a review-rest job CONSUMES the skips, it must not re-record them) and
+  // only when we have a concrete head to key on. Best-effort: a bookkeeping-write failure must never
+  // block enqueuing the review phase. When the feature is off this whole block is skipped, so the
+  // disabled path is byte-identical (NREG-01).
+  const commandsEnabled = config.review.interactive?.commands?.enabled ?? false;
+  if (commandsEnabled && job.reviewScope !== 'rest' && job.commitSha) {
+    try {
+      const rawDiff = await getCachedRawDiff(env, job, vcs);
+      const { omitted } = partitionReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+      if (omitted.length > 0) {
+        await insertSkippedFiles(env, {
+          jobId: job.id,
+          ...skippedFilesKeyForJob(job),
+          files: omitted.map((file) => ({ filePath: file.path, reason: 'max_files' })),
+        });
+      }
+    } catch (error) {
+      logger.warn(`Failed to record skipped-for-size files for job ${job.id}; review-rest may be unavailable for this head`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -865,7 +891,7 @@ async function runReviewPhase(
     failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
     return failureModelProviderPromise;
   };
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
   const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
@@ -1432,7 +1458,7 @@ async function runFinalizePhase(
 
   const pr = await vcs.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
   let reviews = await getFileReviewsForJobs(env, [job.id]);
 
   // MP-04 / Pitfall 2: pass-aware missing-row reconciliation. Build the EXPECTED set of (path, pass)
@@ -1631,6 +1657,23 @@ async function runFinalizePhase(
   }
   const topFindings = finalComments.slice(0, 5).map((c) => ({ severity: c.severity, title: c.title, path: c.path }));
 
+  // D-10/D-11 footer inputs: surface the commands hint whenever the commands feature is enabled, and
+  // the skipped-for-size line when a full review recorded omissions for this head. The skip count is
+  // read from skipped_files (best-effort -- a read failure degrades to no skipped line, never fails
+  // finalize) and only for a NORMAL full review (a review-rest job IS the rest pass, so it shows the
+  // hint but never the "N skipped" line). When commands is off, both stay inert and the footer is
+  // byte-identical to today (NREG-01).
+  const commandsEnabled = config.review.interactive?.commands?.enabled ?? false;
+  let skippedForSizeCount = 0;
+  if (commandsEnabled && job.reviewScope !== 'rest' && job.commitSha) {
+    try {
+      const skipped = await listSkippedFilesForHead(env, skippedFilesKeyForJob(job));
+      skippedForSizeCount = skipped.length;
+    } catch (error) {
+      logger.warn(`Failed to read skipped-for-size count for job ${job.id}; omitting the review-rest footer line`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   const formattedSummary = formatter.formatReviewOverview(
     {
       commitSha: pr.headSha,
@@ -1643,6 +1686,8 @@ async function runFinalizePhase(
       filesReviewed: files.length,
       omittedCount,
       maxComments: effectiveMaxComments,
+      commandsEnabled,
+      skippedForSizeCount,
     },
     { provider: vcs.name },
   );
@@ -2083,15 +2128,16 @@ function diffCacheKey(jobId: string) {
 }
 
 /**
- * Returns the job's reviewable files, fetching and parsing the PR diff from
- * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ * Fetches and parses the PR diff from the VCS only once per job (cached in KV) instead of once per
+ * phase invocation. Extracted from getDiffFiles so both getDiffFiles and the scope-aware
+ * getJobDiffFiles / the prepare-phase skipped-for-size producer share one cached fetch (the diff is
+ * immutable for a job's head, so re-reading it from KV never hits the VCS again).
  */
-export async function getDiffFiles(
+async function getCachedRawDiff(
   env: AppBindings,
   job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
   vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
-  config: RepoConfig,
-) {
+): Promise<string> {
   const cacheKey = diffCacheKey(job.id);
   let rawDiff = await env.APP_KV.get(cacheKey);
 
@@ -2104,7 +2150,78 @@ export async function getDiffFiles(
     }
   }
 
+  return rawDiff;
+}
+
+/**
+ * Returns the job's reviewable files, fetching and parsing the PR diff from
+ * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ */
+export async function getDiffFiles(
+  env: AppBindings,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
+  vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  const rawDiff = await getCachedRawDiff(env, job, vcs);
   return filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+}
+
+/**
+ * The PR-identity + head key for a job's skipped_files rows. For GitHub `repositoryWorkspace` is
+ * null, so the workspace falls back to `owner` (the login); Bitbucket rows carry the workspace slug.
+ * `headSha` is the job's current head (jobs.commit_sha, hex). Used by BOTH the prepare-phase producer
+ * (insertSkippedFiles) and the review-rest consumer (listSkippedFilesForHead) so a review-rest job --
+ * a DIFFERENT job_id -- finds the original full-review job's skips by PR+head (REVIEW: Codex 11-01 HIGH).
+ */
+function skippedFilesKeyForJob(
+  job: Pick<PersistedReviewJob, 'owner' | 'repo' | 'prNumber' | 'commitSha' | 'repositoryVcsProvider' | 'repositoryWorkspace'>,
+): SkippedFilesHeadKey {
+  return {
+    vcsProvider: job.repositoryVcsProvider ?? 'github',
+    workspace: job.repositoryWorkspace ?? job.owner,
+    repoSlug: job.repo,
+    prNumber: job.prNumber,
+    headSha: job.commitSha,
+  };
+}
+
+/**
+ * Scope-aware wrapper around getDiffFiles that honors the review scope persisted on the JOB ROW
+ * (jobs.review_scope, surfaced by mapJob -- Plan 01). It REPLACES the three getDiffFiles call sites
+ * (prepare/review/finalize) so 'rest' scoping is applied in EVERY phase, not just prepare (REVIEW:
+ * Codex 11-05 HIGH -- every phase refetches the file set). Because scope lives on the persisted job,
+ * it survives fresh-instance handoff (workflows/review.ts) and lease recovery (job-recovery.ts) with
+ * NO queue-message threading -- those paths preserve only jobId/deliveryId/phase and mapJob rehydrates
+ * review_scope.
+ *
+ *  - 'rest'  -> the review-rest set: the files a prior full review OMITTED for size, read from
+ *               skipped_files by PR identity + current head (listSkippedFilesForHead) and matched
+ *               against the current diff, bypassing the max_files slice for this run. A head with
+ *               zero recorded skips yields an empty set -> a no-op review (NOT an error); Plan 06
+ *               short-circuits before creating such a job, so this is defense-in-depth.
+ *  - 'all' / 'head' / undefined -> delegate to getDiffFiles unchanged (undefined is byte-identical
+ *               to today, NREG-01).
+ */
+export async function getJobDiffFiles(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  if (job.reviewScope === 'rest') {
+    const restPaths = new Set(await listSkippedFilesForHead(env, skippedFilesKeyForJob(job)));
+    if (restPaths.size === 0) return [];
+
+    const rawDiff = await getCachedRawDiff(env, job, vcs);
+    const { kept, omitted } = partitionReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+    // The recorded skips are a subset of the full reviewable set; restrict the current diff to
+    // exactly those paths that are still present. Combining kept+omitted (the whole filtered set,
+    // unsliced) makes the match robust even if a repo's max_files changed between runs.
+    return [...kept, ...omitted].filter((file) => restPaths.has(file.path));
+  }
+
+  return getDiffFiles(env, job, vcs, config);
 }
 
 /**

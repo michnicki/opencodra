@@ -286,6 +286,35 @@ export function filterReviewableFiles(files: FileDiff[], config: RepoConfig['rev
     .slice(0, config.max_files);
 }
 
+/**
+ * CMD-02 / D-10 (Phase 11): partition the reviewable file set at the `max_files` boundary so the
+ * skipped-for-size bookkeeping (skipped_files table) can record exactly the files a full review
+ * DROPPED, and a later `review-rest` run can re-review them.
+ *
+ * `kept` is byte-identical to `filterReviewableFiles(files, config)` -- it applies the SAME
+ * filter+sort+slice(0, max_files). `omitted` is the remainder the slice discarded (the same
+ * filter+sort, then everything AT or AFTER max_files). This is a wrapper: it does NOT change
+ * `filterReviewableFiles`'s signature or return, so the hot review path stays byte-identical when
+ * the commands feature is off (NREG-01, Pitfall 4). Only new callers on the commands path use this.
+ */
+export function partitionReviewableFiles(
+  files: FileDiff[],
+  config: RepoConfig['review'],
+): { kept: FileDiff[]; omitted: FileDiff[] } {
+  const customMatchers = config.skip_files.map((pattern) => picomatch(pattern, { dot: true }));
+
+  const sorted = files
+    .filter((file) => !file.isDeleted && !file.isBinary)
+    .filter((file) => !defaultSkipMatchers.some((matcher) => matcher(file.path)))
+    .filter((file) => !customMatchers.some((matcher) => matcher(file.path)))
+    .sort((left, right) => Number(left.isNew) - Number(right.isNew) || left.path.localeCompare(right.path));
+
+  return {
+    kept: sorted.slice(0, config.max_files),
+    omitted: sorted.slice(config.max_files),
+  };
+}
+
 export function truncateFileDiff(file: FileDiff, maxLines: number): FileDiff {
   if (file.lineCount <= maxLines) {
     return file;
