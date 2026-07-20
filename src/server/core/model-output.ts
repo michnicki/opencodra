@@ -628,7 +628,9 @@ export function parseAnswerResponse(raw: string): string {
   try {
     const parsedJson = JSON.parse(repaired);
     const validated = answerModelOutputSchema.parse(parsedJson);
-    return Array.isArray(validated) ? validated[0].answer : validated.answer;
+    // The array variant permits an empty [], so validated[0] can be undefined at runtime even though
+    // the static type does not surface it — fall back to the raw text (parity with parseSummaryResponse).
+    return Array.isArray(validated) ? (validated[0]?.answer ?? raw.trim()) : validated.answer;
   } catch (error) {
     // The model ignored the JSON envelope — return the raw text so the reviewer still gets an
     // answer rather than an error (the JSON-only adapters make this rare in practice).
