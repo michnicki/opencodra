@@ -396,9 +396,20 @@ export class BitbucketClient {
  */
 export function createBitbucketBotIdentityResolver(
   client: Pick<BitbucketClient, 'resolveBotUserIdentity'>,
+  // CMD-07 (Layer 2): the admin-configured immutable bot account_id. When supplied, the resolver
+  // returns it WITHOUT calling the client. Optional so the signature stays backward-compatible.
+  configuredAccountId?: string | null,
 ): BotIdentityResolver {
   return {
     resolveIdentity() {
+      if (configuredAccountId) {
+        // A Repository Access Token 403s on `GET /2.0/user`, so a configured immutable account_id
+        // avoids that call entirely. Leave `login` undefined so getBotIdentity fills it from
+        // BOT_USERNAME (the mutable @mention handle); the self-filter keys on this immutable id only.
+        return Promise.resolve({ accountId: configuredAccountId });
+      }
+      // No configured id: fall back to live discovery (unchanged). Layer 1 now catches any 403/throw
+      // in getBotIdentity → fail-closed accountId null.
       return client.resolveBotUserIdentity();
     },
   };

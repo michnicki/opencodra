@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getBotIdentity, type BotIdentityResolver } from '@server/core/bot-identity';
+import { createBitbucketBotIdentityResolver } from '@server/core/bitbucket';
 import { createTestEnv } from './helpers';
 
 // SC4 / NREG-02: getBotIdentity seeds `login` from BOT_USERNAME and reads/caches the immutable
@@ -147,5 +148,28 @@ describe('getBotIdentity', () => {
     await getBotIdentity(env, 'github', client);
 
     expect(await env.APP_KV.get('bot-identity:github')).toContain('gh-acct');
+  });
+});
+
+describe('createBitbucketBotIdentityResolver (CMD-07 Layer 2)', () => {
+  it('returns the configured account_id WITHOUT calling resolveBotUserIdentity', async () => {
+    const client = { resolveBotUserIdentity: vi.fn(async () => ({ accountId: 'from-get-user' })) };
+
+    const resolver = createBitbucketBotIdentityResolver(client, 'configured-acct');
+    const resolved = await resolver.resolveIdentity();
+
+    expect(resolved).toEqual({ accountId: 'configured-acct' });
+    // A Repository Access Token 403s on GET /2.0/user — the configured id must avoid that call.
+    expect(client.resolveBotUserIdentity).not.toHaveBeenCalled();
+  });
+
+  it('delegates to resolveBotUserIdentity when no configured id is supplied', async () => {
+    const client = { resolveBotUserIdentity: vi.fn(async () => ({ accountId: 'from-get-user' })) };
+
+    const resolver = createBitbucketBotIdentityResolver(client);
+    const resolved = await resolver.resolveIdentity();
+
+    expect(resolved).toEqual({ accountId: 'from-get-user' });
+    expect(client.resolveBotUserIdentity).toHaveBeenCalledOnce();
   });
 });

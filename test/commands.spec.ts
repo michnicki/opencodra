@@ -8,6 +8,7 @@ import {
   type ClassifiedCommand,
 } from '@server/core/commands';
 import type { BotIdentityResolver } from '@server/core/bot-identity';
+import { createBitbucketBotIdentityResolver } from '@server/core/bitbucket';
 import type { VcsProvider } from '@server/vcs/types';
 import { queryRows } from '@server/db/client';
 import { getPrReviewState } from '@server/db/pr-review-state';
@@ -39,13 +40,23 @@ function makeProvider(
 }
 
 function cfg(
-  opts: { commands?: boolean; qa?: boolean; allow?: string[]; mention?: string | false } = {},
+  opts: {
+    commands?: boolean;
+    qa?: boolean;
+    allow?: string[];
+    mention?: string | false;
+    botAccountId?: string | null;
+  } = {},
 ): RepoConfig {
   return repoConfigSchema.parse({
     review: {
       mention_trigger: opts.mention ?? '@codra-app',
       interactive: {
-        commands: { enabled: opts.commands ?? true, bitbucket_allowed_account_ids: opts.allow ?? [] },
+        commands: {
+          enabled: opts.commands ?? true,
+          bitbucket_allowed_account_ids: opts.allow ?? [],
+          bitbucket_bot_account_id: opts.botAccountId ?? null,
+        },
         qa: { enabled: opts.qa ?? true },
       },
     },
@@ -103,6 +114,40 @@ describe('classifyComment — self-filter first (D-03, echo-loop defense)', () =
     );
     // identity_unresolved / self_filtered take precedence over feature_disabled.
     expect(result).toEqual({ kind: 'ignored', reason: 'self_filtered' });
+  });
+});
+
+describe('classifyComment — CMD-07 Layer 2: config-based Bitbucket bot identity', () => {
+  it('self-filters the bot and dispatches a real user command without ever calling GET /2.0/user', async () => {
+    const clientStub = {
+      resolveBotUserIdentity: vi.fn(async () => ({ accountId: 'from-get-user' })),
+    };
+    const resolver = createBitbucketBotIdentityResolver(clientStub, 'configured-bot-acct');
+    const provider = makeProvider('bitbucket');
+    const config = cfg({ commands: true, botAccountId: 'configured-bot-acct' });
+
+    // The bot's own comment is self-filtered on the configured immutable account_id.
+    const selfFiltered = await classifyComment(
+      createTestEnv(),
+      provider,
+      resolver,
+      ctx({ authorId: 'configured-bot-acct', body: '@codra-app review' }),
+      config,
+    );
+    expect(selfFiltered).toEqual({ kind: 'ignored', reason: 'self_filtered' });
+
+    // A real user's @mention still dispatches a command. Fresh env so the per-repo KV cache is cold.
+    const command = await classifyComment(
+      createTestEnv(),
+      provider,
+      resolver,
+      ctx({ authorId: 'human-author-id', body: '@codra-app review' }),
+      config,
+    );
+    expect(command).toEqual({ kind: 'command', name: 'review', args: '' });
+
+    // The Repository Access Token path (GET /2.0/user) is NEVER invoked when an id is configured.
+    expect(clientStub.resolveBotUserIdentity).not.toHaveBeenCalled();
   });
 });
 

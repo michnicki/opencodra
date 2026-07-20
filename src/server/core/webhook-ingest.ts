@@ -315,7 +315,13 @@ async function handleCommentEvent(
   });
   const resolver: BotIdentityResolver =
     effectiveProvider === 'bitbucket'
-      ? createBitbucketBotIdentityResolver(provider)
+      ? // CMD-07 (Layer 2): pass the admin-configured immutable bot account_id so the resolver can
+        // self-filter WITHOUT `GET /2.0/user` (which 403s on a Repository Access Token). Falls back
+        // to live discovery when unset. The GitHub branch is UNCHANGED (NREG-01).
+        createBitbucketBotIdentityResolver(
+          provider,
+          config.review.interactive.commands.bitbucket_bot_account_id ?? null,
+        )
       : createGithubBotIdentityResolver(provider);
 
   const classified = await classifyComment(env, provider, resolver, ctx, config);
