@@ -297,7 +297,10 @@ async function handleCommentEvent(
   input: WebhookIngestInput,
   effectiveProvider: 'github' | 'bitbucket',
 ): Promise<WebhookIngestResult> {
-  const ctx = input.commentContext!;
+  const ctx = input.commentContext;
+  if (!ctx) {
+    throw new Error('handleCommentEvent invoked without commentContext (caller invariant violated)');
+  }
   const config = input.configSnapshot;
   // GitHub needs an installationId to construct the provider + insert the job; Bitbucket carries
   // none (its per-repo credential is keyed on workspace/repo). The route threads it via the
