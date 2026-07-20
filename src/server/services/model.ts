@@ -8,7 +8,7 @@ import { buildSecurityReviewPrompts } from '../prompts/security-review';
 import { buildCriticPrompts, type CriticCandidateFinding } from '../prompts/critic';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '../prompts/summary';
 import { WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT, buildWalkthroughDiagramPrompt } from '../prompts/walkthrough-diagram';
-import { parseFileReviewResponse } from '../core/model-output';
+import { parseFileReviewResponse, parseAnswerResponse } from '../core/model-output';
 import { truncateFileDiff, chunkFileDiff, type FileDiff } from '../core/diff';
 import type { RepoConfig } from '@shared/schema';
 import type { TokenTracker } from '../core/token-tracker';
@@ -792,6 +792,95 @@ export class ModelService {
     // As in generateSummary: guard against `throw undefined` when every critic model was skipped via
     // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
     throw lastError ?? new Error('No critic model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * Phase 11, Plan 04 (QA-01/QA-02): the SINGLE public prose model path for PR Q&A. It exists
+   * because the rest of the model stack cannot produce prose for core/qa.ts:
+   *   - selectModel / callResolvedModel are PRIVATE (a caller outside this class cannot reach them), and
+   *   - the provider adapters are JSON-only (OpenAI response_format:json_object, Anthropic '{'
+   *     pre-fill), so a bare-prose request is not reliable across providers.
+   * So this method owns the whole Q&A model call: it requests + parses a `{ "answer": string }` JSON
+   * envelope (compatible with every JSON-only adapter) via the model-output tolerant parser, and
+   * returns the answer string.
+   *
+   * Mirrors generateSummary/critiqueFindings' fallback-chain + RetryableModelError discipline (a
+   * transient failure across the whole chain defers rather than wedges), with ONE Q&A-specific
+   * property: `applySizeOverrides: false` (REVIEW: Codex 11-04 HIGH). Q&A is not a sized file review,
+   * so totalLineCount is 0; with overrides applied, selectModel({ totalLineCount: 0 }) would match the
+   * FIRST positive size override (0 <= any max_lines) instead of the main model — disabling overrides
+   * resolves the MAIN chain, exactly like the critic.
+   */
+  async answerPrQuestion(params: {
+    systemPrompt: string;
+    userPrompt: string;
+    config: RepoConfig;
+  }): Promise<string> {
+    // Size overrides DISABLED: resolve the MAIN chain, never a size-override model (Q&A is not sized).
+    const { primary, fallbacks } = this.selectModel({
+      totalLineCount: 0,
+      config: params.config,
+      applySizeOverrides: false,
+    });
+    const modelsToTry = [primary, ...fallbacks];
+
+    let lastError: unknown;
+    let lastTransientError: unknown;
+    let sawTransientFailure = false;
+    for (const currentModel of modelsToTry) {
+      let resolved: ResolvedModelConfig;
+      try {
+        resolved = await this.resolveModel(currentModel);
+      } catch (error) {
+        lastError = error;
+        logger.warn(`Q&A model ${currentModel} could not be resolved`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      if (resolved.apiFormat === 'cloudflare-workers-ai' && await this.isProviderUnavailable(resolved.providerId)) {
+        logger.warn(`Skipping ${resolved.providerName} Q&A model ${currentModel} because the provider is unavailable for job ${this.options.jobId ?? 'unknown'}`);
+        continue;
+      }
+
+      try {
+        const response = await this.callResolvedModel(
+          resolved,
+          { systemPrompt: params.systemPrompt, userPrompt: params.userPrompt },
+          adaptiveModelTimeoutMs(0),
+        );
+
+        if (this.tracker) {
+          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+        }
+
+        return parseAnswerResponse(response.rawText);
+      } catch (error) {
+        lastError = error;
+        if (isTransientModelFailure(error)) {
+          sawTransientFailure = true;
+          lastTransientError = error;
+        }
+        if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
+          await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
+        }
+        logger.warn(`Q&A model ${currentModel} failed`, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (sawTransientFailure) {
+      const retryCause = lastTransientError ?? lastError;
+      const lastMessage = retryCause instanceof Error ? retryCause.message : String(retryCause ?? 'Unknown model error');
+      throw new RetryableModelError(
+        `All configured Q&A models failed; retrying later. Last error: ${lastMessage}`,
+        retryCause,
+      );
+    }
+
+    // As in generateSummary: guard against `throw undefined` when every model was skipped via
+    // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
+    throw lastError ?? new Error('No Q&A model produced a result; all configured models were skipped or unavailable.');
   }
 
   /**

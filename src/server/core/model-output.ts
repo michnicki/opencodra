@@ -595,3 +595,43 @@ export function parseSummaryResponse(raw: string): string {
     return raw.trim() || 'Review completed with no summary provided.';
   }
 }
+
+// The Q&A model envelope (Phase 11, Plan 04). The Q&A path requests a single `{ "answer": string }`
+// object because the provider adapters are JSON-only (OpenAI response_format:json_object, Anthropic
+// pre-fills '{'), so a bare-prose response is not a reliable option — the {answer} envelope is the
+// one shape that works uniformly across every adapter. Accept either the bare object or a
+// single-element array wrapper, mirroring summaryModelOutputSchema's tolerance.
+const answerModelOutputSchema = z.union([
+  z.array(z.object({ answer: z.string().min(1) })),
+  z.object({ answer: z.string().min(1) }),
+]);
+
+/**
+ * Tolerant parse of the Q&A model's `{ "answer": string }` envelope (Plan 11-04). Mirrors
+ * parseSummaryResponse exactly (extractJson -> preprocessJson -> jsonrepair -> JSON.parse ->
+ * schema) and MUST live in this module because the extractJson/preprocessJson helpers are private
+ * here (same rationale as parseCriticPruneResponse — the parser cannot be assembled from outside).
+ * When the model ignores the JSON envelope entirely, fall back to the raw trimmed text so a usable
+ * prose answer is still returned rather than throwing.
+ */
+export function parseAnswerResponse(raw: string): string {
+  const extracted = extractJson(raw);
+  const preprocessed = preprocessJson(extracted);
+
+  let repaired = preprocessed;
+  try {
+    repaired = jsonrepair(preprocessed);
+  } catch (e) {
+    // Fall back to original preprocessed text if repair fails.
+  }
+
+  try {
+    const parsedJson = JSON.parse(repaired);
+    const validated = answerModelOutputSchema.parse(parsedJson);
+    return Array.isArray(validated) ? validated[0].answer : validated.answer;
+  } catch (error) {
+    // The model ignored the JSON envelope — return the raw text so the reviewer still gets an
+    // answer rather than an error (the JSON-only adapters make this rare in practice).
+    return raw.trim() || 'I was unable to produce an answer for this question.';
+  }
+}
