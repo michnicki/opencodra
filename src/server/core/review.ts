@@ -545,6 +545,11 @@ async function continueOrFailWedgedJob(
       for (const review of stillPending) {
         await persistFailedFileReview(env, job.id, {
           filePath: review.file_path,
+          // Thread the row's own pass (IN-03) so the failed row is keyed on the correct
+          // (job_id, file_path, pass) tuple, matching the async-poll degrade path. Async rows are
+          // main-only today (submitReviewBatch gates on pass === 'main'), so this is behavior-
+          // preserving now and correct if async batching is ever extended to the security pass.
+          pass: review.pass,
           modelUsed: review.async_model ?? review.model_used,
           diffLineCount: review.diff_line_count,
           errorMessage: 'Async batch review did not complete before the job wedged.',
@@ -978,7 +983,7 @@ async function runReviewPhase(
           terminalProgress += 1;
           return;
         }
-        await persistCompletedReview(env, job, file, poll.response);
+        await persistCompletedReview(env, job, file, poll.response, pass);
         terminalProgress += 1;
         return;
       }
@@ -1196,9 +1201,15 @@ async function persistCompletedReview(
       confidenceScore?: number;
     };
   },
+  // Defaults to 'main' (NREG-01). Threaded from the poll call site (IN-03) so a completed row is
+  // keyed on the correct (job_id, file_path, pass) tuple. Async batch rows are main-only today
+  // (submitReviewBatch gates on pass === 'main'), so this is behavior-preserving now and correct if
+  // async batching is ever extended to the security pass.
+  pass: FileReviewPass = 'main',
 ) {
   await upsertFileReview(env, job.id, {
     filePath: file.path,
+    pass,
     fileStatus: 'done',
     modelUsed: response.modelUsed,
     modelProvider: response.provider,
