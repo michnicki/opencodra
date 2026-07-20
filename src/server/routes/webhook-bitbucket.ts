@@ -7,6 +7,7 @@ import { verifyWebhookSignature } from '@server/core/verify';
 import { decryptSecret } from '@server/core/crypto';
 import { getVcsCredentialSecrets } from '@server/db/vcs-credentials';
 import { findRepositoryByBitbucketIdentity } from '@server/db/repositories';
+import { getRepoConfigByRepositoryId } from '@server/db/repo-configs';
 import { mostRecentJobForPullRequest } from '@server/db/jobs';
 import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
 import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
@@ -14,6 +15,7 @@ import { getGlobalConfig } from '@server/core/config';
 import { defaultRepoConfig, type RepoConfig } from '@shared/schema';
 import { bytesToHex } from '@server/db/jobs';
 import { pullRequestWebhookPayloadSchema } from '@shared/bitbucket';
+import type { CommentContext } from '@server/core/commands';
 
 // POST /webhook/bitbucket — the live entry point that closes the Phase-3 deferred item
 // (REVIEW finding 3 of Phase 3 — `ingestReviewWebhookEvent` was extracted provider-agnostic
@@ -209,6 +211,92 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
     }, 202);
   }
 
+  // Step 13b (relocated): resolve the review model strategy snapshot ONCE — both the Phase-11
+  // comment branch below and the auto (created/updated) branch need it. defaultRepoConfig's model
+  // section is empty ({ main: null, fallbacks: [], size_overrides: [] }), so snapshotting it verbatim
+  // makes ModelService.selectModel throw "No review model strategy is configured" and fail every
+  // Bitbucket review before finalize. Merge the GLOBAL model strategy — the same source
+  // loadRepoConfig uses for a repo with no per-repo override (KV key config:global_model) — so
+  // Bitbucket jobs resolve a model chain exactly like GitHub jobs. We intentionally do NOT call
+  // loadRepoConfig here: its syncRepoConfig -> getOrCreateRepository side effect is GitHub-shaped
+  // and would create a spurious vcs_provider='github' row for this Bitbucket repo.
+  const globalModel = await getGlobalConfig(c.env);
+  // Phase 11 (CMD-05/06/07): merge the per-repo interactive (commands / qa) config so Bitbucket
+  // commands + Q&A + reply-under-finding reject can be ENABLED per-repo (NREG-02 parity with GitHub).
+  // Read provider-safely by the authoritative repositoryId (NOT owner/repo, which collides across
+  // providers). ONLY the `review.interactive` section is merged — everything else stays at
+  // defaultRepoConfig so the existing Bitbucket AUTO-review paths are byte-identical when no per-repo
+  // interactive config exists (NREG-01): defaultRepoConfig.review.interactive has both toggles off, so
+  // the commands-gated pause/ignore gate never fires for a repo without a config row.
+  const repoConfigRecord = await getRepoConfigByRepositoryId(c.env, repositoryId);
+  const configSnapshot: RepoConfig = {
+    ...defaultRepoConfig,
+    model: globalModel,
+    review: {
+      ...defaultRepoConfig.review,
+      interactive: repoConfigRecord?.parsedJson.review.interactive ?? defaultRepoConfig.review.interactive,
+    },
+  };
+
+  // Phase 11 (CMD-07, D-12): EARLY pullrequest:comment_created branch. Placed AFTER the HMAC verify +
+  // repo resolution + recordWebhookDelivery idempotency guard, but BEFORE the source-SHA dedupe /
+  // automatic ReviewRequest construction. A comment event is NOT a metadata-only PR edit, so it does
+  // NOT enter the step-10 pullrequest:updated short-circuit (that gate is keyed on
+  // xEventKey === 'pullrequest:updated', which a comment event never matches — REVIEW: Antigravity #3).
+  // The route ONLY projects the provider payload into a provider-agnostic CommentContext; the shared
+  // seam self-filters (on the bot's immutable account_id) + classifies + authorizes + dispatches (D-03).
+  // It never bypasses HMAC/idempotency — both gates already ran above.
+  if (parsed.data.eventName === 'pullrequest:comment_created') {
+    const comment = parsed.data.comment;
+    const commentPrNumber = parsed.data.pullrequest.id;
+    const parentId = comment.parent?.id;
+    // finding/parent ref uses the provider-OPAQUE `${prNumber}:${id}` convention that
+    // BitbucketAdapter.createPrComment emits (vcs/bitbucket.ts:339), NOT a bare String(parent.id), so a
+    // persisted reject ref is adapter-consistent across PRs (REVIEW: Codex 11-01/11-07; T-11-07-5).
+    const parentRef = parentId !== undefined ? `${commentPrNumber}:${parentId}` : undefined;
+    const prDescription = (parsed.data.pullrequest as { description?: unknown }).description;
+
+    const commentContext: CommentContext = {
+      // authorId is the IMMUTABLE account_id — the ONLY id the self-filter/authorization key on (NREG-02).
+      authorId: comment.user.account_id,
+      authorLogin: comment.user.nickname,
+      body: comment.content.raw,
+      prNumber: commentPrNumber,
+      commentRef: `${commentPrNumber}:${comment.id}`,
+      parentRef,
+      // reply-under-finding reject: comment.parent.id encoded as the opaque finding ref (D-09).
+      findingRef: parentRef,
+      owner: workspace,
+      repo: repoSlug,
+      workspace,
+    };
+
+    const result = await ingestReviewWebhookEvent(c.env, {
+      reviewRequest: null,
+      configSnapshot,
+      deliveryId: xRequestUUID,
+      requestId: c.get('requestId'),
+      eventName: xEventKey,
+      provider: 'bitbucket',
+      commentContext,
+      prBody: typeof prDescription === 'string' ? prDescription : undefined,
+    });
+
+    if (result.outcome === 'queued') {
+      return c.json({ ok: true, eventName: xEventKey, reviewed: true }, 200);
+    }
+    if (result.outcome === 'duplicate') {
+      return c.json({ ok: true, eventName: xEventKey, duplicate: true, message: 'queued' }, 202);
+    }
+    if (result.outcome === 'command_enqueued' || result.outcome === 'qa_enqueued') {
+      return c.json({ ok: true, eventName: xEventKey, dispatched: true }, 202);
+    }
+    // ignored_comment / ignored_paused / ignored_directive (the exclusive comment branch never
+    // returns queued_event — map any other outcome defensively as an ignore).
+    const reason = result.outcome === 'ignored_comment' ? result.reason : result.outcome;
+    return c.json({ ok: true, eventName: xEventKey, ignored: true, reason }, 202);
+  }
+
   // Step 13: construct the ReviewRequest-shaped value carrying the Bitbucket identity.
   // REV-M-7: baseSha tolerates empty string (the Bitbucket route may receive a missing
   // destination.commit.hash from the parsed projection).
@@ -229,23 +317,13 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
     repositoryWorkspace: workspace,
   };
 
-  // Step 13b: resolve the review model strategy. defaultRepoConfig's model section is empty
-  // ({ main: null, fallbacks: [], size_overrides: [] }), so snapshotting it verbatim makes
-  // ModelService.selectModel throw "No review model strategy is configured" and fail every
-  // Bitbucket review before finalize (no comments posted, job 'failed'). Merge the GLOBAL model
-  // strategy — the same source loadRepoConfig uses for a repo with no per-repo override
-  // (KV key config:global_model, set from the Settings dashboard) — so Bitbucket jobs resolve a
-  // model chain exactly like GitHub jobs. We intentionally do NOT call loadRepoConfig here: its
-  // syncRepoConfig -> getOrCreateRepository side effect is GitHub-shaped (installationId='' and no
-  // vcs_provider/workspace) and would create a spurious vcs_provider='github' row for this
-  // Bitbucket repo. (Per-repo Bitbucket model overrides need a provider-aware getter and are out
-  // of scope for this fix.)
-  const globalModel = await getGlobalConfig(c.env);
-  const configSnapshot: RepoConfig = { ...defaultRepoConfig, model: globalModel };
-
   // Step 14: hand off to the provider-aware ingest helper (05-04 widening closes the
   // Phase-3 deferred item — reviewRequest.repositoryVcsProvider + input.provider both
-  // resolve through effectiveProvider = 'bitbucket').
+  // resolve through effectiveProvider = 'bitbucket'). prBody = pullrequest.description feeds the
+  // commands-gated CMD-06 ignore gate on AUTO events too (REVIEW: Codex 11-06/11-07), so a leading
+  // `<mention> ignore` directive in the PR description short-circuits an auto review when commands
+  // are enabled. configSnapshot was resolved once above (relocated step 13b).
+  const autoPrDescription = (parsed.data.pullrequest as { description?: unknown }).description;
   const result = await ingestReviewWebhookEvent(c.env, {
     reviewRequest,
     configSnapshot,
@@ -253,6 +331,7 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
     requestId: c.get('requestId'),
     eventName: xEventKey,
     provider: 'bitbucket',
+    prBody: typeof autoPrDescription === 'string' ? autoPrDescription : undefined,
   });
 
   // Step 15: D-17 response shapes. Each variant is mutually exclusive.
