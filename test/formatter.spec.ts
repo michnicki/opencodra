@@ -288,7 +288,7 @@ describe('FormatterService.formatReviewOverview', () => {
     const enabledNoSkips = formatter.formatReviewOverview(
       overviewInput({ commandsEnabled: true, skippedForSizeCount: 0 }),
     );
-    expect(enabledNoSkips).toContain('Commands: review · pause · help');
+    expect(enabledNoSkips).toContain('Commands: @codra-app review · pause · help');
     // With zero omissions ONLY the hint is added, never the skipped line.
     expect(enabledNoSkips).not.toContain('skipped for size');
   });
@@ -298,7 +298,7 @@ describe('FormatterService.formatReviewOverview', () => {
       overviewInput({ commandsEnabled: true, skippedForSizeCount: 3, botUsername: 'codra-app' }),
     );
     expect(withSkips).toContain('3 files skipped for size — comment @codra-app review-rest');
-    expect(withSkips).toContain('Commands: review · pause · help');
+    expect(withSkips).toContain('Commands: @codra-app review · pause · help');
 
     // Singular file wording.
     const singular = formatter.formatReviewOverview(

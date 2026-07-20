@@ -103,11 +103,23 @@ function stripTrailingPunct(s: string): string {
   return s.replace(TRAILING_PUNCT, '');
 }
 
+// Mirrors the `src/shared/schema.ts` `mention_trigger` default. Kept local because the schema default
+// is not exported; used only to decide whether a configured trigger is a CUSTOM override worth
+// advertising verbatim in the help text (a still-at-default trigger yields to the real bot handle).
+const DEFAULT_MENTION_TRIGGER = '@codra-app';
+
 /**
  * Classify an untrusted comment. Self-filter FIRST (D-03), then feature-gate, then prefix-mention,
  * then a bounded alias match. No `eval`, no regex over untrusted content beyond a bounded token
  * match; the mention is compared with `String.startsWith` (never a constructed RegExp), so a custom
- * `mention_trigger` cannot inject regex behavior (T-11-03-4).
+ * `mention_trigger` cannot inject regex behavior (T-11-03-4 / T-rah-01).
+ *
+ * The mention prefix is accepted from TWO sources: the configured `config.review.mention_trigger`
+ * AND this deployment's real bot handle (`'@' + env.BOT_USERNAME`). This makes bot-mention commands
+ * work out-of-the-box on any deployment whose handle differs from the `@codra-app` default, without
+ * touching the schema default. A `mention_trigger === false` opt-out is ABSOLUTE: the guard returns
+ * before the bot-handle candidate is built, so the fallback can never re-enable disabled mentions
+ * (T-rah-02).
  *
  * `provider` + `resolver` are constructed by Plan 06 (VcsService.forProvider + the Plan 02 bot
  * identity resolver factory). `resolver` may be `undefined` when identity cannot be resolved — that
@@ -142,19 +154,42 @@ export async function classifyComment(
   // ── Mention must be a PREFIX (D-01), anchored after optional leading whitespace — NOT body.includes.
   const mentionTrigger = config.review.mention_trigger;
   if (typeof mentionTrigger !== 'string') {
-    // mention_trigger === false: mention-triggered commands are disabled.
+    // mention_trigger === false: mention-triggered commands are disabled. This guard runs BEFORE the
+    // bot-handle candidate is built, so the fallback can NEVER re-enable a deliberately disabled
+    // trigger (T-rah-02).
     return { kind: 'ignored', reason: 'not_mention' };
   }
   const leading = ctx.body.replace(/^\s+/, '');
-  if (!leading.startsWith(mentionTrigger)) {
+  // Accept EITHER the configured mention_trigger OR this deployment's real bot handle
+  // ('@' + env.BOT_USERNAME). The bot-handle candidate is appended ONLY when BOT_USERNAME is a
+  // non-empty string (an empty handle must NOT produce a bare '@' that matches everything — T-rah-04)
+  // AND it differs from the trigger (avoid a duplicate). Matched with String.startsWith ONLY — no
+  // RegExp is constructed from either candidate, so a regex-special handle/trigger (e.g. '@my-bot.v2')
+  // cannot inject regex behavior (T-rah-01). The /^\s/ boundary test below is a fixed literal.
+  const mentionCandidates = [mentionTrigger];
+  if (typeof env.BOT_USERNAME === 'string' && env.BOT_USERNAME !== '') {
+    const botHandle = '@' + env.BOT_USERNAME;
+    if (botHandle !== mentionTrigger) {
+      mentionCandidates.push(botHandle);
+    }
+  }
+  let rest: string | null = null;
+  for (const token of mentionCandidates) {
+    if (!leading.startsWith(token)) {
+      continue;
+    }
+    const after = leading.slice(token.length);
+    // Require a boundary after the mention so '@codra-appreview' is NOT a mention.
+    if (after !== '' && !/^\s/.test(after)) {
+      continue;
+    }
+    rest = after;
+    break;
+  }
+  if (rest === null) {
     return { kind: 'ignored', reason: 'not_mention' };
   }
-  const after = leading.slice(mentionTrigger.length);
-  // Require a boundary after the mention so '@codra-appreview' is NOT a mention.
-  if (after !== '' && !/^\s/.test(after)) {
-    return { kind: 'ignored', reason: 'not_mention' };
-  }
-  const remainder = after.trim().replace(/\s+/g, ' ');
+  const remainder = rest.trim().replace(/\s+/g, ' ');
   if (remainder === '') {
     return { kind: 'ignored', reason: 'not_mention' };
   }
@@ -260,13 +295,20 @@ function pauseKey(provider: VcsProvider, ctx: CommentContext): PrReviewStateKey 
 /**
  * The help message: the FULL D-02 command set in a STABLE deterministic order, documenting `reject`
  * as `@mention reject [reason]` replied under an inline finding (identical on both providers). The
- * mention token is taken literally from `config.review.mention_trigger` (falling back to the default
- * handle when a repo has disabled the trigger). Byte-identical regardless of which help alias
- * (`help` / `?` / `commands`) triggered it (CMD-04).
+ * advertised mention token is the handle that actually TRIGGERS: a custom (non-default) string
+ * `mention_trigger` is advertised verbatim; otherwise the real bot handle (`'@' + botUsername`) is
+ * used so the help never advertises the `@codra-app` default on a deployment whose handle differs
+ * (falling back to the default only when `botUsername` is empty). Byte-identical regardless of which
+ * help alias (`help` / `?` / `commands`) triggered it (CMD-04).
  */
-export function buildHelpText(config: RepoConfig): string {
+export function buildHelpText(config: RepoConfig, botUsername: string): string {
+  const configured = config.review.mention_trigger;
   const mention =
-    typeof config.review.mention_trigger === 'string' ? config.review.mention_trigger : '@codra-app';
+    typeof configured === 'string' && configured !== DEFAULT_MENTION_TRIGGER
+      ? configured
+      : botUsername
+        ? '@' + botUsername
+        : DEFAULT_MENTION_TRIGGER;
   return [
     'Codra commands — reply with the mention prefix at the start of your comment:',
     '',
@@ -308,7 +350,7 @@ export async function executeCommand(
 
     case 'help': {
       // Read-only discovery — no authorization (D-11).
-      await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, buildHelpText(config));
+      await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, buildHelpText(config, env.BOT_USERNAME));
       return;
     }
 

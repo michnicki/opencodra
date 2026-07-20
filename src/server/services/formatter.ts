@@ -217,7 +217,7 @@ export class FormatterService {
         const skippedWord = `${skippedForSizeCount} file${skippedForSizeCount === 1 ? '' : 's'} skipped for size`;
         sections.push(`_${skippedWord} — comment @${botUsername} review-rest_`);
       }
-      sections.push('_Commands: review · pause · help_');
+      sections.push(`_Commands: @${botUsername} review · pause · help_`);
     }
 
     const bodyBlock = sections.join('\n\n');

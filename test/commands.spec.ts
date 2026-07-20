@@ -224,6 +224,44 @@ describe('classifyComment — prefix-only mention (D-01)', () => {
   });
 });
 
+describe('classifyComment — bot-handle fallback (real @BOT_USERNAME triggers under the default trigger)', () => {
+  it('(a) @codraapp review with the DEFAULT mention_trigger triggers the command (the bug fix)', async () => {
+    const env = createTestEnv({ BOT_USERNAME: 'codraapp' });
+    const result = await classifyComment(
+      env,
+      makeProvider('github'),
+      botResolver(),
+      ctx({ body: '@codraapp review' }),
+      cfg(), // default mention_trigger '@codra-app'
+    );
+    expect(result).toMatchObject({ kind: 'command', name: 'review' });
+  });
+
+  it('(b) a custom mention_trigger still triggers, matched literally (the "." proves no regex)', async () => {
+    const env = createTestEnv({ BOT_USERNAME: 'codraapp' });
+    const result = await classifyComment(
+      env,
+      makeProvider('github'),
+      botResolver(),
+      ctx({ body: '@my-bot.v2 review' }),
+      cfg({ mention: '@my-bot.v2' }),
+    );
+    expect(result).toMatchObject({ kind: 'command', name: 'review' });
+  });
+
+  it('(c) mention_trigger:false fully disables mentions — the bot-handle fallback must NOT re-enable them', async () => {
+    const env = createTestEnv({ BOT_USERNAME: 'codraapp' });
+    const result = await classifyComment(
+      env,
+      makeProvider('github'),
+      botResolver(),
+      ctx({ body: '@codraapp review' }),
+      cfg({ mention: false }),
+    );
+    expect(result).toEqual({ kind: 'ignored', reason: 'not_mention' });
+  });
+});
+
 describe('classifyComment — D-02 alias table (complete alias required)', () => {
   const env = () => createTestEnv();
   const run = async (body: string, options?: Parameters<typeof cfg>[0]) =>
@@ -415,19 +453,22 @@ describe('executeCommand — help (read-only discovery, D-11, no authorization)'
     expect(getUserRepoPermission).not.toHaveBeenCalled();
     expect(createPrComment).toHaveBeenCalledOnce();
     const body = createPrComment.mock.calls[0][3];
+    // cfg() leaves mention_trigger at the '@codra-app' default, so the advertised handle is the real
+    // bot handle ('@' + env.BOT_USERNAME) — NOT the default trigger.
+    const handle = `@${env.BOT_USERNAME}`;
     // Stable order: review, review rest, pause, resume, help, reject.
     const order = ['review', 'review rest', 'pause', 'resume', 'help', 'reject'].map((c) =>
-      body.indexOf(`@codra-app ${c}`),
+      body.indexOf(`${handle} ${c}`),
     );
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order]).toEqual([...order].sort((a, b) => a - b));
-    expect(body).toContain('@codra-app reject [reason]');
+    expect(body).toContain(`${handle} reject [reason]`);
   });
 
   it('buildHelpText is byte-identical regardless of which help alias triggered it', () => {
     // help output is static (does not depend on the triggering alias), so ? / commands / help all
     // produce the same body.
-    expect(buildHelpText(cfg())).toBe(buildHelpText(cfg()));
+    expect(buildHelpText(cfg(), 'codraapp')).toBe(buildHelpText(cfg(), 'codraapp'));
   });
 });
 
