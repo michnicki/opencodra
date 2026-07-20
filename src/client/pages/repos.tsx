@@ -262,7 +262,13 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
   useEffect(() => {
     onChange({
       interactive: {
-        commands: { enabled: commandsEnabled, bitbucket_allowed_account_ids: accountIds },
+        commands: {
+          enabled: commandsEnabled,
+          bitbucket_allowed_account_ids: accountIds,
+          // Preserve the admin-configured Bitbucket bot account_id (CMD-07) — this panel does not
+          // edit it, so pass the loaded value through unchanged rather than resetting it to null.
+          bitbucket_bot_account_id: interactive.commands.bitbucket_bot_account_id,
+        },
         qa: {
           enabled: qaEnabled,
           rate_limit_per_hour: rateLimitValid ? rateLimitNum : interactive.qa.rate_limit_per_hour,

@@ -149,8 +149,13 @@ export const reviewConfigSchema = z.object({
           // authorization allow-list the Bitbucket authz path now depends on. Additive + defaulted
           // to [] so repoConfigSchema.parse({}) is byte-identical to today (NREG-01).
           bitbucket_allowed_account_ids: z.array(z.string()).default([]),
+          // CMD-07 (Layer 2): the IMMUTABLE Bitbucket account_id of the bot user. A Repository
+          // Access Token 403s on `GET /2.0/user`, so a configured id lets the Bitbucket bot-identity
+          // resolver self-filter WITHOUT that call. Nullable + defaulted to null so
+          // repoConfigSchema.parse({}) stays byte-identical to today (NREG-01).
+          bitbucket_bot_account_id: z.string().nullable().default(null),
         })
-        .default({ enabled: false, bitbucket_allowed_account_ids: [] }),
+        .default({ enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null }),
       qa: z
         .object({
           enabled: z.boolean().default(false),
@@ -161,7 +166,7 @@ export const reviewConfigSchema = z.object({
         .default({ enabled: false, rate_limit_per_hour: 10 }),
     })
     .default({
-      commands: { enabled: false, bitbucket_allowed_account_ids: [] },
+      commands: { enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null },
       qa: { enabled: false, rate_limit_per_hour: 10 },
     }),
 });
@@ -197,7 +202,7 @@ export const repoConfigSchema = z.object({
     walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
     passes: { security: { enabled: false }, critic: { enabled: false } },
     interactive: {
-      commands: { enabled: false, bitbucket_allowed_account_ids: [] },
+      commands: { enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null },
       qa: { enabled: false, rate_limit_per_hour: 10 },
     },
   }),

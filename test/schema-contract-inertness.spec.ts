@@ -75,6 +75,9 @@ describe('SC3: reviewConfig feature toggles all default off (NREG-01 inertness)'
     expect(cfg.review.walkthrough.sequence_diagram.enabled).toBe(true);
     expect(cfg.review.interactive.commands.enabled).toBe(false);
     expect(cfg.review.interactive.qa.enabled).toBe(false);
+    // CMD-07 (Layer 2): the config-based Bitbucket bot account_id defaults to null so an unconfigured
+    // repo is byte-identical to today (NREG-01) and the resolver falls back to live discovery.
+    expect(cfg.review.interactive.commands.bitbucket_bot_account_id).toBeNull();
   });
 
   it('the exported defaultRepoConfig yields the same all-off values', () => {
@@ -84,6 +87,18 @@ describe('SC3: reviewConfig feature toggles all default off (NREG-01 inertness)'
     expect(defaultRepoConfig.review.walkthrough.sequence_diagram.enabled).toBe(true);
     expect(defaultRepoConfig.review.interactive.commands.enabled).toBe(false);
     expect(defaultRepoConfig.review.interactive.qa.enabled).toBe(false);
+    expect(defaultRepoConfig.review.interactive.commands.bitbucket_bot_account_id).toBeNull();
+  });
+
+  it('CMD-07: bitbucket_bot_account_id round-trips a configured value', () => {
+    const cfg = repoConfigSchema.parse({
+      review: { interactive: { commands: { bitbucket_bot_account_id: 'acct-xyz' } } },
+    });
+
+    expect(cfg.review.interactive.commands.bitbucket_bot_account_id).toBe('acct-xyz');
+    // Other commands defaults remain inert alongside the configured id.
+    expect(cfg.review.interactive.commands.enabled).toBe(false);
+    expect(cfg.review.interactive.commands.bitbucket_allowed_account_ids).toEqual([]);
   });
 });
 
