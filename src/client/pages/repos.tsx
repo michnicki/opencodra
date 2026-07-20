@@ -222,12 +222,18 @@ function RepoRow({
   );
 }
 
-interface InteractivePanelProps {
-  repo: RepoConfigRecord;
-  onSaved: (repo: RepoConfigRecord, review: RepoConfig['review']) => void;
+interface InteractiveDraft {
+  interactive: RepoConfig['review']['interactive'];
+  dirty: boolean;
+  valid: boolean;
 }
 
-function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
+interface InteractivePanelProps {
+  repo: RepoConfigRecord;
+  onChange: (draft: InteractiveDraft) => void;
+}
+
+function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
   const interactive = repo.parsedJson.review.interactive;
   const isBitbucket = repo.vcsProvider === 'bitbucket';
 
@@ -239,8 +245,6 @@ function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
   const [qaEnabled, setQaEnabled] = useState(interactive.qa.enabled);
   // Kept as a string so the number input stays editable; parsed on save.
   const [rateLimit, setRateLimit] = useState(String(interactive.qa.rate_limit_per_hour));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const rateLimitNum = Number.parseInt(rateLimit, 10);
   const rateLimitValid = Number.isInteger(rateLimitNum) && rateLimitNum >= 1;
@@ -251,7 +255,25 @@ function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
     qaEnabled !== interactive.qa.enabled ||
     !stringArraysEqual(accountIds, initialAccountIds) ||
     (rateLimitValid && rateLimitNum !== interactive.qa.rate_limit_per_hour);
-  const canSave = dirty && rateLimitValid && !saving;
+
+  // Controlled sub-editor: report the current interactive draft up to the parent modal so its
+  // single "Apply" button persists model + interactive together in one PATCH — no local save button.
+  // Deps include `dirty`/`rateLimitValid` so a repo-prop refresh after save re-reports dirty:false.
+  useEffect(() => {
+    onChange({
+      interactive: {
+        commands: { enabled: commandsEnabled, bitbucket_allowed_account_ids: accountIds },
+        qa: {
+          enabled: qaEnabled,
+          rate_limit_per_hour: rateLimitValid ? rateLimitNum : interactive.qa.rate_limit_per_hour,
+        },
+      },
+      dirty,
+      valid: rateLimitValid,
+    });
+    // onChange is a stable setter from the parent; re-report only when an editable field/derived flag changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commandsEnabled, accountIds, qaEnabled, rateLimit, dirty, rateLimitValid]);
 
   const addAccountId = () => {
     const trimmed = newAccountId.trim();
@@ -267,37 +289,6 @@ function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
     setAccountIds((current) => current.filter((value) => value !== id));
   };
 
-  const handleSave = async () => {
-    if (!canSave) return;
-    setSaving(true);
-    setError(null);
-    const tid = toast.loading('Saving interactive settings…');
-    try {
-      const nextInteractive = {
-        commands: { enabled: commandsEnabled, bitbucket_allowed_account_ids: accountIds },
-        qa: { enabled: qaEnabled, rate_limit_per_hour: rateLimitNum },
-      };
-      // Spread the FULL current review so mention_trigger/max_files/focus/skip_files/etc. are
-      // preserved — the server does a shallow top-level merge of `review`.
-      const nextReview = { ...repo.parsedJson.review, interactive: nextInteractive };
-      await api.updateRepoConfig(repo.owner, repo.repo, { review: nextReview });
-      onSaved(repo, nextReview);
-      toast.success('Interactive settings saved', {
-        id: tid,
-        description: `${repo.owner}/${repo.repo} in-PR commands & Q&A updated.`,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to save interactive settings.';
-      setError(msg);
-      toast.error('Could not save settings', {
-        id: tid,
-        description: 'Your changes were not applied. Please try again.',
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
     <div className="flex flex-col gap-5">
       <div className="min-w-0">
@@ -306,8 +297,6 @@ function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
           Control in-PR bot commands and pull-request Q&amp;A for this repository.
         </p>
       </div>
-
-      {error && <Alert variant="destructive">{error}</Alert>}
 
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
@@ -401,13 +390,6 @@ function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
           <p className="text-xs text-destructive">Enter a positive whole number (1 or more).</p>
         )}
       </div>
-
-      <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={!canSave} className="gap-2">
-          {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-          Save interactive settings
-        </Button>
-      </div>
     </div>
   );
 }
@@ -444,6 +426,7 @@ function RepoModelModal({
   const [initialRoute, setInitialRoute] = useState<ModelRouteConfig>(EMPTY_MODEL_ROUTE);
   const [saving, setSaving] = useState<'apply' | 'reset' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [interactiveDraft, setInteractiveDraft] = useState<InteractiveDraft | null>(null);
 
   useEffect(() => {
     if (!repo) return;
@@ -452,31 +435,56 @@ function RepoModelModal({
     setInitialRoute(nextRoute);
     setSaving(null);
     setError(null);
+    setInteractiveDraft(null);
   }, [selectedRepoId, globalRouteKey]);
 
-  const dirty = useMemo(() => !routesEqual(route, initialRoute), [initialRoute, route]);
+  const modelDirty = useMemo(() => !routesEqual(route, initialRoute), [initialRoute, route]);
+  const interactiveDirty = interactiveDraft?.dirty ?? false;
+  const interactiveValid = interactiveDraft?.valid ?? true;
+  const dirty = modelDirty || interactiveDirty;
+  const canApply = !!repo && dirty && interactiveValid && saving === null;
   const hasStoredStrategy = repo ? hasStoredModelStrategy(repo) : false;
 
+  // Single save action: persists the model strategy and the interactive (commands/Q&A) settings
+  // together in one PATCH. Each key is sent only when its section changed; `review` spreads the
+  // full current review so mention_trigger/max_files/etc. survive the server's shallow merge.
   const handleApply = async () => {
-    if (!repo || !dirty) return;
+    if (!repo || !dirty || !interactiveValid) return;
     setSaving('apply');
     setError(null);
-    const tid = toast.loading('Applying model strategy…');
+    const tid = toast.loading('Saving repository settings…');
     try {
-      await api.updateRepoConfig(repo.owner, repo.repo, {
-        model: {
+      const nextReview =
+        interactiveDirty && interactiveDraft
+          ? { ...repo.parsedJson.review, interactive: interactiveDraft.interactive }
+          : null;
+      const patch: Parameters<typeof api.updateRepoConfig>[2] = {};
+      if (modelDirty) {
+        patch.model = {
           main: route.main,
           fallbacks: route.fallbacks,
           size_overrides: route.size_overrides,
-        },
+        };
+      }
+      if (nextReview) {
+        patch.review = nextReview;
+      }
+      await api.updateRepoConfig(repo.owner, repo.repo, patch);
+      if (modelDirty) {
+        setInitialRoute(route);
+        onModelApplied(repo, route);
+      }
+      if (nextReview) {
+        onReviewSaved(repo, nextReview);
+      }
+      toast.success('Settings saved', {
+        id: tid,
+        description: `${repo.owner}/${repo.repo} settings updated.`,
       });
-      setInitialRoute(route);
-      onModelApplied(repo, route);
-      toast.success('Strategy saved', { id: tid, description: `${repo.owner}/${repo.repo} now uses a custom model chain.` });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to save model strategy.';
+      const msg = err instanceof Error ? err.message : 'Failed to save settings.';
       setError(msg);
-      toast.error('Could not save strategy', { id: tid, description: 'Your changes were not applied. Please try again.' });
+      toast.error('Could not save settings', { id: tid, description: 'Your changes were not applied. Please try again.' });
     } finally {
       setSaving(null);
     }
@@ -547,7 +555,7 @@ function RepoModelModal({
             {repo && (
               <>
                 <div className="my-6 border-t border-border" />
-                <InteractivePanel key={selectedRepoId} repo={repo} onSaved={onReviewSaved} />
+                <InteractivePanel key={selectedRepoId} repo={repo} onChange={setInteractiveDraft} />
               </>
             )}
           </div>
@@ -566,7 +574,7 @@ function RepoModelModal({
               <Dialog.Close asChild>
                 <Button variant="outline" disabled={saving !== null}>Cancel</Button>
               </Dialog.Close>
-              <Button onClick={handleApply} disabled={!dirty || saving !== null} className="gap-2">
+              <Button onClick={handleApply} disabled={!canApply} className="gap-2">
                 {saving === 'apply' ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
                 Apply
               </Button>
