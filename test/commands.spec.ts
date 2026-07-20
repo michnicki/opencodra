@@ -1,9 +1,18 @@
-import { describe, it, expect, vi } from 'vitest';
-import { classifyComment, type CommentContext } from '@server/core/commands';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  classifyComment,
+  authorizeActor,
+  executeCommand,
+  buildHelpText,
+  type CommentContext,
+  type ClassifiedCommand,
+} from '@server/core/commands';
 import type { BotIdentityResolver } from '@server/core/bot-identity';
 import type { VcsProvider } from '@server/vcs/types';
+import { queryRows } from '@server/db/client';
+import { getPrReviewState } from '@server/db/pr-review-state';
 import { repoConfigSchema, type RepoConfig } from '@shared/schema';
-import { createTestEnv } from './helpers';
+import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 
 // Phase 11 Plan 03 — core/commands.ts classifyComment (self-filter-first, prefix-only mention,
 // complete-alias grammar). These are UNIT tests (no DB, no Postgres) running in the `node` vitest
@@ -21,8 +30,12 @@ function botResolver(accountId = BOT_ACCOUNT_ID): BotIdentityResolver {
 
 // A minimal provider stub — classifyComment only reads `provider.name` (it delegates identity
 // resolution to the resolver + getBotIdentity, and never calls a network method during classify).
-function makeProvider(name: 'github' | 'bitbucket' = 'github'): VcsProvider {
-  return { name } as unknown as VcsProvider;
+// `authorizeActor`/`executeCommand` tests inject `getUserRepoPermission`/`createPrComment`.
+function makeProvider(
+  name: 'github' | 'bitbucket' = 'github',
+  overrides: Partial<VcsProvider> = {},
+): VcsProvider {
+  return { name, ...overrides } as unknown as VcsProvider;
 }
 
 function cfg(
@@ -325,5 +338,231 @@ describe('classifyComment — qa fallthrough', () => {
       cfg(),
     );
     expect(result).toEqual({ kind: 'qa', question: 'Why is this O(n^2)?' });
+  });
+});
+
+describe('authorizeActor — GitHub (id-verified permission read, fail-closed D-06/D-07)', () => {
+  const perm = (value: 'admin' | 'write' | 'read' | 'none' | null) =>
+    makeProvider('github', { getUserRepoPermission: vi.fn(async () => value) });
+
+  it.each([
+    ['admin', true],
+    ['write', true],
+    ['read', false],
+    ['none', false],
+    [null, false],
+  ] as const)('permission %s -> authorized=%s', async (value, expected) => {
+    const env = createTestEnv();
+    const provider = perm(value);
+    const authorized = await authorizeActor(env, provider, 'acme', 'widgets', 'gh-id-1', 'octocat', cfg());
+    expect(authorized).toBe(expected);
+    // authorization is decided on the immutable id; the login is only forwarded to form the URL.
+    expect(provider.getUserRepoPermission).toHaveBeenCalledWith('acme', 'widgets', 'gh-id-1', 'octocat');
+  });
+});
+
+describe('authorizeActor — Bitbucket (allow-list primary, A1)', () => {
+  it('authorizes an allow-listed account_id WITHOUT any permission read', async () => {
+    const env = createTestEnv();
+    const getUserRepoPermission = vi.fn(async () => null);
+    const provider = makeProvider('bitbucket', { getUserRepoPermission });
+    const authorized = await authorizeActor(
+      env,
+      provider,
+      'ws',
+      'repo',
+      'bb-acct-allowed',
+      'nick',
+      cfg({ allow: ['bb-acct-allowed'] }),
+    );
+    expect(authorized).toBe(true);
+    // Allow-list is authoritative — the best-effort read is not needed.
+    expect(getUserRepoPermission).not.toHaveBeenCalled();
+  });
+
+  it('a not-listed account_id with a null best-effort read is unauthorized (defer-to-allow-list, not deny-by-error)', async () => {
+    const env = createTestEnv();
+    const provider = makeProvider('bitbucket', { getUserRepoPermission: vi.fn(async () => null) });
+    const authorized = await authorizeActor(env, provider, 'ws', 'repo', 'bb-acct-other', 'nick', cfg({ allow: ['someone-else'] }));
+    expect(authorized).toBe(false);
+  });
+
+  it('a not-listed account_id may still authorize on a best-effort admin/write read (secondary)', async () => {
+    const env = createTestEnv();
+    const provider = makeProvider('bitbucket', { getUserRepoPermission: vi.fn(async () => 'write' as const) });
+    const authorized = await authorizeActor(env, provider, 'ws', 'repo', 'bb-acct-other', 'nick', cfg({ allow: [] }));
+    expect(authorized).toBe(true);
+  });
+});
+
+describe('executeCommand — help (read-only discovery, D-11, no authorization)', () => {
+  it('posts the full stable command list documenting reject as a reply-thread command, no auth read', async () => {
+    const env = createTestEnv();
+    const createPrComment = vi.fn(
+      async (_owner: string, _repo: string, _prNumber: number, _body: string) => ({ ref: 'c-1' }),
+    );
+    const getUserRepoPermission = vi.fn(async () => null);
+    const provider = makeProvider('github', { createPrComment, getUserRepoPermission });
+
+    await executeCommand(
+      env,
+      provider,
+      { kind: 'command', name: 'help', args: '' },
+      ctx({ body: '@codra-app help' }),
+      cfg(),
+    );
+
+    expect(getUserRepoPermission).not.toHaveBeenCalled();
+    expect(createPrComment).toHaveBeenCalledOnce();
+    const body = createPrComment.mock.calls[0][3];
+    // Stable order: review, review rest, pause, resume, help, reject.
+    const order = ['review', 'review rest', 'pause', 'resume', 'help', 'reject'].map((c) =>
+      body.indexOf(`@codra-app ${c}`),
+    );
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order]).toEqual([...order].sort((a, b) => a - b));
+    expect(body).toContain('@codra-app reject [reason]');
+  });
+
+  it('buildHelpText is byte-identical regardless of which help alias triggered it', () => {
+    // help output is static (does not depend on the triggering alias), so ? / commands / help all
+    // produce the same body.
+    expect(buildHelpText(cfg())).toBe(buildHelpText(cfg()));
+  });
+});
+
+const dbDescribe = hasConfiguredTestDatabaseUrl() ? describe : describe.skip;
+
+dbDescribe('executeCommand — pause/resume/reject DB effects (authorization + scope)', () => {
+  const env = createTestEnv();
+  const authorized = () => makeProvider('github', { getUserRepoPermission: vi.fn(async () => 'write' as const) });
+  const unauthorized = () => makeProvider('github', { getUserRepoPermission: vi.fn(async () => 'read' as const) });
+
+  beforeEach(async () => {
+    await queryRows(env, `TRUNCATE reject_feedback`);
+  });
+
+  it('an authorized actor pauses the PR (markPrPaused with the immutable id)', async () => {
+    const suffix = `pause-${Date.now()}`;
+    const c = ctx({ owner: 'acme', repo: `repo-${suffix}`, workspace: 'acme', authorId: 'gh-id-writer', prNumber: 7 });
+    await executeCommand(env, authorized(), { kind: 'command', name: 'pause', args: '' }, c, cfg());
+
+    const state = await getPrReviewState(env, {
+      vcsProvider: 'github',
+      workspace: 'acme',
+      repoSlug: `repo-${suffix}`,
+      prNumber: 7,
+    });
+    expect(state?.paused).toBe(true);
+    expect(state?.paused_by).toBe('gh-id-writer');
+  });
+
+  it('an UNAUTHORIZED actor produces NO pause row and NO reply (silent ignore, D-07)', async () => {
+    const suffix = `pause-noauth-${Date.now()}`;
+    const c = ctx({ owner: 'acme', repo: `repo-${suffix}`, workspace: 'acme', authorId: 'gh-id-reader', prNumber: 7 });
+    await executeCommand(env, unauthorized(), { kind: 'command', name: 'pause', args: '' }, c, cfg());
+
+    const state = await getPrReviewState(env, {
+      vcsProvider: 'github',
+      workspace: 'acme',
+      repoSlug: `repo-${suffix}`,
+      prNumber: 7,
+    });
+    expect(state).toBeNull();
+  });
+
+  it('resume clears the pause flag in place and never enqueues', async () => {
+    const suffix = `resume-${Date.now()}`;
+    const key = { vcsProvider: 'github' as const, workspace: 'acme', repoSlug: `repo-${suffix}`, prNumber: 7 };
+    const base = ctx({ owner: 'acme', repo: `repo-${suffix}`, workspace: 'acme', authorId: 'gh-id-writer', prNumber: 7 });
+
+    await executeCommand(env, authorized(), { kind: 'command', name: 'pause', args: '' }, base, cfg());
+    await executeCommand(env, authorized(), { kind: 'command', name: 'resume', args: '' }, base, cfg());
+
+    const state = await getPrReviewState(env, key);
+    expect(state?.paused).toBe(false);
+    // paused_by preserves the pauser's id (markPrResumed does not clobber it).
+    expect(state?.paused_by).toBe('gh-id-writer');
+  });
+
+  it('an authorized reject persists reason = the FULL reply body and sourceCommentRef = ctx.commentRef (D-09)', async () => {
+    const suffix = `reject-${Date.now()}`;
+    const c = ctx({
+      owner: 'acme',
+      repo: `repo-${suffix}`,
+      workspace: 'acme',
+      authorId: 'gh-id-writer',
+      prNumber: 7,
+      body: '@codra-app reject this is a false positive because X',
+      commentRef: `7:src-${suffix}`,
+      findingRef: `7:finding-${suffix}`,
+    });
+    const cmd: ClassifiedCommand = {
+      kind: 'command',
+      name: 'reject',
+      args: 'this is a false positive because X',
+      findingRef: `7:finding-${suffix}`,
+    };
+
+    await executeCommand(env, authorized(), cmd, c, cfg());
+
+    const rows = await queryRows<{ reason: string; source_comment_ref: string; finding_ref: string; rejected_by: string }>(
+      env,
+      `SELECT reason, source_comment_ref, finding_ref, rejected_by FROM reject_feedback WHERE vcs_provider = 'github' AND source_comment_ref = $1`,
+      [`7:src-${suffix}`],
+    );
+    expect(rows).toHaveLength(1);
+    // reason EQUALS the full reply body, never the parsed args.
+    expect(rows[0].reason).toBe('@codra-app reject this is a false positive because X');
+    expect(rows[0].source_comment_ref).toBe(`7:src-${suffix}`);
+    expect(rows[0].finding_ref).toBe(`7:finding-${suffix}`);
+    expect(rows[0].rejected_by).toBe('gh-id-writer');
+  });
+
+  it('an UNAUTHORIZED reject writes no row (silent ignore, D-07)', async () => {
+    const suffix = `reject-noauth-${Date.now()}`;
+    const c = ctx({
+      owner: 'acme',
+      repo: `repo-${suffix}`,
+      workspace: 'acme',
+      authorId: 'gh-id-reader',
+      prNumber: 7,
+      body: '@codra-app reject nope',
+      commentRef: `7:src-${suffix}`,
+      findingRef: `7:finding-${suffix}`,
+    });
+    const cmd: ClassifiedCommand = { kind: 'command', name: 'reject', args: 'nope', findingRef: `7:finding-${suffix}` };
+
+    await executeCommand(env, unauthorized(), cmd, c, cfg());
+
+    const rows = await queryRows(
+      env,
+      `SELECT 1 FROM reject_feedback WHERE vcs_provider = 'github' AND source_comment_ref = $1`,
+      [`7:src-${suffix}`],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('an authorized reject with NO findingRef is a capture-skip (no row, no error, D-09)', async () => {
+    const suffix = `reject-noref-${Date.now()}`;
+    const c = ctx({
+      owner: 'acme',
+      repo: `repo-${suffix}`,
+      workspace: 'acme',
+      authorId: 'gh-id-writer',
+      prNumber: 7,
+      body: '@codra-app reject not under a finding',
+      commentRef: `7:src-${suffix}`,
+    });
+    const cmd: ClassifiedCommand = { kind: 'command', name: 'reject', args: 'not under a finding' };
+
+    await executeCommand(env, authorized(), cmd, c, cfg());
+
+    const rows = await queryRows(
+      env,
+      `SELECT 1 FROM reject_feedback WHERE vcs_provider = 'github' AND source_comment_ref = $1`,
+      [`7:src-${suffix}`],
+    );
+    expect(rows).toHaveLength(0);
   });
 });

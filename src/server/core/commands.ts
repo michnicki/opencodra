@@ -2,6 +2,8 @@ import type { AppBindings } from '@server/env';
 import type { VcsProvider } from '@server/vcs/types';
 import type { RepoConfig } from '@shared/schema';
 import { getBotIdentity, type BotIdentityResolver } from '@server/core/bot-identity';
+import { markPrPaused, markPrResumed, type PrReviewStateKey } from '@server/db/pr-review-state';
+import { insertRejectFeedback } from '@server/db/reject-feedback';
 
 /**
  * Phase 11 Plan 03 — core/commands.ts: the webhook-layer command parser + dispatcher that is the
@@ -200,4 +202,150 @@ function matchCommand(remainder: string, ctx: CommentContext): ClassifiedCommand
   }
 
   return null;
+}
+
+/**
+ * Authorize a state-changing command (review / review-rest / pause / resume / reject) to a
+ * write-access member (CMD-08, D-06/D-07, REVIEW: A1 redesign). Fail-CLOSED: only a resolved
+ * 'admin'/'write' (or Bitbucket allow-list membership) authorizes; every other outcome
+ * (read/none/null/not-listed) is unauthorized and the caller SILENTLY ignores (no reply).
+ *
+ * - GitHub: `getUserRepoPermission(owner, repo, authorId, authorLogin)` — decided on the immutable
+ *   `authorId` (the adapter re-verifies the login→id), NEVER on the login alone.
+ * - Bitbucket: the AUTHORITATIVE gate is the deterministic per-repo `account_id` allow-list
+ *   (`config.review.interactive.commands.bitbucket_allowed_account_ids`). A live permission read is a
+ *   best-effort SECONDARY only; workspace membership is NEVER mapped to write (A1). A null read means
+ *   "defer to the allow-list", so a not-listed actor with a null/none read is unauthorized.
+ */
+export async function authorizeActor(
+  _env: AppBindings,
+  provider: VcsProvider,
+  owner: string,
+  repo: string,
+  authorId: string,
+  authorLogin: string | undefined,
+  config: RepoConfig,
+): Promise<boolean> {
+  void _env;
+  if (provider.name === 'bitbucket') {
+    // Allow-list is primary + authoritative (A1).
+    const allowList = config.review.interactive.commands.bitbucket_allowed_account_ids ?? [];
+    if (allowList.includes(authorId)) {
+      return true;
+    }
+    // Best-effort secondary: a live 'admin'/'write' read (never membership). null/none => unauthorized.
+    const perm = await provider.getUserRepoPermission(owner, repo, authorId, authorLogin);
+    return perm === 'admin' || perm === 'write';
+  }
+
+  // GitHub: id-verified permission read.
+  const perm = await provider.getUserRepoPermission(owner, repo, authorId, authorLogin);
+  return perm === 'admin' || perm === 'write';
+}
+
+/**
+ * The pause-state key for a PR under the effective provider. `workspace` is the canonical non-null
+ * value the `pr_review_state` table expects (GitHub owner/login, Bitbucket workspace slug), carried
+ * on `ctx.workspace`.
+ */
+function pauseKey(provider: VcsProvider, ctx: CommentContext): PrReviewStateKey {
+  return {
+    vcsProvider: provider.name,
+    workspace: ctx.workspace,
+    repoSlug: ctx.repo,
+    prNumber: ctx.prNumber,
+  };
+}
+
+/**
+ * The help message: the FULL D-02 command set in a STABLE deterministic order, documenting `reject`
+ * as `@mention reject [reason]` replied under an inline finding (identical on both providers). The
+ * mention token is taken literally from `config.review.mention_trigger` (falling back to the default
+ * handle when a repo has disabled the trigger). Byte-identical regardless of which help alias
+ * (`help` / `?` / `commands`) triggered it (CMD-04).
+ */
+export function buildHelpText(config: RepoConfig): string {
+  const mention =
+    typeof config.review.mention_trigger === 'string' ? config.review.mention_trigger : '@codra-app';
+  return [
+    'Codra commands — reply with the mention prefix at the start of your comment:',
+    '',
+    `- \`${mention} review\` — review this PR (aliases: \`review this\`, \`review this pr\`)`,
+    `- \`${mention} review rest\` — review the files skipped by the last review (aliases: \`rest\`, \`continue\`)`,
+    `- \`${mention} pause\` — pause automatic reviews on this PR`,
+    `- \`${mention} resume\` — resume automatic reviews on this PR`,
+    `- \`${mention} help\` — show this message (aliases: \`?\`, \`commands\`)`,
+    `- \`${mention} reject [reason]\` — reply under an inline finding to dismiss it as a false positive`,
+  ].join('\n');
+}
+
+/**
+ * Execute a non-Workflow command (pause / resume / help / reject). `review` / `review-rest` are NOT
+ * executed here — they enqueue a review job via the existing path (wired in Plan 06), so this is a
+ * no-op for them.
+ *
+ * Effects are scoped to exactly D-03/D-08/D-09/D-11:
+ * - pause/resume/reject are gated by `authorizeActor`; an unauthorized actor gets NO reply and NO DB
+ *   write (D-07 silent ignore) — not even a "not allowed" message that confirms the bot is present.
+ * - resume clears the pause flag only (UPDATE-only, NO retro-trigger enqueue, D-08).
+ * - help posts the full command list with NO authorization (read-only discovery, D-11).
+ * - reject is capture-only: `insertRejectFeedback` with `reason = ctx.body` (the FULL reply body,
+ *   never the parsed args) and `sourceCommentRef = ctx.commentRef` for idempotency; a missing
+ *   findingRef OR commentRef is a capture-skip (the accessor returns null), never an error (D-09).
+ */
+export async function executeCommand(
+  env: AppBindings,
+  provider: VcsProvider,
+  cmd: ClassifiedCommand,
+  ctx: CommentContext,
+  config: RepoConfig,
+): Promise<void> {
+  switch (cmd.name) {
+    case 'review':
+    case 'review-rest':
+      // Enqueued via the existing review path in Plan 06; nothing to execute here.
+      return;
+
+    case 'help': {
+      // Read-only discovery — no authorization (D-11).
+      await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, buildHelpText(config));
+      return;
+    }
+
+    case 'pause': {
+      if (!(await authorizeActor(env, provider, ctx.owner, ctx.repo, ctx.authorId, ctx.authorLogin, config))) {
+        return; // D-07 silent ignore.
+      }
+      await markPrPaused(env, pauseKey(provider, ctx), ctx.authorId);
+      return;
+    }
+
+    case 'resume': {
+      if (!(await authorizeActor(env, provider, ctx.owner, ctx.repo, ctx.authorId, ctx.authorLogin, config))) {
+        return; // D-07 silent ignore.
+      }
+      // D-08: clear the pause flag only — NEVER retro-trigger a review.
+      await markPrResumed(env, pauseKey(provider, ctx), ctx.authorId);
+      return;
+    }
+
+    case 'reject': {
+      if (!(await authorizeActor(env, provider, ctx.owner, ctx.repo, ctx.authorId, ctx.authorLogin, config))) {
+        return; // D-07 silent ignore.
+      }
+      // Capture-only (D-09). reason is the FULL reply body, never the parsed args. A missing
+      // findingRef / commentRef is a capture-skip inside insertRejectFeedback (returns null).
+      await insertRejectFeedback(env, {
+        vcsProvider: provider.name,
+        workspace: ctx.workspace,
+        repoSlug: ctx.repo,
+        prNumber: ctx.prNumber,
+        findingRef: cmd.findingRef ?? '',
+        reason: ctx.body,
+        rejectedBy: ctx.authorId,
+        sourceCommentRef: ctx.commentRef ?? '',
+      });
+      return;
+    }
+  }
 }
