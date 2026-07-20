@@ -17,7 +17,12 @@ import { hexToBytes } from './jobs';
  * construction ($N) for the multi-row insert, never a value.
  */
 
-export type SkippedFileReason = 'max_files' | 'too_large';
+// IN-01: the only producer (`partitionReviewableFiles`) omits files purely at the `max_files` count
+// boundary, so every recorded skip is `'max_files'`. There is no size-based omission at this boundary
+// and `review-rest` re-reviews all omitted paths regardless, so no `'too_large'` distinction is
+// needed — the previously-declared variant was dead. Reintroduce it only if a real size-based
+// omission producer is added.
+export type SkippedFileReason = 'max_files';
 
 /**
  * The PR-identity lookup key. `listSkippedFilesForHead` queries on this tuple + the CURRENT head_sha
