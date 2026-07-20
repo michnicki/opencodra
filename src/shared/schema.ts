@@ -364,7 +364,11 @@ export type FileReviewPass = z.infer<typeof fileReviewPassSchema>;
 // cannot occur in a POSIX file path, so the key is injective over (file_path, pass).
 export type ReviewUnitKey = string;
 export function reviewUnitKey(filePath: string, pass: FileReviewPass): ReviewUnitKey {
-  return `${filePath} ${pass}`;
+  // Separator is NUL, written as the readable `\0` escape (an invisible literal NUL byte here is
+  // easily misread as a space). NUL cannot occur in a POSIX file path, so the key is injective
+  // over (file_path, pass) for ANY future pass value. Used purely as an opaque in-memory Map/Set
+  // key — never persisted, split, or serialized.
+  return `${filePath}\0${pass}`;
 }
 
 export const fileReviewRecordSchema = z.object({
