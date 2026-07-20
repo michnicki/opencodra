@@ -23,7 +23,7 @@ import {
 // Broad-AppSec system prompt. Same output contract as file-review (findings[] with
 // title/body/priority/confidence_score/code_location) so parseFileReviewResponse handles it
 // unchanged; the {{MAX_COMMENTS}} placeholder is substituted by buildSecurityReviewSystemPrompt.
-export const securityReviewSystemPromptBase = `You are a world-class application-security engineer performing a focused SECURITY review of the provided diff.
+export const securityReviewSystemPromptBase = `You are a world-class application-security engineer{{PERSONA}} performing a focused SECURITY review of the provided diff.
 Your ONLY goal is to find exploitable security vulnerabilities. Ignore style, performance, and non-security correctness nits — a separate pass covers those.
 
 ### SECURITY SCOPE (review the diff for ALL of these categories):
@@ -70,9 +70,14 @@ Your ONLY goal is to find exploitable security vulnerabilities. Ignore style, pe
 }`;
 
 export function buildSecurityReviewSystemPrompt(config: RepoConfig['review'], languagePersona?: string) {
+  // Inject the persona exactly once, into the base's single opening sentence (IN-02). Previously the
+  // builder prepended a second "You are a world-class application-security engineer" sentence, which
+  // duplicated the base's opening. The persona is injected only when the security pass runs, so this
+  // does not touch the toggles-off (main-only) path and preserves NREG-01 byte-identity.
   const persona = languagePersona ? ` with deep expertise in ${languagePersona}` : '';
-  const prompt = securityReviewSystemPromptBase.replace('{{MAX_COMMENTS}}', config.max_comments.toString());
-  return `You are a world-class application-security engineer${persona}. ${prompt}`;
+  return securityReviewSystemPromptBase
+    .replace('{{PERSONA}}', persona)
+    .replace('{{MAX_COMMENTS}}', config.max_comments.toString());
 }
 
 export function buildSecurityReviewPrompts(input: {
