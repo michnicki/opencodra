@@ -9,6 +9,7 @@ import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Switch } from '@client/components/ui/switch';
+import { Input } from '@client/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -221,6 +222,196 @@ function RepoRow({
   );
 }
 
+interface InteractivePanelProps {
+  repo: RepoConfigRecord;
+  onSaved: (repo: RepoConfigRecord, review: RepoConfig['review']) => void;
+}
+
+function InteractivePanel({ repo, onSaved }: InteractivePanelProps) {
+  const interactive = repo.parsedJson.review.interactive;
+  const isBitbucket = repo.vcsProvider === 'bitbucket';
+
+  const [commandsEnabled, setCommandsEnabled] = useState(interactive.commands.enabled);
+  const [accountIds, setAccountIds] = useState<string[]>(
+    interactive.commands.bitbucket_allowed_account_ids ?? [],
+  );
+  const [newAccountId, setNewAccountId] = useState('');
+  const [qaEnabled, setQaEnabled] = useState(interactive.qa.enabled);
+  // Kept as a string so the number input stays editable; parsed on save.
+  const [rateLimit, setRateLimit] = useState(String(interactive.qa.rate_limit_per_hour));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const rateLimitNum = Number.parseInt(rateLimit, 10);
+  const rateLimitValid = Number.isInteger(rateLimitNum) && rateLimitNum >= 1;
+
+  const initialAccountIds = interactive.commands.bitbucket_allowed_account_ids ?? [];
+  const dirty =
+    commandsEnabled !== interactive.commands.enabled ||
+    qaEnabled !== interactive.qa.enabled ||
+    !stringArraysEqual(accountIds, initialAccountIds) ||
+    (rateLimitValid && rateLimitNum !== interactive.qa.rate_limit_per_hour);
+  const canSave = dirty && rateLimitValid && !saving;
+
+  const addAccountId = () => {
+    const trimmed = newAccountId.trim();
+    if (!trimmed || accountIds.includes(trimmed)) {
+      setNewAccountId('');
+      return;
+    }
+    setAccountIds((current) => [...current, trimmed]);
+    setNewAccountId('');
+  };
+
+  const removeAccountId = (id: string) => {
+    setAccountIds((current) => current.filter((value) => value !== id));
+  };
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    setError(null);
+    const tid = toast.loading('Saving interactive settings…');
+    try {
+      const nextInteractive = {
+        commands: { enabled: commandsEnabled, bitbucket_allowed_account_ids: accountIds },
+        qa: { enabled: qaEnabled, rate_limit_per_hour: rateLimitNum },
+      };
+      // Spread the FULL current review so mention_trigger/max_files/focus/skip_files/etc. are
+      // preserved — the server does a shallow top-level merge of `review`.
+      const nextReview = { ...repo.parsedJson.review, interactive: nextInteractive };
+      await api.updateRepoConfig(repo.owner, repo.repo, { review: nextReview });
+      onSaved(repo, nextReview);
+      toast.success('Interactive settings saved', {
+        id: tid,
+        description: `${repo.owner}/${repo.repo} in-PR commands & Q&A updated.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save interactive settings.';
+      setError(msg);
+      toast.error('Could not save settings', {
+        id: tid,
+        description: 'Your changes were not applied. Please try again.',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="min-w-0">
+        <h3 className="text-sm font-semibold text-foreground">Interactive (Commands &amp; Q&amp;A)</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Control in-PR bot commands and pull-request Q&amp;A for this repository.
+        </p>
+      </div>
+
+      {error && <Alert variant="destructive">{error}</Alert>}
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">Commands</p>
+          <p className="text-xs text-muted-foreground">
+            Respond to in-PR bot commands (e.g. review, pause).
+          </p>
+        </div>
+        <Switch
+          checked={commandsEnabled}
+          onCheckedChange={setCommandsEnabled}
+          aria-label="Toggle in-PR commands"
+        />
+      </div>
+
+      {isBitbucket && (
+        <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-background/40 p-3">
+          <p className="text-sm font-medium text-foreground">Allowed Bitbucket account IDs</p>
+          <p className="text-xs text-muted-foreground">
+            These are immutable Bitbucket <code>account_id</code>s authorized to run commands. GitHub
+            uses live repository permissions instead, so this allow-list is Bitbucket-only.
+          </p>
+          <div className="flex items-center gap-2">
+            <Input
+              value={newAccountId}
+              onChange={(event) => setNewAccountId(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  addAccountId();
+                }
+              }}
+              placeholder="e.g. 5b10a…"
+              aria-label="New allowed Bitbucket account ID"
+            />
+            <Button type="button" variant="outline" size="sm" onClick={addAccountId} className="gap-1.5">
+              <Plus size={13} />
+              Add
+            </Button>
+          </div>
+          {accountIds.length > 0 && (
+            <ul className="flex flex-col gap-1.5">
+              {accountIds.map((id) => (
+                <li
+                  key={id}
+                  className="flex items-center justify-between gap-2 rounded border border-border/60 bg-card px-2.5 py-1.5"
+                >
+                  <span className="truncate font-mono text-xs text-foreground">{id}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => removeAccountId(id)}
+                    aria-label={`Remove ${id}`}
+                    className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                  >
+                    <X size={13} />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">Q&amp;A</p>
+          <p className="text-xs text-muted-foreground">
+            Answer questions asked on the pull request.
+          </p>
+        </div>
+        <Switch checked={qaEnabled} onCheckedChange={setQaEnabled} aria-label="Toggle pull-request Q&A" />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="qa-rate-limit" className="text-sm font-medium text-foreground">
+          Q&amp;A rate limit (per hour)
+        </label>
+        <Input
+          id="qa-rate-limit"
+          type="number"
+          min={1}
+          step={1}
+          value={rateLimit}
+          onChange={(event) => setRateLimit(event.target.value)}
+          className="max-w-[160px]"
+          aria-invalid={!rateLimitValid}
+        />
+        {!rateLimitValid && (
+          <p className="text-xs text-destructive">Enter a positive whole number (1 or more).</p>
+        )}
+      </div>
+
+      <div className="flex justify-end">
+        <Button onClick={handleSave} disabled={!canSave} className="gap-2">
+          {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+          Save interactive settings
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 interface RepoModelModalProps {
   repo: RepoConfigRecord | null;
   globalConfig: GlobalModelConfig | ModelRouteConfig | null;
@@ -230,6 +421,7 @@ interface RepoModelModalProps {
   onOpenChange: (open: boolean) => void;
   onModelApplied: (repo: RepoConfigRecord, route: ModelRouteConfig) => void;
   onModelReset: (repo: RepoConfigRecord) => void;
+  onReviewSaved: (repo: RepoConfigRecord, review: RepoConfig['review']) => void;
 }
 
 function RepoModelModal({
@@ -241,6 +433,7 @@ function RepoModelModal({
   onOpenChange,
   onModelApplied,
   onModelReset,
+  onReviewSaved,
 }: RepoModelModalProps) {
   const selectedRepoId = repo ? repoId(repo) : null;
   const globalRouteKey = useMemo(
@@ -324,7 +517,7 @@ function RepoModelModal({
           <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-4 py-4 sm:px-6">
             <div className="min-w-0">
               <Dialog.Title className="text-base font-semibold text-foreground">
-                Edit model strategy
+                Edit repository settings
               </Dialog.Title>
               <Dialog.Description className="mt-1 flex items-center gap-2 truncate text-sm text-muted-foreground">
                 {repo ? (
@@ -351,6 +544,12 @@ function RepoModelModal({
               providers={providerOptions}
               density="comfortable"
             />
+            {repo && (
+              <>
+                <div className="my-6 border-t border-border" />
+                <InteractivePanel key={selectedRepoId} repo={repo} onSaved={onReviewSaved} />
+              </>
+            )}
           </div>
 
           <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-muted/10 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -471,6 +670,9 @@ export function ReposPage() {
       sizeOverrides: null,
     });
   };
+
+  const handleReviewSaved = (repo: RepoConfigRecord, review: RepoConfig['review']) =>
+    mergeRepo(repoId(repo), { parsedJson: { ...repo.parsedJson, review } });
 
   const handleSync = async () => {
     if (syncing) return;
@@ -601,6 +803,7 @@ export function ReposPage() {
         }}
         onModelApplied={handleModelApplied}
         onModelReset={handleModelReset}
+        onReviewSaved={handleReviewSaved}
       />
     </section>
   );
