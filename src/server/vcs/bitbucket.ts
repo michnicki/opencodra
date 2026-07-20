@@ -376,6 +376,24 @@ export class BitbucketAdapter implements VcsProvider {
     return results;
   }
 
+  async getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    _authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null> {
+    // On Bitbucket the AUTHORITATIVE authorization is the per-repo allow-list of immutable
+    // account_ids evaluated in Plan 03 authorizeActor
+    // (config.review.interactive.commands.bitbucket_allowed_account_ids). This read is a BEST-EFFORT
+    // enhancement (A1): repository access tokens cannot query the permission endpoint, so it
+    // frequently 403s → null. A null return means "defer to the allow-list", NOT "deny". It keys
+    // STRICTLY on the immutable account_id (NREG-02) — the paired login is irrelevant here — and it
+    // NEVER maps workspace membership to 'write' (membership ≠ write access).
+    void _authorLogin;
+    void owner; // Bitbucket's workspace is canonical (this.job.repositoryWorkspace), not owner.
+    return this.client.getUserRepoPermission(this.job.repositoryWorkspace, repo, authorId);
+  }
+
   /**
    * Loads the cached diff for this job from KV and parses it once. Mirrors the diff-cache shape
    * that core/review.ts uses (key `diff:<jobId>`). Falls back to a freshly-fetched diff if no

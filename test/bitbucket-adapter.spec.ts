@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BitbucketAdapter } from '@server/vcs/bitbucket';
-import { BitbucketClient, BitbucketError } from '@server/core/bitbucket';
+import {
+  BitbucketClient,
+  BitbucketError,
+  createBitbucketBotIdentityResolver,
+} from '@server/core/bitbucket';
 import { parseUnifiedDiff } from '@server/core/diff';
 import { createTestEnv } from './helpers';
 import {
@@ -526,6 +530,83 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     // author.id is the account_id, NOT the renameable handle.
     expect(comments[0].author.id).not.toBe(BITBUCKET_FIXTURE_NICKNAME);
     expect(comments[0].author.id).not.toBe(BITBUCKET_FIXTURE_DISPLAY_NAME);
+  });
+
+  it('getUserRepoPermission maps the effective permission on 200, keyed strictly on account_id', async () => {
+    const mock = installBitbucketFetchMock({
+      responseSequence: [
+        {
+          status: 200,
+          body: {
+            values: [
+              { permission: 'write', user: { account_id: BITBUCKET_FIXTURE_ACCOUNT_ID } },
+            ],
+          },
+        },
+      ],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    expect(result).toBe('write');
+    // The read keys on the immutable account_id in the query, never the nickname.
+    expect(mock.calls[0].path).toContain('/permissions/repositories/');
+    expect(mock.calls[0].path).toContain(encodeURIComponent(`user.account_id="${BITBUCKET_FIXTURE_ACCOUNT_ID}"`));
+  });
+
+  it('getUserRepoPermission returns null on a 403 (repository access tokens cannot query permissions — A1, no membership fallback)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 403, body: { error: { message: 'Forbidden' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    // NEVER maps membership → write; a 403 fails closed to null (defer to the allow-list).
+    expect(result).toBeNull();
+  });
+
+  it('getUserRepoPermission returns null when the account_id is not in the results (non-member)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 200, body: { values: [] } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    expect(result).toBeNull();
+  });
+
+  it('getUserRepoPermission returns null on a 404 (fail-closed)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 404, body: { error: { message: 'Not found' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID);
+    expect(result).toBeNull();
+  });
+
+  it('createBitbucketBotIdentityResolver resolves the immutable account_id via GET /2.0/user', async () => {
+    const mock = installBitbucketFetchMock({
+      responseSequence: [
+        {
+          status: 200,
+          body: {
+            account_id: BITBUCKET_FIXTURE_ACCOUNT_ID,
+            nickname: BITBUCKET_FIXTURE_NICKNAME,
+            display_name: BITBUCKET_FIXTURE_DISPLAY_NAME,
+          },
+        },
+      ],
+    });
+    const { client } = buildAdapter();
+    const resolver = createBitbucketBotIdentityResolver(client);
+
+    const identity = await resolver.resolveIdentity();
+    expect(identity.accountId).toBe(BITBUCKET_FIXTURE_ACCOUNT_ID);
+    expect(identity.accountId).not.toBe('');
+    // login is the renameable nickname, never the immutable account_id.
+    expect(identity.login).toBe(BITBUCKET_FIXTURE_NICKNAME);
+    expect(mock.calls[0].path).toBe('/2.0/user');
   });
 
   it('listPrComments OMITS a comment with a missing account_id (never surfaces author.id "")', async () => {

@@ -7,6 +7,7 @@ import type {
   PrComment,
 } from '@shared/bitbucket';
 import type { VcsPullRequest } from '@server/vcs/types';
+import type { BotIdentityResolver } from '@server/core/bot-identity';
 
 // BB-01 deliberately mirrors the hand-rolled GitHub client: Workers-native fetch keeps the REST
 // surface small and avoids an SDK. The methods below own Bitbucket-specific mappings for PR fields,
@@ -293,4 +294,103 @@ export class BitbucketClient {
     const path = `${repositoryPath(workspace, repoSlug)}/commit/${encodeURIComponent(commit)}/statuses/build`;
     await this.request('POST', path, status);
   }
+
+  // --- Command-authorization + bot-identity primitives (Phase 11, CMD-07/CMD-08) ---
+
+  /**
+   * BEST-EFFORT per-user repository permission read (A1). Bitbucket authorization is PRIMARILY the
+   * per-repo allow-list of immutable account_ids evaluated in Plan 03 `authorizeActor`
+   * (config.review.interactive.commands.bitbucket_allowed_account_ids) — a deterministic gate that
+   * needs no special token scope. This method is a diagnostic enhancement only.
+   *
+   * Atlassian **repository access tokens cannot query this endpoint at all** — it 403s (NOT merely a
+   * missing scope). So this returns `null` on ANY failure (403/404/network) and a `null` return
+   * means "defer to the allow-list", never "authorize". It keys STRICTLY on the immutable
+   * `account_id` (NREG-02, never a nickname) and NEVER maps workspace membership to 'write'
+   * (membership ≠ write access). A 403 is logged distinctly so the landmine stays diagnosable.
+   */
+  async getUserRepoPermission(
+    workspace: string,
+    repoSlug: string,
+    accountId: string,
+  ): Promise<'admin' | 'write' | 'read' | null> {
+    const path =
+      `/workspaces/${encodeURIComponent(workspace)}/permissions/repositories/${encodeURIComponent(repoSlug)}` +
+      `?q=${encodeURIComponent(`user.account_id="${accountId}"`)}`;
+    try {
+      const response = await this.request('GET', path);
+      const page = (await response.json()) as {
+        values?: Array<{ permission?: string; user?: { account_id?: string } }>;
+      };
+      // Match STRICTLY on the immutable account_id (NREG-02) — never trust list order or a nickname.
+      const match = (page.values ?? []).find((entry) => entry.user?.account_id === accountId);
+      if (!match || !match.permission) {
+        return null;
+      }
+      switch (match.permission) {
+        case 'admin':
+          return 'admin';
+        case 'write':
+          return 'write';
+        case 'read':
+          return 'read';
+        default:
+          // NEVER map anything else (e.g. a workspace-membership flavor) to write — fail closed.
+          return null;
+      }
+    } catch (error) {
+      if (error instanceof BitbucketError && error.status === 403) {
+        // The A1 landmine: repository access tokens cannot query permissions. Log distinctly so the
+        // best-effort path is diagnosable; the allow-list (Plan 03) is the authoritative gate.
+        logger.warn(
+          `Bitbucket permission read forbidden (403) for ${workspace}/${repoSlug} — repository access tokens cannot query permissions (A1); deferring to the account_id allow-list`,
+        );
+      } else {
+        logger.warn(
+          `Bitbucket permission read failed for ${workspace}/${repoSlug}; returning null (fail-closed)`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the bot's OWN Bitbucket identity via `GET /2.0/user` (CMD-07). `account_id` is the
+   * IMMUTABLE id the self-filter echo-loop defense keys on (D-03); `nickname` is the renameable
+   * @mention handle used only as `login`. Throws if `/user` returns no account_id (the caller then
+   * leaves accountId null and command processing self-disables).
+   */
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    const response = await this.request('GET', '/user');
+    const data = (await response.json()) as {
+      account_id?: string;
+      nickname?: string;
+      username?: string;
+      display_name?: string | null;
+    };
+    if (!data.account_id) {
+      throw new Error('Bitbucket /2.0/user did not return an account_id');
+    }
+    return {
+      accountId: data.account_id,
+      login: data.nickname ?? data.username ?? data.display_name ?? undefined,
+    };
+  }
+}
+
+/**
+ * BotIdentityResolver for Bitbucket (CMD-07). Wraps `BitbucketClient.resolveBotUserIdentity()` so
+ * `getBotIdentity(env, 'bitbucket', resolver, { workspace, repo })` can populate a NON-NULL
+ * immutable account_id on a cold cache. Because Bitbucket tokens are PER-REPO, the caller MUST scope
+ * the cache key per repository (see core/bot-identity.ts).
+ */
+export function createBitbucketBotIdentityResolver(
+  client: Pick<BitbucketClient, 'resolveBotUserIdentity'>,
+): BotIdentityResolver {
+  return {
+    resolveIdentity() {
+      return client.resolveBotUserIdentity();
+    },
+  };
 }
