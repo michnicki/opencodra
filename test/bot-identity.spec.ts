@@ -92,4 +92,39 @@ describe('getBotIdentity', () => {
     const second = await getBotIdentity(env, 'github');
     expect(second.accountId).toBe('resolved-acct-789');
   });
+
+  it('scopes the Bitbucket cache key per repository so two repos do not share a cached identity', async () => {
+    const env = createTestEnv();
+    const clientA: BotIdentityResolver = {
+      resolveIdentity: vi.fn(async () => ({ accountId: 'acct-repoA', login: 'bot' })),
+    };
+    const clientB: BotIdentityResolver = {
+      resolveIdentity: vi.fn(async () => ({ accountId: 'acct-repoB', login: 'bot' })),
+    };
+
+    const idA = await getBotIdentity(env, 'bitbucket', clientA, { workspace: 'ws', repo: 'repoA' });
+    const idB = await getBotIdentity(env, 'bitbucket', clientB, { workspace: 'ws', repo: 'repoB' });
+
+    expect(idA.accountId).toBe('acct-repoA');
+    expect(idB.accountId).toBe('acct-repoB');
+    // repoB does NOT read repoA's cached identity — its own client is invoked (per-repo tokens).
+    expect(clientB.resolveIdentity).toHaveBeenCalledOnce();
+
+    // Each identity is cached under a DISTINCT repo-scoped key.
+    expect(await env.APP_KV.get('bot-identity:bitbucket:ws/repoA')).toContain('acct-repoA');
+    expect(await env.APP_KV.get('bot-identity:bitbucket:ws/repoB')).toContain('acct-repoB');
+    // The bare (unscoped) Bitbucket key was NOT written for a scoped call.
+    expect(await env.APP_KV.get('bot-identity:bitbucket')).toBeNull();
+  });
+
+  it('keeps the GitHub cache key installation-global (bot-identity:github) — scope does not apply', async () => {
+    const env = createTestEnv();
+    const client: BotIdentityResolver = {
+      resolveIdentity: vi.fn(async () => ({ accountId: 'gh-acct', login: 'bot' })),
+    };
+
+    await getBotIdentity(env, 'github', client);
+
+    expect(await env.APP_KV.get('bot-identity:github')).toContain('gh-acct');
+  });
 });

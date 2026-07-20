@@ -39,8 +39,21 @@ export interface BotIdentity {
   provider: VcsProviderName;
 }
 
-/** KV key for the per-provider bot-identity cache. Bot identity is stable, so no TTL is set. */
-function botIdentityCacheKey(provider: VcsProviderName): string {
+/**
+ * KV key for the bot-identity cache. Bot identity is stable, so no TTL is set.
+ *
+ * GitHub is installation-global (`bot-identity:github`): one App identity across all its repos.
+ * Bitbucket tokens are PER-REPO, so a scoped call keys on `bot-identity:bitbucket:{workspace}/{repo}`
+ * (REVIEW: Codex 11-02 HIGH) — one repo's cached identity must NEVER be reused to authorize another
+ * repo. An unscoped Bitbucket call falls back to the bare `bot-identity:bitbucket` key.
+ */
+function botIdentityCacheKey(
+  provider: VcsProviderName,
+  scope?: { workspace: string; repo: string },
+): string {
+  if (provider === 'bitbucket' && scope) {
+    return `bot-identity:bitbucket:${scope.workspace}/${scope.repo}`;
+  }
   return `bot-identity:${provider}`;
 }
 
@@ -66,10 +79,14 @@ export async function getBotIdentity(
   env: Pick<AppBindings, 'APP_KV' | 'BOT_USERNAME'>,
   provider: VcsProviderName,
   client?: BotIdentityResolver,
+  // Optional per-repository scope. REQUIRED for Bitbucket (per-repo tokens) so the cache key is
+  // `bot-identity:bitbucket:{workspace}/{repo}` and one repo's identity cannot leak to another
+  // (REVIEW: Codex 11-02 HIGH). Ignored for GitHub (installation-global identity).
+  scope?: { workspace: string; repo: string },
 ): Promise<BotIdentity> {
   // login seeds synchronously from the existing BOT_USERNAME binding — the mutable @mention handle.
   const login = env.BOT_USERNAME;
-  const cacheKey = botIdentityCacheKey(provider);
+  const cacheKey = botIdentityCacheKey(provider, scope);
 
   const cachedRaw = await env.APP_KV.get(cacheKey);
   if (cachedRaw) {

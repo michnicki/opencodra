@@ -219,16 +219,29 @@ describe('VcsService.forProvider', () => {
     expect(adapter).toBeInstanceOf(GithubAdapter);
   });
 
-  it('throws a typed NotImplementedError for provider: "bitbucket"', async () => {
+  it('builds a JOBLESS BitbucketAdapter for provider: "bitbucket" given { workspace, repo } (no longer throws)', async () => {
     const env = createTestEnv();
-    let caught: unknown = null;
-    try {
-      await VcsService.forProvider(env, { provider: 'bitbucket' });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(NotImplementedError);
-    expect((caught as Error).message).toContain('Bitbucket');
+    getVcsCredentialSecretsMock.mockResolvedValue({ encryptedAccessToken: 'v1:iv:ct' });
+    decryptSecretMock.mockResolvedValue('plaintext-token');
+
+    const adapter = await VcsService.forProvider(env, {
+      provider: 'bitbucket',
+      workspace: 'ws-foo',
+      repo: 'repo-bar',
+    });
+
+    expect(adapter).toBeInstanceOf(BitbucketAdapter);
+    expect((adapter as BitbucketAdapter).name).toBe('bitbucket');
+    // The jobless provider reuses the EXISTING per-repo credential decrypt path (no new token source).
+    expect(getVcsCredentialSecretsMock).toHaveBeenCalledTimes(1);
+    expect(decryptSecretMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws for provider: "bitbucket" without workspace/repo (a jobless provider needs both)', async () => {
+    const env = createTestEnv();
+    await expect(VcsService.forProvider(env, { provider: 'bitbucket' })).rejects.toThrow(/workspace and repo/);
+    // NotImplementedError remains exported for future not-yet-wired branches.
+    expect(NotImplementedError).toBeDefined();
   });
 
   it('throws when provider is "github" without installationId', async () => {

@@ -4,13 +4,11 @@ import { BitbucketAdapter } from '../vcs/bitbucket';
 import type { VcsProvider } from '../vcs/types';
 
 /**
- * Typed placeholder for features the VcsService declares but does not yet implement. Currently
- * only the `forProvider({ provider: 'bitbucket' })` path throws this -- the only Bitbucket event
- * source is the webhook route (Wave 3), which always has a job row already and therefore reaches
- * VcsService via `forRepo`, not `forProvider`.
- *
- * The thrown class is exported so callers / tests can `instanceof NotImplementedError` to
- * distinguish "this branch is intentionally not yet wired" from a genuine error.
+ * Typed placeholder for features the VcsService declares but does not yet implement. As of Phase 11
+ * NO current path throws this -- `forProvider({ provider: 'bitbucket' })` is now a live jobless
+ * provider factory. The class is retained (exported) so callers / tests can `instanceof
+ * NotImplementedError` to distinguish "intentionally not yet wired" from a genuine error, and so any
+ * future not-yet-implemented branch has a typed signal to reuse.
  */
 export class NotImplementedError extends Error {
   constructor(message: string) {
@@ -76,23 +74,56 @@ export class VcsService {
   }
 
   /**
-   * The no-job-row entry point (Open Q2, D-03) for the two `resolveQueuedJob` sites that have
-   * `env` + `installationId` + a known provider but no persisted job row yet. `tracker` is
-   * intentionally OPTIONAL and OMITTED by both current callers -- they run before `runReviewJob`'s
-   * `new TokenTracker()` exists.
+   * The no-job-row entry point (Open Q2, D-03) for callers that have `env` + a known provider but no
+   * persisted job row yet — `resolveQueuedJob` (GitHub) AND the Phase 11 interactive handlers
+   * (commands / Q&A / permission / identity), which must resolve a provider BEFORE any job row
+   * exists. `tracker` is intentionally OPTIONAL and OMITTED by the pre-`runReviewJob` callers.
    *
-   * D-15: provider now widens to 'github' | 'bitbucket'. The 'bitbucket' branch throws a typed
-   * `NotImplementedError` -- there is no live Bitbucket no-job-row path this phase (the only
-   * Bitbucket event source is the webhook route in Wave 3, which always creates a job row before
-   * the worker needs a provider).
+   * Both providers are now live (Phase 11): 'github' builds a `GithubAdapter` (requires
+   * `installationId`); 'bitbucket' builds a JOBLESS `BitbucketAdapter` via `BitbucketAdapter.create`
+   * keyed on `{ workspace, repo }` (loading + decrypting the per-repo credential — REV: Codex
+   * 11-02/11-03, OpenCode 11-06). A jobless provider carries a placeholder job (prNumber 0); the
+   * comment/permission/identity methods take their own owner/repo/prNumber arguments and only use
+   * the job for `repositoryWorkspace`, so the placeholder is inert for those paths.
+   *
+   * Call contract (Plan 06 constructs it, Plan 03/04 consume it): build the provider via
+   * `VcsService.forProvider(env, { provider, installationId?, workspace, repo })` PLUS the matching
+   * `BotIdentityResolver` (createGithubBotIdentityResolver / createBitbucketBotIdentityResolver),
+   * then pass BOTH into `classifyComment`/`executeCommand` (Plan 03) and `answerQuestion` (Plan 04).
    */
   static async forProvider(
     env: AppBindings,
-    opts: { provider: 'github' | 'bitbucket'; installationId?: string },
+    opts: {
+      provider: 'github' | 'bitbucket';
+      installationId?: string;
+      workspace?: string;
+      repo?: string;
+      headSha?: string;
+    },
     tracker?: { incrementSubrequests(count?: number): void },
   ): Promise<VcsProvider> {
     if (opts.provider === 'bitbucket') {
-      throw new NotImplementedError('Bitbucket forProvider is not yet supported');
+      if (!opts.workspace || !opts.repo) {
+        throw new Error('VcsService.forProvider requires workspace and repo for bitbucket');
+      }
+      // JOBLESS provider: a minimal job-like object mirroring the forRepo Bitbucket branch, with a
+      // placeholder prNumber (comment/permission/identity methods take prNumber as an argument and
+      // never read job.prNumber). BitbucketAdapter.create reuses the EXISTING per-repo credential
+      // decrypt path — it does not invent a new token source.
+      const joblessJob = {
+        id: `jobless:bitbucket:${opts.workspace}/${opts.repo}`,
+        owner: opts.workspace,
+        repo: opts.repo,
+        prNumber: 0,
+        repositoryVcsProvider: 'bitbucket' as const,
+        repositoryWorkspace: opts.workspace,
+        headSha: opts.headSha ?? null,
+      };
+      return BitbucketAdapter.create(
+        env,
+        joblessJob as Parameters<typeof BitbucketAdapter.create>[1],
+        tracker,
+      );
     }
     if (!opts.installationId) {
       throw new Error('VcsService.forProvider requires installationId for github');
