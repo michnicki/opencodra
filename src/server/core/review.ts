@@ -29,7 +29,7 @@ import {
   updateJobStep,
 } from '@server/db/jobs';
 import { filterReviewableFiles, parseUnifiedDiff } from './diff';
-import { dedupeFindings } from './dedup';
+import { dedupeFindings, SEVERITY_RANK } from './dedup';
 import { parseCriticPruneResponse, parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
 import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
 
@@ -1528,7 +1528,7 @@ async function runFinalizePhase(
 
   const hasFailures = fileSummaries.some((file) => file.verdict === 'failed');
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
-  const severityRanks: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
+  const severityRanks = SEVERITY_RANK; // single source of truth lives in ./dedup (IN-01, no drift)
   const minRank = severityRanks[config.review.min_severity] ?? 4;
   const { maxComments: globalMaxComments } = await getReviewSettings(env);
   const effectiveMaxComments = Math.min(config.review.max_comments, globalMaxComments);

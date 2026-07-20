@@ -26,10 +26,11 @@ export const DEDUP_SIMILARITY_THRESHOLD = 0.7;
 // that merely happen to be textually similar elsewhere in the file. Also a documented tunable.
 export const DEDUP_LINE_PROXIMITY = 10;
 
-// Severity ranking (lower rank = higher severity). MUST stay in sync with the `severityRanks`
-// literal in src/server/core/review.ts:1366 — a local copy avoids an import cycle between the
-// dedup module and the review pipeline.
-const SEVERITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
+// Severity ranking (lower rank = higher severity). SINGLE SOURCE OF TRUTH — `review.ts` imports
+// this constant rather than keeping its own copy (dedup.ts is a low-level, cycle-free module, so
+// review.ts can safely depend on it). Previously this was hand-duplicated in both modules with a
+// stale line reference; consolidating here removes the drift hazard.
+export const SEVERITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
 
 /**
  * Normalize a finding's comparison text so that surface differences (case, markdown, backticks,
