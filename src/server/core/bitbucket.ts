@@ -314,6 +314,15 @@ export class BitbucketClient {
     repoSlug: string,
     accountId: string,
   ): Promise<'admin' | 'write' | 'read' | null> {
+    // Defense-in-depth (IN-02): real Atlassian account_ids are opaque quote-free tokens. Reject any
+    // value carrying a `"` or control character before interpolating it into the BBQL quoted string,
+    // so it can never alter the server-side query parse. Fail closed (null = defer to the allow-list).
+    if (/["\u0000-\u001f]/.test(accountId)) {
+      logger.warn(
+        `Bitbucket permission read skipped for ${workspace}/${repoSlug}: account_id contains invalid characters; deferring to the allow-list`,
+      );
+      return null;
+    }
     const path =
       `/workspaces/${encodeURIComponent(workspace)}/permissions/repositories/${encodeURIComponent(repoSlug)}` +
       `?q=${encodeURIComponent(`user.account_id="${accountId}"`)}`;
