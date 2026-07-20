@@ -5,8 +5,9 @@ import type { JobSummary, ReviewJobMessage, RepoConfig } from '@shared/schema';
 import type { CommentContext } from '@server/core/commands';
 import { authorizeActor, classifyComment } from '@server/core/commands';
 import { VcsService } from '@server/services/vcs';
-import { createGithubBotIdentityResolver } from '@server/core/github';
-import { createBitbucketBotIdentityResolver } from '@server/core/bitbucket';
+import { createGithubBotIdentityResolver, GitHubError } from '@server/core/github';
+import { createBitbucketBotIdentityResolver, BitbucketError } from '@server/core/bitbucket';
+import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { BotIdentityResolver } from '@server/core/bot-identity';
 import { getPrReviewState, type PrReviewStateKey } from '@server/db/pr-review-state';
 import { listSkippedFilesForHead } from '@server/db/skipped-files';
@@ -114,6 +115,34 @@ function hasLeadingIgnoreDirective(
     }
   }
   return false;
+}
+
+/**
+ * WR-03: classify a comment-branch ingest failure as TRANSIENT (the provider should retry the
+ * webhook delivery) vs DETERMINISTIC (retrying will not help). The comment path constructs the
+ * provider (credential decrypt), resolves the bot identity, and — for a review command — hydrates the
+ * live PR, all synchronously inside the webhook handler. A transient provider/network failure there
+ * must not permanently drop the command: the route deletes the delivery record and surfaces a 5xx so
+ * the retry re-processes. A provider 429 / 5xx or a network/timeout error is transient; anything else
+ * (bad payload, permanent 4xx) is deterministic. Unlike the fail-fast model classifier, a timeout
+ * here is treated as transient because a retry with a warm identity cache commonly succeeds.
+ */
+export function isTransientCommentError(error: unknown): boolean {
+  if (error instanceof BitbucketError || error instanceof GitHubError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (isTimeoutMessage(message)) return true;
+  return (
+    matchesAnyTransientSubstring(message) ||
+    message.includes('fetch failed') ||
+    message.includes('network') ||
+    message.includes('connection') ||
+    message.includes('econnreset') ||
+    message.includes('econnrefused') ||
+    message.includes('temporar') ||
+    /\b(429|50[0-9])\b/.test(message)
+  );
 }
 
 export async function ingestReviewWebhookEvent(

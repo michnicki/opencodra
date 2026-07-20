@@ -12,9 +12,10 @@ import { loadRepoConfig } from '@server/core/config';
 import { extractReviewRequest, type ReviewRequest } from '@server/core/review';
 import { verifyGitHubWebhookSignature } from '@server/core/verify';
 import { jsonError } from '@server/core/http';
-import { ingestReviewWebhookEvent, type WebhookIngestResult } from '@server/core/webhook-ingest';
+import { ingestReviewWebhookEvent, isTransientCommentError, type WebhookIngestResult } from '@server/core/webhook-ingest';
 import type { CommentContext } from '@server/core/commands';
-import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
+import { recordWebhookDelivery, deleteWebhookDelivery } from '@server/db/webhook-deliveries';
+import { logger } from '@server/core/logger';
 
 // A mention-shaped ReviewRequest carrying the installationId the GitHub comment branch in the shared
 // seam needs to construct the provider + insert a command review job (the seam reads it via
@@ -98,6 +99,35 @@ function respondToIngest(c: Context<AppEnv>, result: WebhookIngestResult): Respo
   }
 }
 
+// WR-03: run a comment-branch ingest so a TRANSIENT failure (bot-identity resolve / PR hydration /
+// provider network) does not permanently drop the command. `recordWebhookDelivery` already ran its
+// idempotent insert before this point, so a bare throw here returns a 5xx whose retry is short-
+// circuited by the duplicate-delivery guard BEFORE classification re-runs. On a transient failure we
+// delete the delivery record first, so the provider's retry re-processes cleanly; a deterministic
+// failure keeps the record (retrying would not help) and still surfaces as a 5xx.
+async function ingestCommentEventOrRetry(
+  c: Context<AppEnv>,
+  deliveryId: string,
+  input: Parameters<typeof ingestReviewWebhookEvent>[1],
+): Promise<Response> {
+  try {
+    const result = await ingestReviewWebhookEvent(c.env, input);
+    return respondToIngest(c, result);
+  } catch (error) {
+    if (isTransientCommentError(error)) {
+      try {
+        await deleteWebhookDelivery(c.env, deliveryId);
+      } catch (deleteError) {
+        logger.error(
+          'Failed to delete webhook delivery after a transient comment-ingest failure; the retry may be swallowed by the dedup guard',
+          deleteError instanceof Error ? deleteError : new Error(String(deleteError)),
+        );
+      }
+    }
+    throw error;
+  }
+}
+
 export async function handleGitHubWebhook(c: Context<AppEnv>) {
     const eventName = c.req.header('x-github-event');
     const deliveryId = c.req.header('x-github-delivery');
@@ -178,7 +208,7 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         repo,
         comment: reviewComment.comment,
       });
-      const result = await ingestReviewWebhookEvent(c.env, {
+      return ingestCommentEventOrRetry(c, deliveryId, {
         reviewRequest: buildMentionReviewRequest({ installationId, owner, repo, prNumber }),
         configSnapshot: config,
         deliveryId,
@@ -186,7 +216,6 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         eventName,
         commentContext,
       });
-      return respondToIngest(c, result);
     }
 
     // ── issue_comment WITH interactive on: a PR-level comment. Project a CommentContext and hand off
@@ -204,7 +233,7 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         repo,
         comment: issueComment.comment,
       });
-      const result = await ingestReviewWebhookEvent(c.env, {
+      return ingestCommentEventOrRetry(c, deliveryId, {
         reviewRequest: buildMentionReviewRequest({ installationId, owner, repo, prNumber }),
         configSnapshot: config,
         deliveryId,
@@ -212,7 +241,6 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         eventName,
         commentContext,
       });
-      return respondToIngest(c, result);
     }
 
     // ── pull_request AUTO path (+ issue_comment legacy mention path when interactive is off). Behavior

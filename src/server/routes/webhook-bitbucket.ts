@@ -9,8 +9,9 @@ import { getVcsCredentialSecrets } from '@server/db/vcs-credentials';
 import { findRepositoryByBitbucketIdentity } from '@server/db/repositories';
 import { getRepoConfigByRepositoryId } from '@server/db/repo-configs';
 import { mostRecentJobForPullRequest } from '@server/db/jobs';
-import { recordWebhookDelivery } from '@server/db/webhook-deliveries';
-import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
+import { recordWebhookDelivery, deleteWebhookDelivery } from '@server/db/webhook-deliveries';
+import { ingestReviewWebhookEvent, isTransientCommentError } from '@server/core/webhook-ingest';
+import { logger } from '@server/core/logger';
 import { getGlobalConfig } from '@server/core/config';
 import { defaultRepoConfig, type RepoConfig } from '@shared/schema';
 import { bytesToHex } from '@server/db/jobs';
@@ -288,16 +289,37 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
       workspace,
     };
 
-    const result = await ingestReviewWebhookEvent(c.env, {
-      reviewRequest: null,
-      configSnapshot: commentConfigSnapshot,
-      deliveryId: xRequestUUID,
-      requestId: c.get('requestId'),
-      eventName: xEventKey,
-      provider: 'bitbucket',
-      commentContext,
-      prBody: typeof prDescription === 'string' ? prDescription : undefined,
-    });
+    // WR-03: a TRANSIENT failure in the synchronous comment path (bot-identity resolve / PR
+    // hydration / provider network) must not permanently drop the command. recordWebhookDelivery
+    // already ran its idempotent insert above, so a bare throw returns a 5xx whose retry is short-
+    // circuited by the duplicate-delivery guard before classification re-runs. Delete the delivery
+    // record on a transient failure so the provider's retry re-processes; deterministic failures keep
+    // the record and still surface as a 5xx (retrying would not help).
+    let result;
+    try {
+      result = await ingestReviewWebhookEvent(c.env, {
+        reviewRequest: null,
+        configSnapshot: commentConfigSnapshot,
+        deliveryId: xRequestUUID,
+        requestId: c.get('requestId'),
+        eventName: xEventKey,
+        provider: 'bitbucket',
+        commentContext,
+        prBody: typeof prDescription === 'string' ? prDescription : undefined,
+      });
+    } catch (error) {
+      if (isTransientCommentError(error)) {
+        try {
+          await deleteWebhookDelivery(c.env, xRequestUUID);
+        } catch (deleteError) {
+          logger.error(
+            'Failed to delete Bitbucket webhook delivery after a transient comment-ingest failure; the retry may be swallowed by the dedup guard',
+            deleteError instanceof Error ? deleteError : new Error(String(deleteError)),
+          );
+        }
+      }
+      throw error;
+    }
 
     if (result.outcome === 'queued') {
       return c.json({ ok: true, eventName: xEventKey, reviewed: true }, 200);

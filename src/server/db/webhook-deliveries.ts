@@ -44,6 +44,25 @@ export async function recordWebhookDelivery(
   return rows.length > 0;
 }
 
+/**
+ * Delete a recorded delivery by its provider delivery id (WR-03). The comment-classification path
+ * does synchronous network I/O (bot-identity resolve, PR hydration) AFTER `recordWebhookDelivery`
+ * runs its idempotent insert. When that I/O fails TRANSIENTLY, the webhook route deletes the just-
+ * recorded delivery so the provider's retry is NOT short-circuited by the duplicate-delivery guard
+ * (which would otherwise return 2xx before classification re-runs, permanently dropping the command).
+ * A no-op when the row is already gone.
+ */
+export async function deleteWebhookDelivery(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  deliveryId: string,
+): Promise<void> {
+  await queryRows(
+    env,
+    'DELETE FROM webhook_deliveries WHERE delivery_id = $1',
+    [deliveryId],
+  );
+}
+
 export async function getWebhookDelivery(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   deliveryId: string,
