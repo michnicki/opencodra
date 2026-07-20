@@ -230,3 +230,37 @@ export async function getRepoConfigRecord(env: Pick<AppBindings, 'HYPERDRIVE'>, 
 
   return row ? mapRepo(row) : null;
 }
+
+// Provider-SAFE config read keyed on the exact repository row id (Phase 11 / Plan 07). The
+// (owner, repo) accessor above cannot be used for Bitbucket: a GitHub repo and a Bitbucket repo can
+// share the same owner/repo text, and that accessor does not filter by vcs_provider — it would return
+// the wrong provider's config (the collision `findRepositoryByBitbucketIdentity` exists to avoid). The
+// Bitbucket webhook route already resolves the authoritative repository_id via
+// `findRepositoryByBitbucketIdentity`, so it reads its per-repo config by that id here — no owner/repo
+// text collision possible. Returns null when the repo has no per-repo config row.
+export async function getRepoConfigByRepositoryId(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  repositoryId: number,
+): Promise<{ parsedJson: RepoConfig; enabled: boolean } | null> {
+  const [row] = await queryRows<{ parsed_json: RepoConfig | string | null; enabled: boolean }>(
+    env,
+    `
+      SELECT rc.parsed_json, rc.enabled
+      FROM repo_configs rc
+      WHERE rc.repository_id = $1
+      LIMIT 1
+    `,
+    [repositoryId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  // Parse ONLY the config JSON — NOT via mapRepo/repoConfigRecordSchema, which requires a non-null
+  // installationId that Bitbucket repository rows do not have (installation_id is NULL for Bitbucket).
+  return {
+    parsedJson: normalizeRepoConfig(repoConfigSchema.parse(parseJsonColumn(row.parsed_json, defaultRepoConfig))),
+    enabled: row.enabled,
+  };
+}

@@ -6,6 +6,119 @@ import { logger } from '@server/core/logger';
 import { runWithDb } from '@server/db/client';
 import { failJob, hasPendingMaintenanceWork, clearSystemActive } from '@server/db/jobs';
 import { runBestEffortJobMaintenance } from '@server/core/job-recovery';
+import { VcsService } from '@server/services/vcs';
+import { executeCommand, type ClassifiedCommand, type CommentContext } from '@server/core/commands';
+import { answerQuestion, type QaContext } from '@server/core/qa';
+import { loadRepoConfig } from '@server/core/config';
+import { isRetryableModelError } from '@server/services/model';
+import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
+
+// Classify an interactive-dispatch failure as transient (retry) vs deterministic (ack). Mirrors the
+// model layer's isTransientModelFailure disposition (REVIEW: Codex 11-06 MED): a transient DB /
+// provider / model error must be retried (bounded by the 3-attempt consumer) rather than
+// acked-and-lost, while a deterministic failure (bad payload, permanent 4xx) is logged and acked.
+// Timeouts deliberately fail fast (consistent with the shared classifier), and a RetryableModelError
+// is always transient.
+function isTransientDispatchError(error: unknown): boolean {
+  if (isRetryableModelError(error)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  if (isTimeoutMessage(lower)) return false;
+  return (
+    matchesAnyTransientSubstring(lower) ||
+    lower.includes('fetch failed') ||
+    lower.includes('network') ||
+    lower.includes('temporar') ||
+    lower.includes('connection') ||
+    lower.includes('econnrefused') ||
+    lower.includes('econnreset') ||
+    lower.includes('too many connections') ||
+    /\b50[0-9]\b/.test(lower) ||
+    lower.includes('internal error')
+  );
+}
+
+// Dispatch a classified command/qa message INLINE (non-Workflow, CMD-07/D-03/D-05). Constructs the
+// provider via the jobless VcsService.forProvider factory, rebuilds a full CommentContext (body +
+// workspace included so reject persists reason=body, D-09), and calls executeCommand / answerQuestion
+// each with its own fresh 50-subrequest budget. NEVER creates a REVIEW_WORKFLOW instance.
+async function dispatchInteractiveMessage(
+  env: AppBindings,
+  data: ReturnType<typeof reviewJobMessageSchema.parse>,
+): Promise<void> {
+  const interactive = data.interactive;
+  if (!interactive) {
+    // The schema superRefine guarantees this for kind command/qa, but guard defensively.
+    throw new Error('Interactive message missing interactive payload');
+  }
+  const owner = data.owner ?? interactive.workspace;
+  const repo = data.repo;
+  const prNumber = data.prNumber;
+  if (!repo || typeof prNumber !== 'number') {
+    throw new Error('Interactive message missing owner/repo/prNumber');
+  }
+
+  // WR-01: prefer the PROVIDER-SAFE config snapshot the webhook route resolved and carried on the
+  // message. Re-deriving it here via loadRepoConfig({ owner, repo }) is unsafe for Bitbucket: `owner`
+  // is the workspace slug and getRepoConfigRecord matches on (owner, repo) with NO vcs_provider
+  // filter (LIMIT 1), so it can return a same-text GitHub repo's config (breaking a legitimate
+  // Bitbucket admin's pause/resume/reject — fail-closed — or silently dropping a Bitbucket Q&A), and
+  // loadRepoConfig additionally triggers a GitHub-shaped getOrCreateRepository side effect. The
+  // carried snapshot is present for every Phase-11 producer; fall back to loadRepoConfig ONLY for
+  // in-flight pre-deploy messages (GitHub is collision-free, so that legacy path stays safe there).
+  const config =
+    interactive.configSnapshot ??
+    (
+      await loadRepoConfig(env, {
+        installationId: data.installationId ?? '',
+        owner,
+        repo,
+      })
+    ).parsedJson;
+
+  const provider = await VcsService.forProvider(env, {
+    provider: data.provider,
+    installationId: data.installationId,
+    workspace: interactive.workspace,
+    repo,
+  });
+
+  if (data.kind === 'qa') {
+    const qaCtx: QaContext = {
+      provider: data.provider,
+      workspace: interactive.workspace,
+      repo,
+      prNumber,
+      question: interactive.question ?? interactive.body,
+      authorId: interactive.authorId,
+    };
+    await answerQuestion(env, provider, qaCtx, config);
+    return;
+  }
+
+  // kind === 'command'
+  const ctx: CommentContext = {
+    authorId: interactive.authorId,
+    authorLogin: interactive.authorLogin,
+    body: interactive.body,
+    prNumber,
+    commentRef: interactive.commentRef,
+    parentRef: interactive.parentRef,
+    findingRef: interactive.findingRef,
+    owner,
+    repo,
+    workspace: interactive.workspace,
+  };
+  const cmd: ClassifiedCommand = {
+    kind: 'command',
+    // The producer (webhook-ingest) only enqueues kind='command' for pause/resume/help/reject; a
+    // missing commandName is a malformed message (deterministic — will be acked).
+    name: interactive.commandName ?? 'help',
+    args: '',
+    findingRef: interactive.findingRef,
+  };
+  await executeCommand(env, provider, cmd, ctx, config);
+}
 
 const app = createApp();
 
@@ -74,6 +187,34 @@ export default {
             }
           }
           message.ack();
+          continue;
+        }
+
+        // ── Phase 11 (CMD-07): command/qa messages are dispatched INLINE (non-Workflow) BEFORE the
+        //    REVIEW_WORKFLOW.create block. A no-kind / kind==='review' message skips this branch and
+        //    reaches the Workflow path byte-identically (NREG-01, T-11-06-3).
+        if (parseResult.data.kind === 'command' || parseResult.data.kind === 'qa') {
+          try {
+            await dispatchInteractiveMessage(env, parseResult.data);
+            message.ack();
+          } catch (error) {
+            // REVIEW: Codex 11-06 MED — a TRANSIENT failure must retry (bounded by the 3-attempt
+            // consumer), never ack-and-lose; a DETERMINISTIC failure is logged and acked. Neither
+            // falls through to REVIEW_WORKFLOW.create.
+            const err = error instanceof Error ? error : new Error(String(error));
+            if (isTransientDispatchError(error) && message.attempts < 3) {
+              logger.warn('Transient interactive-dispatch failure; retrying', {
+                kind: parseResult.data.kind,
+                deliveryId: parseResult.data.deliveryId,
+                attempts: message.attempts,
+                error: err.message,
+              });
+              message.retry();
+            } else {
+              logger.error('Interactive dispatch failed; acking message', err);
+              message.ack();
+            }
+          }
           continue;
         }
 

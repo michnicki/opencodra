@@ -81,6 +81,15 @@ export type VcsSubmitReviewInput = {
 export interface VcsProvider {
   readonly name: 'github' | 'bitbucket';
 
+  /**
+   * Per-adapter capability flags. REQUIRED (not optional like `labels?`) so every adapter MUST
+   * declare it — this is the single extension point where future capability flags join the same
+   * block, avoiding a per-flag interface refactor (D-09). `supportsMermaid` lets a later phase's
+   * walkthrough formatter gate its Mermaid diagram per-provider (GitHub renders Mermaid in
+   * markdown; Bitbucket Cloud does not). Inert this phase — no consumer reads it yet.
+   */
+  readonly capabilities: { readonly supportsMermaid: boolean };
+
   getPullRequest(owner: string, repo: string, prNumber: number): Promise<VcsPullRequest>;
   getPullRequestDiff(owner: string, repo: string, prNumber: number): Promise<string>;
 
@@ -102,6 +111,77 @@ export interface VcsProvider {
 
   submitReview(owner: string, repo: string, prNumber: number, input: VcsSubmitReviewInput): Promise<{ ref: string }>;
   findExistingReviewForCommit(owner: string, repo: string, prNumber: number, commitSha: string): Promise<{ ref: string } | null>;
+
+  /**
+   * Standalone (issue/PR-level) comment primitives. REQUIRED on every adapter (not optional like
+   * `labels?`) -- both providers implement them (D-01). No consumer is wired this phase; the
+   * methods are inert (D-06). The primitives are thin -- consumers own de-duplication, there is no
+   * built-in dedup (D-04).
+   *
+   * The `ref` is PROVIDER-OPAQUE and self-encoding: the adapter alone interprets it, and a numeric
+   * provider id must NEVER cross this seam into `core/` (D-01/D-02). GitHub's ref is the bare
+   * comment id; Bitbucket packs the PR id with the comment id (e.g. `${prId}:${commentId}`) so a
+   * persisted ref stays fully self-sufficient -- `editPrComment(owner, repo, ref, body)` mirrors
+   * `updateStatusCheck(owner, repo, ref, input)` exactly, with NO separate `prNumber` argument (D-02).
+   *
+   * `editPrComment` returns `null` when the target comment no longer exists -- HTTP 404 OR 410 Gone
+   * (amended D-05, review F3) -- identically on both providers, so a consumer re-posts with a plain
+   * `if (!result)` branch rather than `try/catch`; any other status throws (existing
+   * `GitHubError` / Bitbucket error patterns), and `core/` never inspects a raw HTTP status. Its
+   * success return `{ ref }` mirrors the `findExistingReviewForCommit` nullable-return precedent.
+   *
+   * `listPrComments` author is `{ id, login }`: `id` is the IMMUTABLE provider id (GitHub numeric
+   * user id as a string / Bitbucket `account_id`) used for authorization and bot self-filter
+   * (NREG-02, Phase 11); `login` is the renameable `@mention` handle (GitHub `login` / Bitbucket
+   * `nickname`) (D-03). `author.id` is ALWAYS non-empty -- a comment missing an immutable id is
+   * OMITTED from the result rather than surfaced as `''` (review F5), so a consumer can trust it as
+   * a self-filter key. The result is a SINGLE oldest-first page (GitHub `per_page=100` / Bitbucket
+   * `pagelen=100`); a consumer needing the most-recent comments MUST sort newest-first or paginate
+   * (cap + ordering caveat -- review F7).
+   */
+  createPrComment(owner: string, repo: string, prNumber: number, body: string): Promise<{ ref: string }>;
+  editPrComment(owner: string, repo: string, ref: string, body: string): Promise<{ ref: string } | null>;
+  listPrComments(owner: string, repo: string, prNumber: number): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>>;
+
+  /**
+   * Resolve an actor's effective permission on a repo for command authorization (CMD-08, D-06/D-07).
+   *
+   * `authorId` is the IMMUTABLE provider id (GitHub numeric user id as a string / Bitbucket
+   * `account_id`) — authorization is ALWAYS decided on `authorId`, NEVER on a renameable username
+   * (NREG-02). `authorLogin` is OPTIONAL and used ONLY to form the provider URL where the endpoint
+   * needs a username in the path (GitHub `GET .../collaborators/{login}/permission`); the response's
+   * immutable id is then re-verified against `authorId`.
+   *
+   * Returns the mapped union on success, or `null` on ANY resolution failure (403/404/network, a
+   * login/id mismatch, or — on Bitbucket — the frequent case where a repository access token cannot
+   * query permissions at all, A1). A `null` return means "could not resolve" so the caller fails
+   * CLOSED: only a resolved 'admin'/'write' authorizes a state-changing command; 'read'/'none'/null
+   * are unauthorized and silently ignored (D-07).
+   *
+   * NOTE (Bitbucket, A1): on Bitbucket this is a BEST-EFFORT diagnostic only — the AUTHORITATIVE
+   * Bitbucket authorization is the per-repo allow-list of immutable account_ids evaluated in Plan 03
+   * `authorizeActor` (config.review.interactive.commands.bitbucket_allowed_account_ids). A Bitbucket
+   * `null` here means "defer to the allow-list", not "deny"; membership is NEVER mapped to 'write'.
+   */
+  getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null>;
+
+  /**
+   * Resolve the bot's OWN immutable identity for the comment self-filter (Phase 11, CMD-07). Returns
+   * the bot's immutable provider account id (GitHub bot-user numeric id as a string / Bitbucket
+   * `account_id`) plus its optional login.
+   *
+   * Surfaced on the seam so the webhook-ingest dispatch layer (Plan 06) can build a
+   * `BotIdentityResolver` from the already-constructed provider WITHOUT reaching into the private
+   * underlying client — mirroring how `getUserRepoPermission` was exposed through the adapter. The
+   * resolved id is the load-bearing echo-loop defense key (classifyComment self-filters on it before
+   * any parse, D-03).
+   */
+  resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }>;
 
   labels?: {
     ensure(owner: string, repo: string, name: string, color: string): Promise<void>;

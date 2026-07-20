@@ -56,9 +56,42 @@ export const pullRequestUpdatedPayloadSchema = bitbucketPullRequestWebhookBaseSc
   eventName: z.literal('pullrequest:updated'),
 }).passthrough();
 
+// Phase 11 (D-12): the `pullrequest:comment_created` webhook variant. A reply left under an inline
+// review finding carries `comment.parent.id` (the finding's comment id) — the same reply-under-finding
+// linkage GitHub derives from `in_reply_to_id` — so a `reject` reaches the same parentRef/findingRef
+// capture. `z.looseObject` on the comment sub-objects mirrors the inbound-webhook convention above
+// (preserve documented provider fields Codra does not consume); `.passthrough()` on the payload keeps
+// undocumented top-level fields. `parent` and `inline` are optional so a top-level comment (no parent,
+// not inline) still parses (CMD-06 edge). Every field addition is additive — the existing created/
+// updated variants are untouched (NREG-01).
+const bitbucketCommentUserSchema = z.looseObject({
+  account_id: z.string().min(1),
+  nickname: z.string().optional(),
+});
+
+const bitbucketCommentInlineSchema = z.looseObject({
+  path: z.string(),
+  from: z.number().optional(),
+  to: z.number().optional(),
+});
+
+const bitbucketWebhookCommentSchema = z.looseObject({
+  id: z.number().int().positive(),
+  content: z.looseObject({ raw: z.string() }),
+  user: bitbucketCommentUserSchema,
+  parent: z.looseObject({ id: z.number().int().positive() }).optional(),
+  inline: bitbucketCommentInlineSchema.optional(),
+});
+
+export const pullRequestCommentCreatedPayloadSchema = bitbucketPullRequestWebhookBaseSchema.extend({
+  eventName: z.literal('pullrequest:comment_created'),
+  comment: bitbucketWebhookCommentSchema,
+}).passthrough();
+
 export const pullRequestWebhookPayloadSchema = z.discriminatedUnion('eventName', [
   pullRequestCreatedPayloadSchema,
   pullRequestUpdatedPayloadSchema,
+  pullRequestCommentCreatedPayloadSchema,
 ]);
 
 const commentContentSchema = z.object({
@@ -116,6 +149,7 @@ export const commitBuildStatusSchema = z.object({
 export type BitbucketPullRequestWebhookBase = z.infer<typeof bitbucketPullRequestWebhookBaseSchema>;
 export type PullRequestCreatedPayload = z.infer<typeof pullRequestCreatedPayloadSchema>;
 export type PullRequestUpdatedPayload = z.infer<typeof pullRequestUpdatedPayloadSchema>;
+export type PullRequestCommentCreatedPayload = z.infer<typeof pullRequestCommentCreatedPayloadSchema>;
 export type PullRequestWebhookPayload = z.infer<typeof pullRequestWebhookPayloadSchema>;
 export type PrComment = z.infer<typeof prCommentSchema>;
 export type CodeInsightsReport = z.infer<typeof codeInsightsReportSchema>;

@@ -78,6 +78,7 @@ OpenCodra listens to GitHub and Bitbucket pull request events, runs AI-powered r
 
 Setup and operations notes live in this repository:
 
+- [Webhook subscriptions for bot commands and PR Q&A](docs/webhook-subscriptions.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 

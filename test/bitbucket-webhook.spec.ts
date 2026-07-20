@@ -530,6 +530,193 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     const ingestInput = ingestSpy.mock.calls[0][1];
     expect(ingestInput.provider).toBe('bitbucket');
   });
+
+  // --- Phase 11 (Task 1): pullrequest:comment_created → CommentContext → shared seam ------------
+  //
+  // The route projects the provider payload into a provider-agnostic CommentContext keyed on the
+  // IMMUTABLE account_id, with a finding ref encoded as the opaque `${prId}:${parentId}` convention
+  // (matching BitbucketAdapter.createPrComment). Self-filter / classify / authorize / dispatch all
+  // happen inside the seam (mocked here) — the route only parses and hands off.
+
+  function buildCommentPayload(overrides: {
+    workspace: string;
+    repoSlug: string;
+    prId?: number;
+    prDescription?: string | null;
+    comment: {
+      id: number;
+      raw: string;
+      accountId: string;
+      nickname?: string;
+      parentId?: number;
+    };
+  }) {
+    const prId = overrides.prId ?? 202;
+    return {
+      repository: {
+        full_name: `${overrides.workspace}/${overrides.repoSlug}`,
+        name: overrides.repoSlug,
+        workspace: { slug: overrides.workspace },
+        uuid: '{u-comment}',
+      },
+      pullrequest: {
+        id: prId,
+        title: 'PR with a comment',
+        state: 'OPEN',
+        description: overrides.prDescription ?? 'PR description body',
+        source: { branch: { name: 'feature' }, commit: { hash: sha('a') } },
+        destination: { branch: { name: 'main' }, commit: { hash: sha('b') } },
+      },
+      comment: {
+        id: overrides.comment.id,
+        content: { raw: overrides.comment.raw },
+        user: {
+          account_id: overrides.comment.accountId,
+          nickname: overrides.comment.nickname ?? 'commenter',
+        },
+        ...(overrides.comment.parentId !== undefined
+          ? { parent: { id: overrides.comment.parentId } }
+          : {}),
+      },
+      actor: { username: 'bb-dev' },
+    };
+  }
+
+  // 11. A signed pullrequest:comment_created builds a CommentContext keyed on account_id with a
+  //     ${prId}:${parentId} finding ref (opaque convention), passes prBody = description, and calls
+  //     ingest with provider:'bitbucket' + reviewRequest:null. The bot-self-filter / classify happen
+  //     in the seam (mocked), so the route always hands off for a comment event.
+  it('projects pullrequest:comment_created into a CommentContext with ${prId}:${parentId} finding ref', async () => {
+    const workspace = `ws-bb-cc-${Date.now()}`;
+    const repoSlug = `repo-bb-cc-${Date.now()}`;
+    await seedRepository(workspace, repoSlug);
+    await seedCredential(workspace, repoSlug);
+
+    const payload = buildCommentPayload({
+      workspace,
+      repoSlug,
+      prId: 202,
+      prDescription: 'Please review this PR',
+      comment: { id: 555, raw: '@codra-app reject not a real bug', accountId: 'acct-human-1', nickname: 'human', parentId: 900 },
+    });
+    const body = JSON.stringify(payload);
+    const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
+
+    const response = await postWebhook(body, {
+      'x-event-key': 'pullrequest:comment_created',
+      'x-request-uuid': 'delivery-cc-1',
+    }, signature);
+
+    expect([200, 202]).toContain(response.status);
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const ingestInput = ingestSpy.mock.calls[0][1];
+    expect(ingestInput.provider).toBe('bitbucket');
+    expect(ingestInput.reviewRequest).toBeNull();
+    expect(ingestInput.prBody).toBe('Please review this PR');
+
+    const ctx = ingestInput.commentContext;
+    expect(ctx).toBeDefined();
+    // Keyed on the IMMUTABLE account_id, never the nickname (NREG-02).
+    expect(ctx.authorId).toBe('acct-human-1');
+    expect(ctx.authorLogin).toBe('human');
+    expect(ctx.body).toBe('@codra-app reject not a real bug');
+    expect(ctx.prNumber).toBe(202);
+    expect(ctx.commentRef).toBe('202:555');
+    // Opaque `${prId}:${parentId}` ref (NOT bare String(parentId)), matching bitbucket.ts:339.
+    expect(ctx.parentRef).toBe('202:900');
+    expect(ctx.findingRef).toBe('202:900');
+    expect(ctx.workspace).toBe(workspace);
+    expect(ctx.repo).toBe(repoSlug);
+  });
+
+  // 12. A top-level comment (no parent) yields an UNDEFINED finding ref (nothing to dismiss).
+  it('leaves the finding ref undefined for a top-level comment (no parent)', async () => {
+    const workspace = `ws-bb-cc2-${Date.now()}`;
+    const repoSlug = `repo-bb-cc2-${Date.now()}`;
+    await seedRepository(workspace, repoSlug);
+    await seedCredential(workspace, repoSlug);
+
+    const payload = buildCommentPayload({
+      workspace,
+      repoSlug,
+      prId: 303,
+      comment: { id: 777, raw: '@codra-app review', accountId: 'acct-human-2' },
+    });
+    const body = JSON.stringify(payload);
+    const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
+
+    const response = await postWebhook(body, {
+      'x-event-key': 'pullrequest:comment_created',
+      'x-request-uuid': 'delivery-cc-2',
+    }, signature);
+
+    expect([200, 202]).toContain(response.status);
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const ctx = ingestSpy.mock.calls[0][1].commentContext;
+    expect(ctx.commentRef).toBe('303:777');
+    expect(ctx.parentRef).toBeUndefined();
+    expect(ctx.findingRef).toBeUndefined();
+  });
+
+  // 13. The AUTO created branch forwards prBody = pullrequest.description for the CMD-06 ignore gate.
+  it('forwards prBody = pullrequest.description on the created auto event (CMD-06 ignore gate)', async () => {
+    const workspace = `ws-bb-cc3-${Date.now()}`;
+    const repoSlug = `repo-bb-cc3-${Date.now()}`;
+    await seedRepository(workspace, repoSlug);
+    await seedCredential(workspace, repoSlug);
+
+    const payload = {
+      ...buildPayload({
+        repository: { full_name: `${workspace}/${repoSlug}`, name: repoSlug, workspace: { slug: workspace }, uuid: '{u-cc3}' },
+      }),
+      pullrequest: {
+        id: 404,
+        title: 'auto PR',
+        state: 'OPEN',
+        description: '@codra-app ignore this PR',
+        source: { branch: { name: 'feature' }, commit: { hash: sha('c') } },
+        destination: { branch: { name: 'main' }, commit: { hash: sha('d') } },
+      },
+    };
+    const body = JSON.stringify(payload);
+    const signature = await signWebhookPayload(WEBHOOK_SECRET_PLAINTEXT, body);
+
+    const response = await postWebhook(body, {
+      'x-event-key': 'pullrequest:created',
+      'x-request-uuid': 'delivery-cc-3',
+    }, signature);
+
+    expect([200, 202]).toContain(response.status);
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    const ingestInput = ingestSpy.mock.calls[0][1];
+    expect(ingestInput.prBody).toBe('@codra-app ignore this PR');
+    // AUTO event still threads a concrete reviewRequest (not a comment).
+    expect(ingestInput.reviewRequest).not.toBeNull();
+    expect(ingestInput.commentContext).toBeUndefined();
+  });
+
+  // 14. An unsigned pullrequest:comment_created is 401 — no new bypass of signature verification.
+  it('returns 401 for an unsigned pullrequest:comment_created (no HMAC bypass, CMD-07 edge)', async () => {
+    const workspace = `ws-bb-cc4-${Date.now()}`;
+    const repoSlug = `repo-bb-cc4-${Date.now()}`;
+    await seedRepository(workspace, repoSlug);
+    await seedCredential(workspace, repoSlug);
+
+    const payload = buildCommentPayload({
+      workspace,
+      repoSlug,
+      comment: { id: 888, raw: '@codra-app pause', accountId: 'acct-human-3' },
+    });
+    const body = JSON.stringify(payload);
+
+    const response = await postWebhook(body, {
+      'x-event-key': 'pullrequest:comment_created',
+      'x-request-uuid': 'delivery-cc-4',
+    });
+
+    expect(response.status).toBe(401);
+    expect(ingestSpy).not.toHaveBeenCalled();
+  });
 });
 
 // Tiny indirection so the afterEach can hoist its dependencies separately. The function-form

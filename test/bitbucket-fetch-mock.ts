@@ -29,6 +29,14 @@ export type BitbucketFetchMockOptions = {
   responseSequence?: Array<BitbucketMockResponse | Response | ResponseFactory>;
 };
 
+// Concrete author fixtures for the comment-primitive specs (review F6). Three DISTINCT string
+// values so a test can prove author.id maps from account_id and NOT the nickname/display_name
+// (NREG-02). BITBUCKET_FIXTURE_EDIT_COMMENT_ID is the id the default PUT edit route echoes back.
+export const BITBUCKET_FIXTURE_ACCOUNT_ID = '557058:alice-account-id';
+export const BITBUCKET_FIXTURE_NICKNAME = 'alice';
+export const BITBUCKET_FIXTURE_DISPLAY_NAME = 'Alice Example';
+export const BITBUCKET_FIXTURE_EDIT_COMMENT_ID = 8;
+
 const defaultPullRequest = {
   id: 42,
   title: 'Add Bitbucket support',
@@ -117,11 +125,31 @@ export function installBitbucketFetchMock(options: BitbucketFetchMockOptions = {
     }
     if (method === 'GET' && /\/pullrequests\/\d+\/comments$/.test(url.pathname)) {
       return toResponse(options.listPullRequestCommentsResponse ?? {
-        body: { values: [{ id: 7, content: { raw: 'Existing comment' } }] },
+        // Additive `user` object so the comment-primitive specs can assert author.id comes from
+        // account_id (never a username field — Bitbucket comment authors have none). The existing
+        // id (7) and content are untouched so the client mapping stays byte-compatible until Task 2.
+        body: {
+          values: [
+            {
+              id: 7,
+              content: { raw: 'Existing comment' },
+              user: {
+                account_id: BITBUCKET_FIXTURE_ACCOUNT_ID,
+                nickname: BITBUCKET_FIXTURE_NICKNAME,
+                display_name: BITBUCKET_FIXTURE_DISPLAY_NAME,
+              },
+            },
+          ],
+        },
       });
     }
     if (method === 'POST' && /\/pullrequests\/\d+\/comments$/.test(url.pathname)) {
       return toResponse(postPullRequestCommentResponses.shift() ?? { status: 201, body: { id: 8 } });
+    }
+    // Comment-edit PUT (net-new client method in Task 2). Default echoes the edited comment id;
+    // a spec scripts 404/410 (gone -> null) or a non-gone 403/422 (must throw) via responseSequence.
+    if (method === 'PUT' && /\/pullrequests\/\d+\/comments\/\d+$/.test(url.pathname)) {
+      return toResponse({ status: 200, body: { id: BITBUCKET_FIXTURE_EDIT_COMMENT_ID } });
     }
     if (method === 'POST' && /\/pullrequests\/\d+\/approve$/.test(url.pathname)) {
       return toResponse(options.approvePullRequestResponse ?? { status: 200, body: {} });

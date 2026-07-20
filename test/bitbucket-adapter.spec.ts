@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BitbucketAdapter } from '@server/vcs/bitbucket';
-import { BitbucketClient } from '@server/core/bitbucket';
+import {
+  BitbucketClient,
+  BitbucketError,
+  createBitbucketBotIdentityResolver,
+} from '@server/core/bitbucket';
 import { parseUnifiedDiff } from '@server/core/diff';
 import { createTestEnv } from './helpers';
-import { installBitbucketFetchMock } from './bitbucket-fetch-mock';
+import {
+  BITBUCKET_FIXTURE_ACCOUNT_ID,
+  BITBUCKET_FIXTURE_DISPLAY_NAME,
+  BITBUCKET_FIXTURE_NICKNAME,
+  expectBitbucketPut,
+  installBitbucketFetchMock,
+} from './bitbucket-fetch-mock';
 import type { VcsSubmitReviewInput } from '@server/vcs/types';
 
 const WORKSPACE = 'acme';
@@ -436,5 +446,194 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
       content: { raw: 'addedB note' },
       inline: { path: 'src/foo.ts', to: 7 },
     });
+  });
+
+  it('createPrComment posts a content-only comment and returns { ref: "<prNumber>:<commentId>" }', async () => {
+    const mock = installBitbucketFetchMock({
+      postPullRequestCommentResponses: [{ status: 201, body: { id: 8 } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.createPrComment(WORKSPACE, REPO, PR_NUMBER, 'Standalone note');
+    expect(result).toEqual({ ref: `${PR_NUMBER}:8` });
+
+    const post = mock.calls.find(
+      (call) => call.method === 'POST' && call.path.endsWith(`/pullrequests/${PR_NUMBER}/comments`),
+    );
+    expect(post?.body).toEqual({ content: { raw: 'Standalone note' } });
+  });
+
+  it('editPrComment parses the ref, PUTs { content: { raw } }, and returns the same ref', async () => {
+    const mock = installBitbucketFetchMock();
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.editPrComment(WORKSPACE, REPO, `${PR_NUMBER}:8`, 'Edited note');
+    expect(result).toEqual({ ref: `${PR_NUMBER}:8` });
+
+    expectBitbucketPut(mock.calls[0], `/2.0/repositories/${WORKSPACE}/${REPO}/pullrequests/${PR_NUMBER}/comments/8`);
+    expect(mock.calls[0].body).toEqual({ content: { raw: 'Edited note' } });
+  });
+
+  it('editPrComment returns null when the comment is gone (404)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 404, body: { error: { message: 'Not found' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    await expect(adapter.editPrComment(WORKSPACE, REPO, `${PR_NUMBER}:8`, 'Edited note')).resolves.toBeNull();
+  });
+
+  it('editPrComment returns null when the comment is gone (410)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 410, body: { error: { message: 'Gone' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    await expect(adapter.editPrComment(WORKSPACE, REPO, `${PR_NUMBER}:8`, 'Edited note')).resolves.toBeNull();
+  });
+
+  it('editPrComment throws BitbucketError on a non-gone status (403)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 403, body: { error: { message: 'Forbidden' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const request = adapter.editPrComment(WORKSPACE, REPO, `${PR_NUMBER}:8`, 'Edited note');
+    await expect(request).rejects.toBeInstanceOf(BitbucketError);
+    await expect(request).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('editPrComment rejects malformed refs before any request', async () => {
+    const mock = installBitbucketFetchMock();
+    const { adapter } = buildAdapter();
+
+    const malformed = ['42:', '42:8:extra', '4.2:8', '42:8x', 'abc:8', '', '0:8', '42:0'];
+    for (const ref of malformed) {
+      await expect(adapter.editPrComment(WORKSPACE, REPO, ref, 'Edited note')).rejects.toThrow(/Invalid Bitbucket comment ref/);
+    }
+    // No HTTP request was issued for any malformed ref (rejected pre-request, review F4).
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  it('listPrComments maps author.id from the immutable account_id, never the nickname/display_name', async () => {
+    installBitbucketFetchMock();
+    const { adapter } = buildAdapter();
+
+    const comments = await adapter.listPrComments(WORKSPACE, REPO, PR_NUMBER);
+    expect(comments).toEqual([
+      {
+        ref: `${PR_NUMBER}:7`,
+        body: 'Existing comment',
+        author: { id: BITBUCKET_FIXTURE_ACCOUNT_ID, login: BITBUCKET_FIXTURE_NICKNAME },
+      },
+    ]);
+    // author.id is the account_id, NOT the renameable handle.
+    expect(comments[0].author.id).not.toBe(BITBUCKET_FIXTURE_NICKNAME);
+    expect(comments[0].author.id).not.toBe(BITBUCKET_FIXTURE_DISPLAY_NAME);
+  });
+
+  it('getUserRepoPermission maps the effective permission on 200, keyed strictly on account_id', async () => {
+    const mock = installBitbucketFetchMock({
+      responseSequence: [
+        {
+          status: 200,
+          body: {
+            values: [
+              { permission: 'write', user: { account_id: BITBUCKET_FIXTURE_ACCOUNT_ID } },
+            ],
+          },
+        },
+      ],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    expect(result).toBe('write');
+    // The read keys on the immutable account_id in the query, never the nickname.
+    expect(mock.calls[0].path).toContain('/permissions/repositories/');
+    expect(mock.calls[0].path).toContain(encodeURIComponent(`user.account_id="${BITBUCKET_FIXTURE_ACCOUNT_ID}"`));
+  });
+
+  it('getUserRepoPermission returns null on a 403 (repository access tokens cannot query permissions — A1, no membership fallback)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 403, body: { error: { message: 'Forbidden' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    // NEVER maps membership → write; a 403 fails closed to null (defer to the allow-list).
+    expect(result).toBeNull();
+  });
+
+  it('getUserRepoPermission returns null when the account_id is not in the results (non-member)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 200, body: { values: [] } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID, BITBUCKET_FIXTURE_NICKNAME);
+    expect(result).toBeNull();
+  });
+
+  it('getUserRepoPermission returns null on a 404 (fail-closed)', async () => {
+    installBitbucketFetchMock({
+      responseSequence: [{ status: 404, body: { error: { message: 'Not found' } } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.getUserRepoPermission(WORKSPACE, REPO, BITBUCKET_FIXTURE_ACCOUNT_ID);
+    expect(result).toBeNull();
+  });
+
+  it('createBitbucketBotIdentityResolver resolves the immutable account_id via GET /2.0/user', async () => {
+    const mock = installBitbucketFetchMock({
+      responseSequence: [
+        {
+          status: 200,
+          body: {
+            account_id: BITBUCKET_FIXTURE_ACCOUNT_ID,
+            nickname: BITBUCKET_FIXTURE_NICKNAME,
+            display_name: BITBUCKET_FIXTURE_DISPLAY_NAME,
+          },
+        },
+      ],
+    });
+    const { client } = buildAdapter();
+    const resolver = createBitbucketBotIdentityResolver(client);
+
+    const identity = await resolver.resolveIdentity();
+    expect(identity.accountId).toBe(BITBUCKET_FIXTURE_ACCOUNT_ID);
+    expect(identity.accountId).not.toBe('');
+    // login is the renameable nickname, never the immutable account_id.
+    expect(identity.login).toBe(BITBUCKET_FIXTURE_NICKNAME);
+    expect(mock.calls[0].path).toBe('/2.0/user');
+  });
+
+  it('listPrComments OMITS a comment with a missing account_id (never surfaces author.id "")', async () => {
+    installBitbucketFetchMock({
+      listPullRequestCommentsResponse: {
+        body: {
+          values: [
+            {
+              id: 7,
+              content: { raw: 'authored comment' },
+              user: {
+                account_id: BITBUCKET_FIXTURE_ACCOUNT_ID,
+                nickname: BITBUCKET_FIXTURE_NICKNAME,
+                display_name: BITBUCKET_FIXTURE_DISPLAY_NAME,
+              },
+            },
+            // A user-less comment (e.g. a deleted/anonymized author): no immutable id -> OMITTED.
+            { id: 8, content: { raw: 'author-less comment' } },
+          ],
+        },
+      },
+    });
+    const { adapter } = buildAdapter();
+
+    const comments = await adapter.listPrComments(WORKSPACE, REPO, PR_NUMBER);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].ref).toBe(`${PR_NUMBER}:7`);
+    expect(comments.every((c) => c.author.id !== '')).toBe(true);
   });
 });

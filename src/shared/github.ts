@@ -1,4 +1,4 @@
-export const supportedGitHubWebhookEvents = ['pull_request', 'issue_comment'] as const;
+export const supportedGitHubWebhookEvents = ['pull_request', 'issue_comment', 'pull_request_review_comment'] as const;
 
 export type GitHubWebhookEventName = typeof supportedGitHubWebhookEvents[number];
 
@@ -37,9 +37,46 @@ export type IssueCommentWebhookPayload = {
       url: string;
     };
   };
+  // Phase 11 (D-12, Pitfall 5): additively widened from `{ body }` to carry the immutable comment id
+  // and the author's IMMUTABLE numeric id + login, so command classification can self-filter the
+  // bot's own comments on the immutable id (NREG-02) and key authorization off it — never the mutable
+  // login. `in_reply_to_id` is present on issue-comment replies; kept optional so a top-level comment
+  // (no parent) still parses. Existing `pull_request` parsing is untouched.
   comment: {
+    id: number;
     body: string;
+    user: { id: number; login: string };
+    in_reply_to_id?: number;
   };
 };
 
-export type GitHubWebhookPayload = PullRequestWebhookPayload | IssueCommentWebhookPayload;
+// Phase 11 (D-09, OQ2 RESOLVED): a reply left UNDER an inline review finding arrives as a
+// `pull_request_review_comment` event (not `issue_comment`). Modeling it additively — with the same
+// immutable author id + `in_reply_to_id` linkage Bitbucket derives from `comment.parent.id` — gives
+// GitHub reply-under-finding `reject` full parity with Bitbucket. `path` is the file the inline
+// comment hangs on. All feature wiring (route + parity tests) lands in Plan 07; this is the inert
+// contract shape. With the feature disabled a delivery parses but produces no job / no side effect
+// (NREG-01).
+export type PullRequestReviewCommentWebhookPayload = {
+  action: 'created';
+  installation?: { id: number };
+  repository: {
+    owner: { login: string };
+    name: string;
+  };
+  pull_request: {
+    number: number;
+  };
+  comment: {
+    id: number;
+    body: string;
+    user: { id: number; login: string };
+    in_reply_to_id?: number;
+    path?: string;
+  };
+};
+
+export type GitHubWebhookPayload =
+  | PullRequestWebhookPayload
+  | IssueCommentWebhookPayload
+  | PullRequestReviewCommentWebhookPayload;

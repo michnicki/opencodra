@@ -64,8 +64,8 @@ export function buildFileReviewPrompts(input: {
     : 'Language: Generic\nSpecific Guidelines: Follow general best practices.';
 
   const userPrompt = [
-    `PR title: ${input.prTitle ?? 'Untitled PR'}`,
-    `File path: ${input.file.path}`,
+    `PR title: ${sanitizeUntrusted(input.prTitle ?? 'Untitled PR')}`,
+    `File path: ${sanitizeUntrusted(input.file.path)}`,
     languageGuidelines,
     // Custom rules and the diff are UNTRUSTED input. They are fenced with explicit
     // BEGIN/END sentinels and an instruction telling the model to treat everything
@@ -88,7 +88,7 @@ export function buildFileReviewPrompts(input: {
       "priority": <0|1|2|3>,
       "confidence_score": <float 0.0-1.0>,
       "code_location": {
-        "absolute_file_path": "${input.file.path}",
+        "absolute_file_path": "${sanitizeUntrusted(input.file.path)}",
         "line": <int>,
         "line_range": {"start": <int>, "end": <int>}
       },
@@ -116,22 +116,29 @@ export function buildFileReviewPrompts(input: {
 // Sentinel markers wrapping untrusted, model-facing input. Kept distinct from the
 // ```diff fence so that even if a model ignores Markdown fences it still sees an
 // explicit data boundary it was told not to cross.
-const UNTRUSTED_DIFF_BEGIN = '<<<BEGIN UNTRUSTED DIFF — DATA ONLY>>>';
-const UNTRUSTED_DIFF_END = '<<<END UNTRUSTED DIFF>>>';
+// EXPORTED (with sanitizeUntrusted / renderFileDiff below) so the security-review
+// prompt reuses the SAME hardened fencing — one source of truth, never forked.
+export const UNTRUSTED_DIFF_BEGIN = '<<<BEGIN UNTRUSTED DIFF — DATA ONLY>>>';
+export const UNTRUSTED_DIFF_END = '<<<END UNTRUSTED DIFF>>>';
 const UNTRUSTED_RULES_BEGIN = '<<<BEGIN UNTRUSTED CUSTOM RULES — DATA ONLY>>>';
 const UNTRUSTED_RULES_END = '<<<END UNTRUSTED CUSTOM RULES>>>';
 
 // Neutralize untrusted text before it is fenced into the prompt: strip control
-// characters (which can smuggle escape/terminal sequences) and break any backtick
-// run by inserting a zero-width space, so diff/rule content can never close the
-// ```diff fence or open a new instruction/code block (prompt-injection hardening).
-function sanitizeUntrusted(text: string): string {
+// characters (which can smuggle escape/terminal sequences), break any backtick run
+// by inserting a zero-width space (so content can never close the ```diff fence or
+// open a new instruction/code block), AND break any triple-angle-bracket run
+// (`<<<` / `>>>`) with a zero-width space so untrusted content can never reproduce
+// the BEGIN/END data-boundary sentinels the fence actually relies on (WR-02 parity
+// with walkthrough-diagram.ts; prompt-injection hardening, Group D-1).
+// EXPORTED so the security-review prompt imports this exact hardened helper.
+export function sanitizeUntrusted(text: string): string {
   return text
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    .replace(/`/g, '`\u200B');
+    .replace(/`/g, '`\u200B')
+    .replace(/<<<|>>>/g, (m) => m.split('').join('\u200B'));
 }
 
-function renderFileDiff(file: FileDiff) {
+export function renderFileDiff(file: FileDiff) {
   const lines = [`diff --git a/${sanitizeUntrusted(file.previousPath ?? file.path)} b/${sanitizeUntrusted(file.path)}`];
   for (const hunk of file.hunks) {
     lines.push(sanitizeUntrusted(hunk.header));

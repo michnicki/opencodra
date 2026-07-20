@@ -80,8 +80,39 @@ function bitbucketReviewFooter(commitSha: string): string {
   return `${BITBUCKET_REVIEW_MARKER} · reviewed commit \`${commitSha.slice(0, BITBUCKET_MARKER_SHA_LENGTH)}\``;
 }
 
+/**
+ * Parse the self-encoding `prId:commentId` comment ref (D-02) back into its two numeric parts.
+ *
+ * STRICTER than `updateStatusCheck`'s `Number.isFinite` guard (review F4): accepts ONLY exactly two
+ * colon-separated CANONICAL POSITIVE SAFE INTEGERS. `Number.isFinite(Number(part))` alone is too
+ * weak — it would accept `'42:8:extra'` (split loses the tail), `'42:'`, decimals (`'4.2'`),
+ * exponent (`'4e1'`), negatives, zero, and leading zeros. Centralizing validation here means both
+ * `editPrComment` (and any future consumer) reject a malformed ref BEFORE any HTTP request.
+ */
+function parsePrCommentRef(ref: string): { prId: number; commentId: number } {
+  const parts = ref.split(':');
+  if (parts.length !== 2) {
+    throw new Error(`Invalid Bitbucket comment ref: expected exactly "prId:commentId", got "${ref}"`);
+  }
+  const [prPart, commentPart] = parts;
+  // /^[1-9][0-9]*$/ rejects '', leading zeros, sign, decimal, exponent, and whitespace.
+  const canonical = /^[1-9][0-9]*$/;
+  if (!canonical.test(prPart) || !canonical.test(commentPart)) {
+    throw new Error(`Invalid Bitbucket comment ref: both segments must be canonical positive integers, got "${ref}"`);
+  }
+  const prId = Number(prPart);
+  const commentId = Number(commentPart);
+  if (!Number.isSafeInteger(prId) || !Number.isSafeInteger(commentId)) {
+    throw new Error(`Invalid Bitbucket comment ref: segments exceed the safe integer range, got "${ref}"`);
+  }
+  return { prId, commentId };
+}
+
 export class BitbucketAdapter implements VcsProvider {
   readonly name = 'bitbucket' as const;
+  // Bitbucket Cloud does not render Mermaid diagrams in PR markdown, so the walkthrough formatter
+  // MUST NOT emit one for Bitbucket PRs (D-09). Required member on VcsProvider; inert this phase.
+  readonly capabilities = { supportsMermaid: false } as const;
   // Bitbucket Cloud has no native PR-labels feature (Pattern 2). The interface marks `labels`
   // optional; this adapter intentionally does NOT assign the property so callers must feature-
   // detect `if (vcs.labels)` (mirrors `GithubAdapter` which DOES assign it).
@@ -285,6 +316,88 @@ export class BitbucketAdapter implements VcsProvider {
     );
     void owner;
     return matched ? { ref: String(matched.id) } : null;
+  }
+
+  /**
+   * Standalone (issue/PR-level) comment primitives (D-01/D-02). Inert this phase — no consumer
+   * (D-06). The ref is self-encoding `prId:commentId` so a persisted ref (Phase 9's
+   * `walkthrough_comment_ref`) is editable with nothing else, mirroring `updateStatusCheck`'s
+   * opaque ref. `owner` is ignored — Bitbucket's workspace is canonical (this.job.repositoryWorkspace).
+   */
+  async createPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+  ): Promise<{ ref: string }> {
+    // Reuse the content-only post branch (no inline object) — the same path submitReview uses for
+    // its combined marker+summary. No dedup scan of listPrComments (thin primitive, D-04).
+    const posted = await this.client.postPullRequestComment(this.job.repositoryWorkspace, repo, prNumber, {
+      content: { raw: body },
+    });
+    void owner;
+    return { ref: `${prNumber}:${posted.id}` };
+  }
+
+  async editPrComment(
+    owner: string,
+    repo: string,
+    ref: string,
+    body: string,
+  ): Promise<{ ref: string } | null> {
+    // parsePrCommentRef throws on a malformed ref BEFORE any request (review F4). The self-encoding
+    // ref carries the PR id, so editPrComment needs no prNumber argument (D-02).
+    const { prId, commentId } = parsePrCommentRef(ref);
+    const result = await this.client.editPullRequestComment(this.job.repositoryWorkspace, repo, prId, commentId, body);
+    void owner;
+    // null (from a 404 OR 410 — amended D-05) flows straight through; on success echo the same ref.
+    return result ? { ref } : null;
+  }
+
+  async listPrComments(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>> {
+    const items = await this.client.listPullRequestComments(this.job.repositoryWorkspace, repo, prNumber, 100);
+    void owner;
+    const results: Array<{ ref: string; body: string; author: { id: string; login: string } }> = [];
+    for (const item of items) {
+      const id = item.author?.id;
+      // OMIT a comment lacking an immutable account_id (review F5) — never surface author.id ''.
+      // A false empty id would defeat the Phase 11 self-filter that keys on author.id (NREG-02).
+      if (id === undefined || id === '') continue;
+      results.push({
+        ref: `${prNumber}:${item.id}`,
+        body: item.body,
+        author: { id, login: item.author.login },
+      });
+    }
+    return results;
+  }
+
+  async getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    _authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null> {
+    // On Bitbucket the AUTHORITATIVE authorization is the per-repo allow-list of immutable
+    // account_ids evaluated in Plan 03 authorizeActor
+    // (config.review.interactive.commands.bitbucket_allowed_account_ids). This read is a BEST-EFFORT
+    // enhancement (A1): repository access tokens cannot query the permission endpoint, so it
+    // frequently 403s → null. A null return means "defer to the allow-list", NOT "deny". It keys
+    // STRICTLY on the immutable account_id (NREG-02) — the paired login is irrelevant here — and it
+    // NEVER maps workspace membership to 'write' (membership ≠ write access).
+    void _authorLogin;
+    void owner; // Bitbucket's workspace is canonical (this.job.repositoryWorkspace), not owner.
+    return this.client.getUserRepoPermission(this.job.repositoryWorkspace, repo, authorId);
+  }
+
+  // Phase 11 (CMD-07): resolve the bot's own immutable account_id (GET /2.0/user) so the Plan 06
+  // dispatch layer can build a self-filter resolver from this provider. Delegates to the client.
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    return this.client.resolveBotUserIdentity();
   }
 
   /**

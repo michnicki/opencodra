@@ -1,4 +1,4 @@
-import { fileReviewModelOutputSchema, parsedReviewCommentSchema, summaryModelOutputSchema, type ParsedReviewComment, reviewSeverities } from '@shared/schema';
+import { criticPruneOutputSchema, fileReviewModelOutputSchema, parsedReviewCommentSchema, summaryModelOutputSchema, type ParsedReviewComment, reviewSeverities } from '@shared/schema';
 import { z } from 'zod';
 import { logger } from './logger';
 import { findClosestValidLine, findPositionForLine, getValidNewLines, getValidPositions } from './diff';
@@ -446,6 +446,134 @@ export function parseFileReviewResponse(raw: string, file: FileDiff): {
   };
 }
 
+// Hard cap on the returned Mermaid diagram source (chars). Keeps a hostile/huge model diagram from
+// blowing the walkthrough comment-size budget (the formatter fences it under WALKTHROUGH_BODY_MAX);
+// over-length source is rejected (returns null -> diagram omitted).
+const DIAGRAM_SOURCE_MAX = 20_000;
+
+/**
+ * Best-effort, tolerant parse of a model's Mermaid sequence-diagram output for the walkthrough
+ * (WT-04, D-04a, Pitfall #6). Returns the trimmed RAW diagram source WITHOUT any ```mermaid fence
+ * (the formatter is the sole fence-adder, GitHub-only — see formatWalkthrough's fence contract), or
+ * `null` on empty, `<think>`-only, non-diagram, over-length, or garbage output. NEVER throws and
+ * never uses bare `JSON.parse` — this is the fall-back-to-omit contract the Plan 03 best-effort
+ * diagram call relies on (a null diagram -> the walkthrough simply posts without a diagram).
+ */
+export function parseWalkthroughDiagram(raw: string): string | null {
+  try {
+    if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+
+    // (1) Strip <think>...</think> reasoning block(s). NET-NEW logic: no <think> stripper exists in
+    // src/server today (cleanText only strips leading prefix tags/emoji and flattens newlines). This
+    // is tolerant of a missing close tag — a lone opening <think> with no </think> drops the rest.
+    let text = raw
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<think>[\s\S]*$/i, '');
+
+    // (2) If the model wrapped the diagram in a ```mermaid (or bare ```) fence, take the fence body;
+    // otherwise use the stripped text as-is. Anchor the fence to the START of the stripped text
+    // (^\s*```) so a bare, unfenced diagram that merely CONTAINS a stray ```…``` pair somewhere in
+    // its body is not mistakenly unwrapped to the content between those inner backticks — which would
+    // drop the leading `sequenceDiagram` line and fail (3), discarding an otherwise-usable diagram
+    // (IN-02). Still tolerant: no match -> use the stripped text as-is, never throws.
+    const fenceMatch = text.match(/^\s*```(?:mermaid)?[ \t]*\r?\n?([\s\S]*?)```/i);
+    if (fenceMatch) {
+      text = fenceMatch[1];
+    }
+
+    const source = text.trim();
+    if (source.length === 0) return null;
+
+    // (3) Strict validation: after dropping leading blank / `%%`-comment lines, the FIRST
+    // non-comment token must be `sequenceDiagram` (reject surrounding prose or a mid-paragraph
+    // mention — "contains sequenceDiagram somewhere" is NOT enough).
+    const meaningful = source
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && !line.startsWith('%%'));
+    if (!meaningful) return null;
+    if (meaningful.split(/\s+/)[0] !== 'sequenceDiagram') return null;
+
+    // (4) Hard length cap — reject an over-length diagram outright.
+    if (source.length > DIAGRAM_SOURCE_MAX) return null;
+
+    return source;
+  } catch {
+    // Best-effort: any unexpected failure -> omit the diagram, never fail the walkthrough.
+    return null;
+  }
+}
+
+// The per-item validation target for the critic's prune output (D-05). Reuses the exact item shape
+// declared on criticPruneOutputSchema (id: nonnegative int, reason: string) so validation stays in
+// one place — parseCriticPruneResponse skips malformed entries per-item instead of the schema's
+// all-or-nothing array parse.
+const criticPruneItemSchema = criticPruneOutputSchema.shape.prune.element;
+
+/**
+ * Tolerant parse of the critic's ID-based prune output (D-05). Returns the { id, reason }[] the
+ * critic wants DROPPED — never a keep-list, never full findings (runCriticPhase, 10-06, reconciles
+ * `kept = deduped minus pruned-by-id` in code). Mirrors parseFileReviewResponse's tolerant pattern
+ * (strip <think> tags, extractJson, jsonrepair fallback) and MUST live inside this module because
+ * the extractJson/preprocessJson helpers are private (the critic parser cannot be assembled from
+ * outside — review-verified HIGH). Never throws: unparseable input returns []; malformed prune
+ * entries are skipped per-item, validated against criticPruneOutputSchema's item shape.
+ */
+export function parseCriticPruneResponse(raw: string): { id: number; reason: string }[] {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return [];
+
+  // Strip <think>...</think> reasoning (tolerant of a missing close tag) before extraction, same as
+  // parseWalkthroughDiagram — reasoning text can contain JSON-looking fragments that would confuse
+  // the extractor.
+  const stripped = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/i, '');
+
+  let extracted: string;
+  try {
+    extracted = extractJson(stripped);
+  } catch {
+    return [];
+  }
+
+  let repaired = extracted;
+  try {
+    repaired = jsonrepair(preprocessJson(extracted));
+  } catch {
+    // Fall back to the raw extracted text; the JSON.parse below is the final gate.
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(repaired);
+  } catch {
+    return [];
+  }
+
+  // Accept either a { prune: [...] } object or a bare [...] array of prune items (fail-soft: a model
+  // that emits just the array still parses). An array-of-objects picks the wrapper carrying `prune`.
+  let pruneArray: unknown[];
+  if (Array.isArray(parsedJson)) {
+    const wrapper = parsedJson.find(
+      (i) => i && typeof i === 'object' && Array.isArray((i as Record<string, unknown>).prune),
+    ) as Record<string, unknown> | undefined;
+    pruneArray = wrapper ? (wrapper.prune as unknown[]) : parsedJson;
+  } else if (parsedJson && typeof parsedJson === 'object' && Array.isArray((parsedJson as Record<string, unknown>).prune)) {
+    pruneArray = (parsedJson as Record<string, unknown>).prune as unknown[];
+  } else {
+    return [];
+  }
+
+  const results: { id: number; reason: string }[] = [];
+  for (const item of pruneArray) {
+    const parsed = criticPruneItemSchema.safeParse(item);
+    if (parsed.success) {
+      results.push({ id: parsed.data.id, reason: parsed.data.reason });
+    }
+  }
+  return results;
+}
+
 export function parseSummaryResponse(raw: string): string {
   const extracted = extractJson(raw);
   const preprocessed = preprocessJson(extracted);
@@ -465,5 +593,47 @@ export function parseSummaryResponse(raw: string): string {
     // If it's not valid JSON or doesn't match the schema, return the raw text as a fallback
     // This handles cases where the model might still ignore the JSON constraint
     return raw.trim() || 'Review completed with no summary provided.';
+  }
+}
+
+// The Q&A model envelope (Phase 11, Plan 04). The Q&A path requests a single `{ "answer": string }`
+// object because the provider adapters are JSON-only (OpenAI response_format:json_object, Anthropic
+// pre-fills '{'), so a bare-prose response is not a reliable option — the {answer} envelope is the
+// one shape that works uniformly across every adapter. Accept either the bare object or a
+// single-element array wrapper, mirroring summaryModelOutputSchema's tolerance.
+const answerModelOutputSchema = z.union([
+  z.array(z.object({ answer: z.string().min(1) })),
+  z.object({ answer: z.string().min(1) }),
+]);
+
+/**
+ * Tolerant parse of the Q&A model's `{ "answer": string }` envelope (Plan 11-04). Mirrors
+ * parseSummaryResponse exactly (extractJson -> preprocessJson -> jsonrepair -> JSON.parse ->
+ * schema) and MUST live in this module because the extractJson/preprocessJson helpers are private
+ * here (same rationale as parseCriticPruneResponse — the parser cannot be assembled from outside).
+ * When the model ignores the JSON envelope entirely, fall back to the raw trimmed text so a usable
+ * prose answer is still returned rather than throwing.
+ */
+export function parseAnswerResponse(raw: string): string {
+  const extracted = extractJson(raw);
+  const preprocessed = preprocessJson(extracted);
+
+  let repaired = preprocessed;
+  try {
+    repaired = jsonrepair(preprocessed);
+  } catch (e) {
+    // Fall back to original preprocessed text if repair fails.
+  }
+
+  try {
+    const parsedJson = JSON.parse(repaired);
+    const validated = answerModelOutputSchema.parse(parsedJson);
+    // The array variant permits an empty [], so validated[0] can be undefined at runtime even though
+    // the static type does not surface it — fall back to the raw text (parity with parseSummaryResponse).
+    return Array.isArray(validated) ? (validated[0]?.answer ?? raw.trim()) : validated.answer;
+  } catch (error) {
+    // The model ignored the JSON envelope — return the raw text so the reviewer still gets an
+    // answer rather than an error (the JSON-only adapters make this rare in practice).
+    return raw.trim() || 'I was unable to produce an answer for this question.';
   }
 }

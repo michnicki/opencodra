@@ -23,10 +23,12 @@ describe('ModelService', () => {
     });
 
     const service = new ModelService(env);
-    const response = await (service as any).callModel('@cf/moonshotai/kimi-k2.5', {
-      systemPrompt: 'system',
-      userPrompt: 'user',
-    });
+    // callResolvedModel(resolveModel(id)) is the exact path the (now-removed) private
+    // callModel wrapper took — exercises legacy-id routing through the real dispatch method.
+    const response = await (service as any).callResolvedModel(
+      await (service as any).resolveModel('@cf/moonshotai/kimi-k2.5'),
+      { systemPrompt: 'system', userPrompt: 'user' },
+    );
 
     expect(requestedModel).toBe('@cf/moonshotai/kimi-k2.6');
     expect(response.modelUsed).toBe('@cf/moonshotai/kimi-k2.6');
@@ -537,6 +539,12 @@ describe('ModelService', () => {
               on_file_types: ['.ts'],
               command: 'npm run lint',
             },
+            walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
+            passes: { security: { enabled: false }, critic: { enabled: false } },
+            interactive: {
+              commands: { enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null },
+              qa: { enabled: false, rate_limit_per_hour: 10 },
+            },
           },
           model: {
             main: '@cf/zai-org/glm-4.7-flash',
@@ -734,5 +742,216 @@ describe('ModelService', () => {
     expect(firstPrompt).not.toContain('const value400 = 400;');
     expect(response.reviewedLineCount).toBe(900);
     expect(response.wasPromptTruncated).toBe(false);
+  });
+
+  const criticFindings = [
+    { path: 'src/a.ts', line: 10, severity: 'P1' as const, title: 'SQL injection', body: 'Concatenated query.' },
+    { path: 'src/b.ts', line: 20, severity: 'P3' as const, title: 'Style nit', body: 'Prefer const.' },
+  ];
+
+  it('critiqueFindings returns { rawText, modelUsed, inputTokens, outputTokens } and records tokens on success', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"prune":[{"id":1,"reason":"stylistic nitpick"}]}' }] } }],
+          usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    const service = new ModelService(env, tracker);
+
+    const response = await service.critiqueFindings({
+      findings: criticFindings,
+      prTitle: 'Test PR',
+      config: {
+        ...defaultRepoConfig,
+        model: { main: 'gemma-4-31b-it', fallbacks: [], size_overrides: [] },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(response.rawText).toContain('"prune"');
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+    expect(response.inputTokens).toBe(7);
+    expect(response.outputTokens).toBe(3);
+    expect(tracker.getTotalUsage().input).toBe(7);
+    expect(tracker.getTotalUsage().output).toBe(3);
+  });
+
+  it('critiqueFindings resolves the MAIN model with size overrides DISABLED (never a size-override model)', async () => {
+    // A totalLineCount of 0 would match the FIRST size override (0 <= max_lines) if overrides were
+    // applied; critiqueFindings passes applySizeOverrides:false so the MAIN model is used instead.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"prune":[]}' }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    const response = await service.critiqueFindings({
+      findings: criticFindings,
+      prTitle: 'Test PR',
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: [],
+          // A size override that WOULD win for totalLineCount:0 if overrides were applied.
+          size_overrides: [{ max_lines: 100, model: 'gemma-4-26b-a4b-it', fallbacks: [] }],
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain('gemma-4-26b-a4b-it');
+    expect(response.modelUsed).toBe('gemma-4-31b-it');
+  });
+
+  it('critiqueFindings throws RetryableModelError when every model in the chain fails transiently', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 503, message: 'The model is overloaded and currently unavailable.', status: 'UNAVAILABLE' } }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    await expect(
+      service.critiqueFindings({
+        findings: criticFindings,
+        prTitle: 'Test PR',
+        config: {
+          ...defaultRepoConfig,
+          model: { main: 'gemma-4-31b-it', fallbacks: ['gemma-4-26b-a4b-it'], size_overrides: [] },
+        },
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('answerPrQuestion resolves the MAIN model with size overrides DISABLED and parses the {answer} envelope', async () => {
+    // A totalLineCount of 0 would match the FIRST size override (0 <= max_lines) if overrides were
+    // applied; answerPrQuestion passes applySizeOverrides:false so the MAIN model is used instead.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{"answer":"You changed the auth flow."}' }] } }],
+          usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 4 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    const service = new ModelService(env, tracker);
+
+    const answer = await service.answerPrQuestion({
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          fallbacks: [],
+          // A size override that WOULD win for totalLineCount:0 if overrides were applied.
+          size_overrides: [{ max_lines: 100, model: 'gemma-4-26b-a4b-it', fallbacks: [] }],
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain('gemma-4-26b-a4b-it');
+    expect(answer).toBe('You changed the auth flow.');
+    // Tokens are recorded on the tracker.
+    expect(tracker.getTotalUsage().input).toBe(5);
+    expect(tracker.getTotalUsage().output).toBe(4);
+  });
+
+  it('answerPrQuestion throws RetryableModelError when every model in the chain fails transiently', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        JSON.stringify({ error: { code: 503, message: 'The model is overloaded and currently unavailable.', status: 'UNAVAILABLE' } }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const service = new ModelService(env);
+
+    await expect(
+      service.answerPrQuestion({
+        systemPrompt: 'sys',
+        userPrompt: 'user',
+        config: {
+          ...defaultRepoConfig,
+          model: { main: 'gemma-4-31b-it', fallbacks: ['gemma-4-26b-a4b-it'], size_overrides: [] },
+        },
+      }),
+    ).rejects.toSatisfy(isRetryableModelError);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('generateWalkthroughDiagram issues exactly ONE outbound request (primary only, no fallback fan-out)', async () => {
+    // WT-03 budget invariant (cross-AI MEDIUM): the whole-diff diagram call must try ONLY the primary
+    // model even when fallbacks are configured, so "one model call" is literally one outbound request.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'sequenceDiagram\n  participant A\n  A->>B: call()' }] } }],
+          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const env = createTestEnv();
+    await saveTestProviderApiKey(env);
+    const tracker = new TokenTracker();
+    const service = new ModelService(env, tracker);
+
+    const response = await service.generateWalkthroughDiagram({
+      prTitle: 'Test',
+      files: [
+        {
+          path: 'src/app.ts',
+          previousPath: null,
+          isNew: false,
+          isDeleted: false,
+          isBinary: false,
+          lineCount: 1,
+          hunks: [{ header: '@@ -1 +1 @@', lines: [{ kind: 'add', content: 'x', newLineNumber: 1, position: 1 }] }],
+        },
+      ],
+      fileSummaries: [{ path: 'src/app.ts', summary: 'ok', verdict: 'comment' }],
+      config: {
+        ...defaultRepoConfig,
+        model: {
+          main: 'gemma-4-31b-it',
+          // Fallbacks are configured but must NOT be tried — a fan-out would make >1 fetch.
+          fallbacks: ['gemma-4-26b-a4b-it', '@cf/zai-org/glm-4.7-flash'],
+          size_overrides: [],
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // exactly one outbound request, no fallback fan-out
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/models/gemma-4-31b-it:generateContent');
+    expect(response.rawText).toContain('sequenceDiagram');
+    expect(response.inputTokens).toBe(3);
+    expect(response.outputTokens).toBe(2);
   });
 });

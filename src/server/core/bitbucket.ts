@@ -7,6 +7,7 @@ import type {
   PrComment,
 } from '@shared/bitbucket';
 import type { VcsPullRequest } from '@server/vcs/types';
+import type { BotIdentityResolver } from '@server/core/bot-identity';
 
 // BB-01 deliberately mirrors the hand-rolled GitHub client: Workers-native fetch keeps the REST
 // surface small and avoids an SDK. The methods below own Bitbucket-specific mappings for PR fields,
@@ -118,6 +119,10 @@ type BitbucketCommentRecord = {
     to?: number;
     from?: number;
   };
+  // Additive author block (Phase 8). `account_id` is the IMMUTABLE provider id used as the author
+  // self-filter key (NREG-02); `nickname` is the renameable @mention handle. Bitbucket comment
+  // authors have NO `username` field (removed from the API in 2019) — never read it (Pitfall 4).
+  user?: { account_id?: string; nickname?: string; display_name?: string };
 };
 
 function repositoryPath(workspace: string, repoSlug: string) {
@@ -193,14 +198,30 @@ export class BitbucketClient {
   }
 
   async listPullRequestComments(workspace: string, repoSlug: string, prNumber: number, pagelen = 100) {
+    // SINGLE page, pagelen=100, OLDEST-first (Bitbucket's default order). A consumer needing the
+    // most-recent comments must sort newest-first or paginate — the primitive does not (cap +
+    // ordering caveat, review F7). Do NOT change the query/pagelen: it is shared with submitReview's
+    // dedup (buildDedupIndex) and findExistingReviewForCommit, so any change here is a regression
+    // (NREG-01).
     const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments?pagelen=${pagelen}`;
     const response = await this.request('GET', path);
     const page = (await response.json()) as { values?: BitbucketCommentRecord[] };
 
     return (page.values ?? []).map((comment) => ({
+      // id, body, inline stay byte-identical — submitReview dedup depends on this exact shape
+      // (Pitfall 2, NREG-01). `author` is purely ADDITIVE.
       id: comment.id,
       body: comment.content?.raw ?? '',
       inline: comment.inline,
+      // author.id is `string | undefined` — a comment missing an immutable account_id must NOT be
+      // minted as '' here (a false identity would defeat the Phase 11 self-filter, review F5). The
+      // drop-missing-author policy lives in the ADAPTER (vcs/bitbucket.ts), not this shared client
+      // method, so submitReview dedup still sees every comment. author.id = account_id (immutable,
+      // NREG-02); login = nickname (@mention handle), never username (removed from the API).
+      author: {
+        id: comment.user?.account_id as string | undefined,
+        login: comment.user?.nickname ?? comment.user?.display_name ?? '',
+      },
     }));
   }
 
@@ -224,6 +245,29 @@ export class BitbucketClient {
       : { content: { raw: comment.content.raw } };
     const response = await this.request('POST', path, body);
     return (await response.json()) as { id: number };
+  }
+
+  async editPullRequestComment(
+    workspace: string,
+    repoSlug: string,
+    prNumber: number,
+    commentId: number,
+    raw: string,
+  ): Promise<{ id: number } | null> {
+    const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments/${commentId}`;
+    try {
+      // Confirmed against the Atlassian OpenAPI: PUT with body { content: { raw } }.
+      const response = await this.request('PUT', path, { content: { raw } });
+      return (await response.json()) as { id: number };
+    } catch (e) {
+      // A gone comment surfaces as 404 OR 410 (amended D-05, review F3). Map both to null INSIDE the
+      // client so the adapter maps null->null uniformly and never inspects a raw HTTP status (D-05).
+      // Any OTHER status (e.g. 403/422) rethrows.
+      if (e instanceof BitbucketError && (e.status === 404 || e.status === 410)) {
+        return null;
+      }
+      throw e;
+    }
   }
 
   async approvePullRequest(workspace: string, repoSlug: string, prNumber: number): Promise<void> {
@@ -250,4 +294,123 @@ export class BitbucketClient {
     const path = `${repositoryPath(workspace, repoSlug)}/commit/${encodeURIComponent(commit)}/statuses/build`;
     await this.request('POST', path, status);
   }
+
+  // --- Command-authorization + bot-identity primitives (Phase 11, CMD-07/CMD-08) ---
+
+  /**
+   * BEST-EFFORT per-user repository permission read (A1). Bitbucket authorization is PRIMARILY the
+   * per-repo allow-list of immutable account_ids evaluated in Plan 03 `authorizeActor`
+   * (config.review.interactive.commands.bitbucket_allowed_account_ids) — a deterministic gate that
+   * needs no special token scope. This method is a diagnostic enhancement only.
+   *
+   * Atlassian **repository access tokens cannot query this endpoint at all** — it 403s (NOT merely a
+   * missing scope). So this returns `null` on ANY failure (403/404/network) and a `null` return
+   * means "defer to the allow-list", never "authorize". It keys STRICTLY on the immutable
+   * `account_id` (NREG-02, never a nickname) and NEVER maps workspace membership to 'write'
+   * (membership ≠ write access). A 403 is logged distinctly so the landmine stays diagnosable.
+   */
+  async getUserRepoPermission(
+    workspace: string,
+    repoSlug: string,
+    accountId: string,
+  ): Promise<'admin' | 'write' | 'read' | null> {
+    // Defense-in-depth (IN-02): real Atlassian account_ids are opaque quote-free tokens. Reject any
+    // value carrying a `"` or control character before interpolating it into the BBQL quoted string,
+    // so it can never alter the server-side query parse. Fail closed (null = defer to the allow-list).
+    if (/["\u0000-\u001f]/.test(accountId)) {
+      logger.warn(
+        `Bitbucket permission read skipped for ${workspace}/${repoSlug}: account_id contains invalid characters; deferring to the allow-list`,
+      );
+      return null;
+    }
+    const path =
+      `/workspaces/${encodeURIComponent(workspace)}/permissions/repositories/${encodeURIComponent(repoSlug)}` +
+      `?q=${encodeURIComponent(`user.account_id="${accountId}"`)}`;
+    try {
+      const response = await this.request('GET', path);
+      const page = (await response.json()) as {
+        values?: Array<{ permission?: string; user?: { account_id?: string } }>;
+      };
+      // Match STRICTLY on the immutable account_id (NREG-02) — never trust list order or a nickname.
+      const match = (page.values ?? []).find((entry) => entry.user?.account_id === accountId);
+      if (!match || !match.permission) {
+        return null;
+      }
+      switch (match.permission) {
+        case 'admin':
+          return 'admin';
+        case 'write':
+          return 'write';
+        case 'read':
+          return 'read';
+        default:
+          // NEVER map anything else (e.g. a workspace-membership flavor) to write — fail closed.
+          return null;
+      }
+    } catch (error) {
+      if (error instanceof BitbucketError && error.status === 403) {
+        // The A1 landmine: repository access tokens cannot query permissions. Log distinctly so the
+        // best-effort path is diagnosable; the allow-list (Plan 03) is the authoritative gate.
+        logger.warn(
+          `Bitbucket permission read forbidden (403) for ${workspace}/${repoSlug} — repository access tokens cannot query permissions (A1); deferring to the account_id allow-list`,
+        );
+      } else {
+        logger.warn(
+          `Bitbucket permission read failed for ${workspace}/${repoSlug}; returning null (fail-closed)`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the bot's OWN Bitbucket identity via `GET /2.0/user` (CMD-07). `account_id` is the
+   * IMMUTABLE id the self-filter echo-loop defense keys on (D-03); `nickname` is the renameable
+   * @mention handle used only as `login`. Throws if `/user` returns no account_id (the caller then
+   * leaves accountId null and command processing self-disables).
+   */
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    const response = await this.request('GET', '/user');
+    const data = (await response.json()) as {
+      account_id?: string;
+      nickname?: string;
+      username?: string;
+      display_name?: string | null;
+    };
+    if (!data.account_id) {
+      throw new Error('Bitbucket /2.0/user did not return an account_id');
+    }
+    return {
+      accountId: data.account_id,
+      login: data.nickname ?? data.username ?? data.display_name ?? undefined,
+    };
+  }
+}
+
+/**
+ * BotIdentityResolver for Bitbucket (CMD-07). Wraps `BitbucketClient.resolveBotUserIdentity()` so
+ * `getBotIdentity(env, 'bitbucket', resolver, { workspace, repo })` can populate a NON-NULL
+ * immutable account_id on a cold cache. Because Bitbucket tokens are PER-REPO, the caller MUST scope
+ * the cache key per repository (see core/bot-identity.ts).
+ */
+export function createBitbucketBotIdentityResolver(
+  client: Pick<BitbucketClient, 'resolveBotUserIdentity'>,
+  // CMD-07 (Layer 2): the admin-configured immutable bot account_id. When supplied, the resolver
+  // returns it WITHOUT calling the client. Optional so the signature stays backward-compatible.
+  configuredAccountId?: string | null,
+): BotIdentityResolver {
+  return {
+    resolveIdentity() {
+      if (configuredAccountId) {
+        // A Repository Access Token 403s on `GET /2.0/user`, so a configured immutable account_id
+        // avoids that call entirely. Leave `login` undefined so getBotIdentity fills it from
+        // BOT_USERNAME (the mutable @mention handle); the self-filter keys on this immutable id only.
+        return Promise.resolve({ accountId: configuredAccountId });
+      }
+      // No configured id: fall back to live discovery (unchanged). Layer 1 now catches any 403/throw
+      // in getBotIdentity → fail-closed accountId null.
+      return client.resolveBotUserIdentity();
+    },
+  };
 }

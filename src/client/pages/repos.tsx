@@ -9,6 +9,7 @@ import { Button } from '@client/components/ui/button';
 import { Alert } from '@client/components/ui/alert';
 import { PageHeader } from '@client/components/layout/page-header';
 import { Switch } from '@client/components/ui/switch';
+import { Input } from '@client/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -221,6 +222,184 @@ function RepoRow({
   );
 }
 
+interface InteractiveDraft {
+  interactive: RepoConfig['review']['interactive'];
+  dirty: boolean;
+  valid: boolean;
+}
+
+interface InteractivePanelProps {
+  repo: RepoConfigRecord;
+  onChange: (draft: InteractiveDraft) => void;
+}
+
+function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
+  const interactive = repo.parsedJson.review.interactive;
+  const isBitbucket = repo.vcsProvider === 'bitbucket';
+
+  const [commandsEnabled, setCommandsEnabled] = useState(interactive.commands.enabled);
+  const [accountIds, setAccountIds] = useState<string[]>(
+    interactive.commands.bitbucket_allowed_account_ids ?? [],
+  );
+  const [newAccountId, setNewAccountId] = useState('');
+  const [qaEnabled, setQaEnabled] = useState(interactive.qa.enabled);
+  // Kept as a string so the number input stays editable; parsed on save.
+  const [rateLimit, setRateLimit] = useState(String(interactive.qa.rate_limit_per_hour));
+
+  const rateLimitNum = Number.parseInt(rateLimit, 10);
+  const rateLimitValid = Number.isInteger(rateLimitNum) && rateLimitNum >= 1;
+
+  const initialAccountIds = interactive.commands.bitbucket_allowed_account_ids ?? [];
+  const dirty =
+    commandsEnabled !== interactive.commands.enabled ||
+    qaEnabled !== interactive.qa.enabled ||
+    !stringArraysEqual(accountIds, initialAccountIds) ||
+    (rateLimitValid && rateLimitNum !== interactive.qa.rate_limit_per_hour);
+
+  // Controlled sub-editor: report the current interactive draft up to the parent modal so its
+  // single "Apply" button persists model + interactive together in one PATCH — no local save button.
+  // Deps include `dirty`/`rateLimitValid` so a repo-prop refresh after save re-reports dirty:false.
+  useEffect(() => {
+    onChange({
+      interactive: {
+        commands: {
+          enabled: commandsEnabled,
+          bitbucket_allowed_account_ids: accountIds,
+          // Preserve the admin-configured Bitbucket bot account_id (CMD-07) — this panel does not
+          // edit it, so pass the loaded value through unchanged rather than resetting it to null.
+          bitbucket_bot_account_id: interactive.commands.bitbucket_bot_account_id,
+        },
+        qa: {
+          enabled: qaEnabled,
+          rate_limit_per_hour: rateLimitValid ? rateLimitNum : interactive.qa.rate_limit_per_hour,
+        },
+      },
+      dirty,
+      valid: rateLimitValid,
+    });
+    // onChange is a stable setter from the parent; re-report only when an editable field/derived flag changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commandsEnabled, accountIds, qaEnabled, rateLimit, dirty, rateLimitValid]);
+
+  const addAccountId = () => {
+    const trimmed = newAccountId.trim();
+    if (!trimmed || accountIds.includes(trimmed)) {
+      setNewAccountId('');
+      return;
+    }
+    setAccountIds((current) => [...current, trimmed]);
+    setNewAccountId('');
+  };
+
+  const removeAccountId = (id: string) => {
+    setAccountIds((current) => current.filter((value) => value !== id));
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="min-w-0">
+        <h3 className="text-sm font-semibold text-foreground">Interactive (Commands &amp; Q&amp;A)</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Control in-PR bot commands and pull-request Q&amp;A for this repository.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">Commands</p>
+          <p className="text-xs text-muted-foreground">
+            Respond to in-PR bot commands (e.g. review, pause).
+          </p>
+        </div>
+        <Switch
+          checked={commandsEnabled}
+          onCheckedChange={setCommandsEnabled}
+          aria-label="Toggle in-PR commands"
+        />
+      </div>
+
+      {isBitbucket && (
+        <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-background/40 p-3">
+          <p className="text-sm font-medium text-foreground">Allowed Bitbucket account IDs</p>
+          <p className="text-xs text-muted-foreground">
+            These are immutable Bitbucket <code>account_id</code>s authorized to run commands. GitHub
+            uses live repository permissions instead, so this allow-list is Bitbucket-only.
+          </p>
+          <div className="flex items-center gap-2">
+            <Input
+              value={newAccountId}
+              onChange={(event) => setNewAccountId(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  addAccountId();
+                }
+              }}
+              placeholder="e.g. 5b10a…"
+              aria-label="New allowed Bitbucket account ID"
+            />
+            <Button type="button" variant="outline" size="sm" onClick={addAccountId} className="gap-1.5">
+              <Plus size={13} />
+              Add
+            </Button>
+          </div>
+          {accountIds.length > 0 && (
+            <ul className="flex flex-col gap-1.5">
+              {accountIds.map((id) => (
+                <li
+                  key={id}
+                  className="flex items-center justify-between gap-2 rounded border border-border/60 bg-card px-2.5 py-1.5"
+                >
+                  <span className="truncate font-mono text-xs text-foreground">{id}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => removeAccountId(id)}
+                    aria-label={`Remove ${id}`}
+                    className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                  >
+                    <X size={13} />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">Q&amp;A</p>
+          <p className="text-xs text-muted-foreground">
+            Answer questions asked on the pull request.
+          </p>
+        </div>
+        <Switch checked={qaEnabled} onCheckedChange={setQaEnabled} aria-label="Toggle pull-request Q&A" />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="qa-rate-limit" className="text-sm font-medium text-foreground">
+          Q&amp;A rate limit (per hour)
+        </label>
+        <Input
+          id="qa-rate-limit"
+          type="number"
+          min={1}
+          step={1}
+          value={rateLimit}
+          onChange={(event) => setRateLimit(event.target.value)}
+          className="max-w-[160px]"
+          aria-invalid={!rateLimitValid}
+        />
+        {!rateLimitValid && (
+          <p className="text-xs text-destructive">Enter a positive whole number (1 or more).</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface RepoModelModalProps {
   repo: RepoConfigRecord | null;
   globalConfig: GlobalModelConfig | ModelRouteConfig | null;
@@ -230,6 +409,7 @@ interface RepoModelModalProps {
   onOpenChange: (open: boolean) => void;
   onModelApplied: (repo: RepoConfigRecord, route: ModelRouteConfig) => void;
   onModelReset: (repo: RepoConfigRecord) => void;
+  onReviewSaved: (repo: RepoConfigRecord, review: RepoConfig['review']) => void;
 }
 
 function RepoModelModal({
@@ -241,6 +421,7 @@ function RepoModelModal({
   onOpenChange,
   onModelApplied,
   onModelReset,
+  onReviewSaved,
 }: RepoModelModalProps) {
   const selectedRepoId = repo ? repoId(repo) : null;
   const globalRouteKey = useMemo(
@@ -251,6 +432,7 @@ function RepoModelModal({
   const [initialRoute, setInitialRoute] = useState<ModelRouteConfig>(EMPTY_MODEL_ROUTE);
   const [saving, setSaving] = useState<'apply' | 'reset' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [interactiveDraft, setInteractiveDraft] = useState<InteractiveDraft | null>(null);
 
   useEffect(() => {
     if (!repo) return;
@@ -259,31 +441,56 @@ function RepoModelModal({
     setInitialRoute(nextRoute);
     setSaving(null);
     setError(null);
+    setInteractiveDraft(null);
   }, [selectedRepoId, globalRouteKey]);
 
-  const dirty = useMemo(() => !routesEqual(route, initialRoute), [initialRoute, route]);
+  const modelDirty = useMemo(() => !routesEqual(route, initialRoute), [initialRoute, route]);
+  const interactiveDirty = interactiveDraft?.dirty ?? false;
+  const interactiveValid = interactiveDraft?.valid ?? true;
+  const dirty = modelDirty || interactiveDirty;
+  const canApply = !!repo && dirty && interactiveValid && saving === null;
   const hasStoredStrategy = repo ? hasStoredModelStrategy(repo) : false;
 
+  // Single save action: persists the model strategy and the interactive (commands/Q&A) settings
+  // together in one PATCH. Each key is sent only when its section changed; `review` spreads the
+  // full current review so mention_trigger/max_files/etc. survive the server's shallow merge.
   const handleApply = async () => {
-    if (!repo || !dirty) return;
+    if (!repo || !dirty || !interactiveValid) return;
     setSaving('apply');
     setError(null);
-    const tid = toast.loading('Applying model strategy…');
+    const tid = toast.loading('Saving repository settings…');
     try {
-      await api.updateRepoConfig(repo.owner, repo.repo, {
-        model: {
+      const nextReview =
+        interactiveDirty && interactiveDraft
+          ? { ...repo.parsedJson.review, interactive: interactiveDraft.interactive }
+          : null;
+      const patch: Parameters<typeof api.updateRepoConfig>[2] = {};
+      if (modelDirty) {
+        patch.model = {
           main: route.main,
           fallbacks: route.fallbacks,
           size_overrides: route.size_overrides,
-        },
+        };
+      }
+      if (nextReview) {
+        patch.review = nextReview;
+      }
+      await api.updateRepoConfig(repo.owner, repo.repo, patch);
+      if (modelDirty) {
+        setInitialRoute(route);
+        onModelApplied(repo, route);
+      }
+      if (nextReview) {
+        onReviewSaved(repo, nextReview);
+      }
+      toast.success('Settings saved', {
+        id: tid,
+        description: `${repo.owner}/${repo.repo} settings updated.`,
       });
-      setInitialRoute(route);
-      onModelApplied(repo, route);
-      toast.success('Strategy saved', { id: tid, description: `${repo.owner}/${repo.repo} now uses a custom model chain.` });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to save model strategy.';
+      const msg = err instanceof Error ? err.message : 'Failed to save settings.';
       setError(msg);
-      toast.error('Could not save strategy', { id: tid, description: 'Your changes were not applied. Please try again.' });
+      toast.error('Could not save settings', { id: tid, description: 'Your changes were not applied. Please try again.' });
     } finally {
       setSaving(null);
     }
@@ -324,7 +531,7 @@ function RepoModelModal({
           <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-4 py-4 sm:px-6">
             <div className="min-w-0">
               <Dialog.Title className="text-base font-semibold text-foreground">
-                Edit model strategy
+                Edit repository settings
               </Dialog.Title>
               <Dialog.Description className="mt-1 flex items-center gap-2 truncate text-sm text-muted-foreground">
                 {repo ? (
@@ -351,6 +558,12 @@ function RepoModelModal({
               providers={providerOptions}
               density="comfortable"
             />
+            {repo && (
+              <>
+                <div className="my-6 border-t border-border" />
+                <InteractivePanel key={selectedRepoId} repo={repo} onChange={setInteractiveDraft} />
+              </>
+            )}
           </div>
 
           <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-muted/10 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -367,7 +580,7 @@ function RepoModelModal({
               <Dialog.Close asChild>
                 <Button variant="outline" disabled={saving !== null}>Cancel</Button>
               </Dialog.Close>
-              <Button onClick={handleApply} disabled={!dirty || saving !== null} className="gap-2">
+              <Button onClick={handleApply} disabled={!canApply} className="gap-2">
                 {saving === 'apply' ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
                 Apply
               </Button>
@@ -471,6 +684,9 @@ export function ReposPage() {
       sizeOverrides: null,
     });
   };
+
+  const handleReviewSaved = (repo: RepoConfigRecord, review: RepoConfig['review']) =>
+    mergeRepo(repoId(repo), { parsedJson: { ...repo.parsedJson, review } });
 
   const handleSync = async () => {
     if (syncing) return;
@@ -601,6 +817,7 @@ export function ReposPage() {
         }}
         onModelApplied={handleModelApplied}
         onModelReset={handleModelReset}
+        onReviewSaved={handleReviewSaved}
       />
     </section>
   );

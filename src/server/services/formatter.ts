@@ -15,6 +15,42 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+// Walkthrough rendering caps (D-04, threats T-09-03/T-09-11). A large PR or a verbose/hostile
+// per-file summary must never produce a body that exceeds provider comment-size limits (GitHub is
+// ~65 KB; Bitbucket is smaller). Three independent bounds work together:
+//  - WALKTHROUGH_FILE_CAP: max table rows rendered; the remainder collapses to a "+N more" line.
+//  - WALKTHROUGH_CELL_MAX: max chars per table cell (path AND summary), truncated with an ellipsis.
+//  - WALKTHROUGH_BODY_MAX: a hard total-body ceiling backstop, well under GitHub's ~65 KB limit,
+//    enforced by dropping trailing rows so the returned body length is provably bounded regardless
+//    of per-cell content.
+const WALKTHROUGH_FILE_CAP = 30;
+const WALKTHROUGH_CELL_MAX = 240;
+const WALKTHROUGH_BODY_MAX = 60_000;
+
+// Neutralize a value for safe interpolation into a single Markdown table cell. `escapeHtml` does NOT
+// cover the characters that break a table: `|` terminates a cell, backticks can open/close an
+// inline-code span that bleeds across cells, and a literal newline ends the table row. The per-file
+// `summary` is untrusted, unbounded, possibly multi-line model output (Option A reuse of the
+// existing `file_summary`), so every cell (path AND summary, on both providers) MUST pass through
+// here so a malicious/verbose summary renders as exactly one intact row and cannot inject markup
+// (threat T-09-11).
+//
+// Backslash is escaped FIRST, before `|`/backtick. If it were escaped after (or not at all), an
+// input that already contains a backslash immediately before a pipe (e.g. `a\|b`) would produce an
+// EVEN number of backslashes before the `|` once the pipe-escaping backslash is inserted — the
+// pre-existing backslash pairs with the new one and renders as a single literal `\`, leaving the
+// original `|` unescaped and able to terminate the table cell (CodeQL `js/incomplete-sanitization`,
+// T-09-11). Escaping backslash first guarantees an ODD backslash count before every escaped `|`,
+// so the pipe is always correctly escaped regardless of pre-existing backslashes in the input.
+function formatMarkdownTableCell(value: string): string {
+  const flattened = value.replace(/[\r\n]+/g, ' ').trim();
+  const escaped = flattened.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+  if (escaped.length <= WALKTHROUGH_CELL_MAX) return escaped;
+  // Trim a dangling escape backslash so truncation can never leave a `\` that swallows the cell's
+  // closing ` |` delimiter.
+  return `${escaped.slice(0, WALKTHROUGH_CELL_MAX - 1).replace(/\\+$/, '')}…`;
+}
+
 // Provider discriminator consumed by `severityIcon` and forwarded by `formatInlineComment`. The
 // formatter-level branch keeps the Bitbucket-specific emoji rendering isolated from the GitHub
 // path so reviewers can see at a glance that the GitHub <img> output is byte-identical (D-13).
@@ -118,6 +154,11 @@ export class FormatterService {
       filesReviewed: number;
       omittedCount: number;
       maxComments: number;
+      // CMD-01/CMD-02 (D-10/D-11, Phase 11): commands-feature footer additions. Both default to
+      // inert (false / 0) so a caller that omits them renders the exact current footer byte-identically
+      // (NREG-01) -- the disabled path never gains a line.
+      commandsEnabled?: boolean;
+      skippedForSizeCount?: number;
     },
     options?: FormatterOptions,
   ) {
@@ -131,6 +172,8 @@ export class FormatterService {
       filesReviewed,
       omittedCount,
     } = input;
+    const commandsEnabled = input.commandsEnabled ?? false;
+    const skippedForSizeCount = input.skippedForSizeCount ?? 0;
 
     const totalFindings = reviewSeverities.reduce((sum, sev) => sum + (severityCounts[sev] ?? 0), 0);
     const zeroFindings = verdict === 'approve' && totalFindings === 0;
@@ -172,6 +215,19 @@ export class FormatterService {
 
     sections.push(footer);
 
+    // CMD-01/CMD-02 footer additions, only when the commands feature is ENABLED (disabled path stays
+    // byte-identical, NREG-01):
+    //   - D-10: a "N files skipped for size — comment @bot review-rest" line ONLY when omissions exist.
+    //   - D-11 (discoverability): the compact "Commands: review · pause · help" hint ALWAYS (regardless
+    //     of omission count -- REVIEW: Codex 11-05 MED: the hint must NOT be gated on omissions).
+    if (commandsEnabled) {
+      if (skippedForSizeCount > 0) {
+        const skippedWord = `${skippedForSizeCount} file${skippedForSizeCount === 1 ? '' : 's'} skipped for size`;
+        sections.push(`_${skippedWord} — comment @${botUsername} review-rest_`);
+      }
+      sections.push(`_Commands: @${botUsername} review · pause · help_`);
+    }
+
     const bodyBlock = sections.join('\n\n');
 
     // D-13 (Thread C): Bitbucket Cloud does not render GitHub-flavored HTML — <details>/<summary>/
@@ -206,5 +262,107 @@ If OpenCodra has suggestions, it will comment; otherwise it will react with 👍
 OpenCodra can also answer questions or update the PR. Try commenting "@${botUsername} address that feedback".
 
 </details>`;
+  }
+
+  /**
+   * Renders the streaming "Walkthrough" comment body: a file-coverage table (path + one-line review
+   * summary + that file's per-severity finding counts) plus a per-severity totals line, and — on
+   * GitHub only — a fenced Mermaid sequence diagram. Pure/deterministic: Wave 2/3 orchestration
+   * (Plans 09-02/09-03) computes the inputs and posts/edits the returned body.
+   *
+   * Provider awareness (D-13, threat T-09-01): the Bitbucket branch emits clean CommonMark and NEVER
+   * a ```mermaid fence (Bitbucket does not sandbox-render Mermaid); GitHub gets the fence when a
+   * non-empty raw diagram source is supplied. `formatWalkthrough` is the SOLE place the fence is
+   * added — `mermaid` arrives fence-free from `parseWalkthroughDiagram` (WT-03 fence contract).
+   *
+   * Every table cell passes through `formatMarkdownTableCell` (threat T-09-11); the body is bounded
+   * by WALKTHROUGH_FILE_CAP rows, WALKTHROUGH_CELL_MAX per cell, and a WALKTHROUGH_BODY_MAX ceiling
+   * (D-04). Empty summaries and a null `mermaid` still render deterministic coverage + counts
+   * (D-02/D-04a) — never throws.
+   */
+  formatWalkthrough(
+    input: {
+      files: Array<{
+        path: string;
+        summary: string;
+        counts: Record<ParsedReviewComment['severity'], number>;
+      }>;
+      severityCounts: Record<ParsedReviewComment['severity'], number>;
+      filesReviewed: number;
+      mermaid?: string | null;
+    },
+    options?: FormatterOptions,
+  ): string {
+    const isBitbucket = options?.provider === 'bitbucket';
+    const { files, severityCounts, filesReviewed } = input;
+
+    const fileWord = `${filesReviewed} file${filesReviewed === 1 ? '' : 's'} reviewed`;
+
+    // Per-severity totals line — emoji render identically on both providers (mirrors
+    // formatReviewOverview's counts line). Non-zero severities only, in canonical order.
+    const countsLine = reviewSeverities
+      .filter((sev) => (severityCounts?.[sev] ?? 0) > 0)
+      .map((sev) => `${this.severityIcon(sev, { provider: 'bitbucket' })} ×${severityCounts[sev]}`)
+      .join('  ');
+
+    const renderCountsCell = (counts: Record<ParsedReviewComment['severity'], number>): string => {
+      const parts = reviewSeverities
+        .filter((sev) => (counts?.[sev] ?? 0) > 0)
+        .map((sev) => `${this.severityIcon(sev, { provider: 'bitbucket' })}×${counts[sev]}`);
+      return parts.length > 0 ? parts.join(' ') : '—';
+    };
+
+    const renderRow = (file: {
+      path: string;
+      summary: string;
+      counts: Record<ParsedReviewComment['severity'], number>;
+    }): string => {
+      // path may be escapeHtml'd first on the GitHub HTML branch, but formatMarkdownTableCell is the
+      // mandatory sink for BOTH cells on BOTH providers.
+      const pathCell = formatMarkdownTableCell(isBitbucket ? file.path : escapeHtml(file.path));
+      const summaryCell = formatMarkdownTableCell(file.summary ?? '');
+      return `| ${pathCell || '—'} | ${summaryCell || '—'} | ${renderCountsCell(file.counts)} |`;
+    };
+
+    const tableHeader = '| File | Summary | Findings |\n| --- | --- | --- |';
+
+    const buildBody = (rowCount: number, truncated: boolean): string => {
+      const sections: string[] = ['### OpenCodra Walkthrough'];
+      if (countsLine) sections.push(countsLine);
+
+      const renderedRows = files.slice(0, rowCount).map(renderRow);
+      sections.push([tableHeader, ...renderedRows].join('\n'));
+
+      const overflow = files.length - rowCount;
+      if (overflow > 0) {
+        sections.push(`_+${overflow} more files reviewed_`);
+      } else if (truncated) {
+        sections.push('_…walkthrough truncated_');
+      }
+
+      sections.push(`_${fileWord}_`);
+
+      if (!isBitbucket && typeof input.mermaid === 'string' && input.mermaid.trim().length > 0) {
+        sections.push('```mermaid\n' + input.mermaid.trim() + '\n```');
+      }
+
+      return sections.join('\n\n');
+    };
+
+    // Row cap (D-04): render at most WALKTHROUGH_FILE_CAP rows (caller supplies them pre-sorted);
+    // the remainder collapses to a "+N more files reviewed" line.
+    let rowCount = Math.min(files.length, WALKTHROUGH_FILE_CAP);
+    let body = buildBody(rowCount, false);
+
+    // Total-body ceiling backstop (threat T-09-03): drop trailing rows until the body is provably
+    // under WALKTHROUGH_BODY_MAX regardless of per-cell content.
+    let truncated = false;
+    while (body.length > WALKTHROUGH_BODY_MAX && rowCount > 0) {
+      rowCount -= 1;
+      truncated = true;
+      body = buildBody(rowCount, truncated);
+    }
+
+    return body;
   }
 }

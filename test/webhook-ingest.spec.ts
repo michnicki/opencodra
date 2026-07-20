@@ -11,9 +11,43 @@ import { ingestReviewWebhookEvent } from '@server/core/webhook-ingest';
 import { createTestEnv, hasConfiguredTestDatabaseUrl } from './helpers';
 import { insertJob, getJobForProcessing } from '@server/db/jobs';
 import { defaultRepoConfig } from '@shared/schema';
+import type { RepoConfig } from '@shared/schema';
 import type { ReviewRequest } from '@server/core/review';
+import type { CommentContext } from '@server/core/commands';
+import { insertSkippedFiles } from '@server/db/skipped-files';
 
 const sha = (char: string) => char.repeat(40);
+
+// ---------------------------------------------------------------------------
+// 11-06 comment-classification branch mocks. Spy the provider factory + the Plan 03 classifier so
+// the routing logic (which the plan owns) is tested in isolation from the real GitHub API / bot
+// self-filter (already covered by test/commands.spec.ts). Tests 1-7 above never set commentContext,
+// so they never touch these mocks and stay byte-identical (NREG-01).
+// ---------------------------------------------------------------------------
+const { forProviderMock, classifyCommentMock, authorizeActorMock, getPullRequestMock } = vi.hoisted(() => ({
+  forProviderMock: vi.fn(),
+  classifyCommentMock: vi.fn(),
+  authorizeActorMock: vi.fn(),
+  getPullRequestMock: vi.fn(),
+}));
+
+vi.mock('@server/services/vcs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@server/services/vcs')>();
+  return {
+    ...actual,
+    // Keep the real class (forRepo etc.) but override the static forProvider used by the branch.
+    VcsService: Object.assign(actual.VcsService, { forProvider: forProviderMock }),
+  };
+});
+
+vi.mock('@server/core/commands', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@server/core/commands')>();
+  return {
+    ...actual,
+    classifyComment: classifyCommentMock,
+    authorizeActor: authorizeActorMock,
+  };
+});
 
 const dbDescribe = hasConfiguredTestDatabaseUrl() ? describe : describe.skip;
 
@@ -288,5 +322,346 @@ dbDescribe('ingestReviewWebhookEvent (Bitbucket concrete-job path - 05-04 wideni
     const sent = (env.REVIEW_QUEUE as any).sent;
     expect(sent).toHaveLength(1);
     expect(sent[0].provider).toBe('bitbucket');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11-06: the EXCLUSIVE comment-classification branch (CMD-05/06/07). classifyComment + the provider
+// factory are mocked; the DB (insertJob / listSkippedFilesForHead / mostRecentJobForPullRequest) is
+// real. Asserts the routing contract: every classification outcome returns explicitly and NEVER
+// falls through to the queued_event path.
+// ---------------------------------------------------------------------------
+function commandsEnabledConfig(): RepoConfig {
+  return {
+    ...defaultRepoConfig,
+    review: {
+      ...defaultRepoConfig.review,
+      interactive: {
+        ...defaultRepoConfig.review.interactive,
+        commands: { ...defaultRepoConfig.review.interactive.commands, enabled: true },
+        qa: { ...defaultRepoConfig.review.interactive.qa, enabled: true },
+      },
+    },
+  } as RepoConfig;
+}
+
+dbDescribe('ingestReviewWebhookEvent (Phase 11 comment classification)', () => {
+  const env = createTestEnv();
+
+  const fakeProvider = { name: 'github' as const, getPullRequest: getPullRequestMock };
+
+  function buildCommentContext(overrides: Partial<CommentContext> = {}): CommentContext {
+    const uniq = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const owner = `owner-cc-${uniq}`;
+    return {
+      authorId: 'user-123',
+      authorLogin: 'reviewer',
+      body: '@codra-app review',
+      prNumber: 7,
+      owner,
+      repo: `repo-cc-${uniq}`,
+      workspace: owner,
+      ...overrides,
+    };
+  }
+
+  // A mention-shaped reviewRequest carries the installationId the GitHub comment branch needs to
+  // build the provider + insert the job (the route threads it alongside commentContext).
+  function mentionReviewRequest(ctx: CommentContext): ReviewRequest {
+    return {
+      installationId: '123',
+      owner: ctx.owner,
+      repo: ctx.repo,
+      prNumber: ctx.prNumber,
+      prTitle: null,
+      prAuthor: null,
+      commitSha: '',
+      baseSha: '',
+      headRef: null,
+      baseRef: null,
+      trigger: 'mention',
+    };
+  }
+
+  beforeEach(() => {
+    (env.REVIEW_QUEUE as any).sent.length = 0;
+    forProviderMock.mockReset();
+    classifyCommentMock.mockReset();
+    authorizeActorMock.mockReset();
+    getPullRequestMock.mockReset();
+    forProviderMock.mockResolvedValue(fakeProvider);
+  });
+
+  it('Test 8: a self_filtered comment returns ignored_comment and sends NO queue message', async () => {
+    classifyCommentMock.mockResolvedValue({ kind: 'ignored', reason: 'self_filtered' });
+    const ctx = buildCommentContext();
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t8-${Date.now()}`,
+      requestId: 'req-t8',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'ignored_comment', reason: 'self_filtered' });
+    expect(classifyCommentMock).toHaveBeenCalledTimes(1);
+    expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
+  });
+
+  it('Test 9: both features off => ignored_comment feature_disabled WITHOUT calling classifyComment', async () => {
+    const ctx = buildCommentContext();
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: defaultRepoConfig, // commands + qa both disabled
+      deliveryId: `delivery-t9-${Date.now()}`,
+      requestId: 'req-t9',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'ignored_comment', reason: 'feature_disabled' });
+    expect(classifyCommentMock).not.toHaveBeenCalled();
+    expect(forProviderMock).not.toHaveBeenCalled();
+    expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
+  });
+
+  it('Test 10: command review hydrates SHAs and inserts a FRESH job even when a terminal job exists', async () => {
+    const ctx = buildCommentContext();
+
+    // A prior terminal job for the SAME PR exists — the rerun path must NOT dedupe against it.
+    const priorJob = await insertJob(env, {
+      installationId: '123',
+      owner: ctx.owner,
+      repo: ctx.repo,
+      prNumber: ctx.prNumber,
+      prTitle: 'Prior',
+      prAuthor: 'author',
+      commitSha: sha('a'),
+      baseSha: sha('b'),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+
+    classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'review', args: '' });
+    authorizeActorMock.mockResolvedValue(true);
+    getPullRequestMock.mockResolvedValue({
+      number: ctx.prNumber,
+      title: 'Hydrated title',
+      body: 'desc',
+      draft: false,
+      headSha: sha('c'),
+      headRef: 'feature',
+      baseSha: sha('d'),
+      baseRef: 'main',
+      authorLogin: 'dev',
+    });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t10-${Date.now()}`,
+      requestId: 'req-t10',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result.outcome).toBe('queued');
+    expect(authorizeActorMock).toHaveBeenCalledTimes(1);
+    expect(getPullRequestMock).toHaveBeenCalledTimes(1);
+    if (result.outcome === 'queued') {
+      // A brand-new job, not the prior terminal one (no dedupe).
+      expect(result.job.id).not.toBe(priorJob.id);
+      const fresh = await getJobForProcessing(env, result.job.id);
+      expect(fresh?.status).toBe('queued');
+      // review_scope 'all' persisted on the inserted row (drives Plan 05 getJobDiffFiles).
+      expect(fresh?.review_scope).toBe('all');
+    }
+
+    // A no-kind review message reaches the Workflow path (NREG-01) — never a command/qa kind.
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].kind).toBeUndefined();
+    expect(sent[0].phase).toBe('prepare');
+    expect(sent[0].jobId).toBe((result as any).job.id);
+  });
+
+  it('Test 11: review-rest with an empty skip set does NOT insert a job', async () => {
+    const ctx = buildCommentContext({ body: '@codra-app review rest' });
+
+    classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'review-rest', args: '' });
+    authorizeActorMock.mockResolvedValue(true);
+    getPullRequestMock.mockResolvedValue({
+      number: ctx.prNumber,
+      title: 't',
+      body: 'b',
+      draft: false,
+      headSha: sha('e'),
+      headRef: 'feature',
+      baseSha: sha('f'),
+      baseRef: 'main',
+      authorLogin: 'dev',
+    });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t11-${Date.now()}`,
+      requestId: 'req-t11',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'ignored_comment', reason: 'no_skipped_files' });
+    // No job inserted => no review message enqueued.
+    expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
+  });
+
+  it('Test 11b: review-rest WITH a recorded skip set inserts a rest-scoped job', async () => {
+    const ctx = buildCommentContext({ body: '@codra-app review rest' });
+    const headSha = sha('9');
+
+    // Seed a prior full-review job + its skipped files at this head so review-rest has work to do.
+    const sourceJob = await insertJob(env, {
+      installationId: '123',
+      owner: ctx.owner,
+      repo: ctx.repo,
+      prNumber: ctx.prNumber,
+      prTitle: 'Source',
+      prAuthor: 'author',
+      commitSha: headSha,
+      baseSha: sha('8'),
+      trigger: 'auto',
+      headRef: 'feature',
+      baseRef: 'main',
+      configSnapshot: defaultRepoConfig,
+    });
+    await insertSkippedFiles(env, {
+      jobId: sourceJob.id,
+      vcsProvider: 'github',
+      workspace: ctx.workspace,
+      repoSlug: ctx.repo,
+      prNumber: ctx.prNumber,
+      headSha,
+      files: [{ filePath: 'src/skipped.ts', reason: 'max_files' }],
+    });
+
+    classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'review-rest', args: '' });
+    authorizeActorMock.mockResolvedValue(true);
+    getPullRequestMock.mockResolvedValue({
+      number: ctx.prNumber,
+      title: 't',
+      body: 'b',
+      draft: false,
+      headSha,
+      headRef: 'feature',
+      baseSha: sha('8'),
+      baseRef: 'main',
+      authorLogin: 'dev',
+    });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t11b-${Date.now()}`,
+      requestId: 'req-t11b',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result.outcome).toBe('queued');
+    if (result.outcome === 'queued') {
+      const fresh = await getJobForProcessing(env, result.job.id);
+      expect(fresh?.review_scope).toBe('rest');
+      // scope_source_job_id links to the latest source job for this PR.
+      expect(fresh?.scope_source_job_id).toBeTruthy();
+    }
+  });
+
+  it('Test 12: pause command enqueues { kind:command } carrying body + workspace + authorId (D-09)', async () => {
+    const ctx = buildCommentContext({ body: '@codra-app pause', authorId: 'pauser-9', commentRef: 'c-42' });
+
+    classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'pause', args: '' });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t12-${Date.now()}`,
+      requestId: 'req-t12',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'command_enqueued' });
+    // Authorization is deferred to the consumer's executeCommand — not run at ingest.
+    expect(authorizeActorMock).not.toHaveBeenCalled();
+
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].kind).toBe('command');
+    expect(sent[0].interactive.commandName).toBe('pause');
+    expect(sent[0].interactive.body).toBe('@codra-app pause');
+    expect(sent[0].interactive.workspace).toBe(ctx.workspace);
+    expect(sent[0].interactive.authorId).toBe('pauser-9');
+    expect(sent[0].interactive.sourceCommentRef).toBe('c-42');
+  });
+
+  it('Test 13: a qa comment enqueues { kind:qa } and never a job', async () => {
+    const ctx = buildCommentContext({ body: '@codra-app why is this slow?' });
+
+    classifyCommentMock.mockResolvedValue({ kind: 'qa', question: 'why is this slow?' });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t13-${Date.now()}`,
+      requestId: 'req-t13',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'qa_enqueued' });
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].kind).toBe('qa');
+    expect(sent[0].interactive.question).toBe('why is this slow?');
+    expect(sent[0].interactive.body).toBe('@codra-app why is this slow?');
+    expect(sent[0].interactive.workspace).toBe(ctx.workspace);
+  });
+
+  it('Test 14: an unauthorized command review is silently ignored (no job, no queue message)', async () => {
+    const ctx = buildCommentContext();
+
+    classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'review', args: '' });
+    authorizeActorMock.mockResolvedValue(false);
+    getPullRequestMock.mockResolvedValue({
+      number: ctx.prNumber,
+      title: 't',
+      body: 'b',
+      draft: false,
+      headSha: sha('1'),
+      headRef: 'feature',
+      baseSha: sha('2'),
+      baseRef: 'main',
+      authorLogin: 'dev',
+    });
+
+    const result = await ingestReviewWebhookEvent(env, {
+      reviewRequest: mentionReviewRequest(ctx),
+      configSnapshot: commandsEnabledConfig(),
+      deliveryId: `delivery-t14-${Date.now()}`,
+      requestId: 'req-t14',
+      eventName: 'issue_comment',
+      commentContext: ctx,
+    });
+
+    expect(result).toEqual({ outcome: 'ignored_comment', reason: 'unauthorized' });
+    // getPullRequest is never reached when authorization fails.
+    expect(getPullRequestMock).not.toHaveBeenCalled();
+    expect((env.REVIEW_QUEUE as any).sent).toHaveLength(0);
   });
 });

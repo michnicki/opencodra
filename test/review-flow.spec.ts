@@ -1,10 +1,14 @@
-import { runReviewJob } from '@server/core/review';
+import { budgetAwareFileLimit, runReviewJob } from '@server/core/review';
+import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, generateMockDiff, hasConfiguredTestDatabaseUrl } from './helpers';
 import { vi } from 'vitest';
-import { findExistingJobForHead, getJobForProcessing, getTerminalJobsNeedingCheckRunCompletion, insertJob, updateJobFileCount, updateJobStep } from '@server/db/jobs';
+import { findExistingJobForHead, getJobForProcessing, insertJob, mapJob, updateJobCriticResult, updateJobFileCount, updateJobStep, updateJobWalkthroughCommentRef } from '@server/db/jobs';
 import { getFileReviewsForJobs, upsertFileReview } from '@server/db/file-reviews';
-import { defaultRepoConfig, type ParsedReviewComment } from '@shared/schema';
+import { defaultRepoConfig, REVIEW_CONCURRENCY_LIMITS, type ParsedReviewComment, type RepoConfig } from '@shared/schema';
 import { runWithDb, queryRows } from '@server/db/client';
+import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder, type WalkthroughReviewRow } from '@server/core/walkthrough';
+import { FormatterService } from '@server/services/formatter';
+import type { VcsProvider } from '@server/vcs/types';
 
 const sha = (char: string) => char.repeat(40);
 
@@ -34,6 +38,11 @@ vi.mock('@server/services/github', () => {
         async createCheckRun() { return { id: 123 }; }
         async updateCheckRun() { return {}; }
         async createReview() { return { id: 456 }; }
+        // Phase 9 walkthrough PR-comment primitives (GitHubAdapter.createPrComment/editPrComment map
+        // onto these). Defaults: create returns a fresh numeric comment id; edit echoes success.
+        // Individual walkthrough tests spy/override these on the prototype.
+        async createIssueComment() { return { id: 700 }; }
+        async updateIssueComment() { return { id: 700 }; }
         async findBotReviewForCommit() { return null; }
         async ensureLabel() { return {}; }
         async addIssueLabels() { return {}; }
@@ -84,6 +93,29 @@ vi.mock('@server/services/model', () => {
                 provider: 'google',
                 rawText: '{"summary": "test"}',
                 inputTokens: 3,
+                outputTokens: 2,
+            };
+        }
+        // Phase 9 Plan 03 WT-03: the optional whole-diff Mermaid diagram call. Default returns a
+        // valid sequenceDiagram so the GitHub finalize path renders a ```mermaid fence; individual
+        // tests spy/override this on the prototype to assert args, count, tokens, and failure omit.
+        async generateWalkthroughDiagram() {
+            return {
+                modelUsed: 'diagram-model',
+                provider: 'google',
+                rawText: 'sequenceDiagram\n  participant A\n  A->>B: call()',
+                inputTokens: 7,
+                outputTokens: 4,
+            };
+        }
+        // Phase 10 Plan 06 MP-03: the critic's single whole-set, ID-based, prune-only call. Default
+        // returns an empty prune (keep-all); critic tests spy/override this on the prototype to assert
+        // it is (or isn't) called, to prune specific ids, or to inject a failure (fail-open).
+        async critiqueFindings() {
+            return {
+                rawText: '{"prune": []}',
+                modelUsed: 'critic-model',
+                inputTokens: 5,
                 outputTokens: 2,
             };
         }
@@ -274,14 +306,14 @@ dbDescribe('Review Flow Lifecycle', () => {
     });
 
     await bulkMarkFilesFailed(env, job.id, [
-      { filePath: 'src/a.ts', diffLineCount: 10 },
-      { filePath: 'src/b.ts', diffLineCount: 20 },
+      { filePath: 'src/a.ts', pass: 'main', diffLineCount: 10 },
+      { filePath: 'src/b.ts', pass: 'main', diffLineCount: 20 },
     ], { modelUsed: 'gemini-3.1-flash-lite', errorMessage: 'infra limit' });
 
     // Second call including an existing path must not duplicate or overwrite it (ON CONFLICT DO NOTHING).
     await bulkMarkFilesFailed(env, job.id, [
-      { filePath: 'src/a.ts', diffLineCount: 10 },
-      { filePath: 'src/c.ts', diffLineCount: 5 },
+      { filePath: 'src/a.ts', pass: 'main', diffLineCount: 10 },
+      { filePath: 'src/c.ts', pass: 'main', diffLineCount: 5 },
     ], { modelUsed: 'other-model', errorMessage: 'second call' });
 
     const reviews = await getFileReviewsForJobs(env, [job.id]);
@@ -314,9 +346,15 @@ dbDescribe('Review Flow Lifecycle', () => {
     expect(final?.review_id).not.toBeNull();
     // The check-run update failed, so it must NOT be marked completed -- it stays pending so the
     // maintenance sweep can finish it (the check run always ends up 'completed', never stuck).
+    // Assert THIS job's own sweep-eligibility (terminal status + a check_run_id + no
+    // check_run_completed_at) rather than calling getTerminalJobsNeedingCheckRunCompletion() and
+    // checking membership. That query is windowed (ORDER BY finished_at ASC LIMIT n), so on the
+    // shared test DB a backlog of >n uncompleted terminal jobs pushes this (newest) job out of the
+    // window and the membership check flakes independently of the code under test. The query's own
+    // WHERE/ordering behavior is covered in job-recovery-provider.spec.ts; here we only need to prove
+    // this job is left in the exact state that query selects on.
+    expect(final?.check_run_id).not.toBeNull();
     expect(final?.check_run_completed_at).toBeNull();
-    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
-    expect(pending.some((j) => j.id === job.id)).toBe(true);
     checkRunSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
 
@@ -331,10 +369,12 @@ dbDescribe('Review Flow Lifecycle', () => {
 
     const final = await getJobForProcessing(env, job.id);
     expect(final?.status).toBe('done');
-    // The inline check-run update succeeded, so it's marked complete and won't be re-done by maintenance.
+    // The inline check-run update succeeded, so it's marked complete and won't be re-done by
+    // maintenance. A non-null check_run_completed_at is exactly what excludes this job from
+    // getTerminalJobsNeedingCheckRunCompletion() (its predicate requires check_run_completed_at IS
+    // NULL), so this single job-scoped assertion is the DB-cleanliness-independent equivalent of the
+    // old windowed membership check (which flaked once the shared test DB's backlog exceeded the LIMIT).
     expect(final?.check_run_completed_at).not.toBeNull();
-    const pending = await getTerminalJobsNeedingCheckRunCompletion(env, 500);
-    expect(pending.some((j) => j.id === job.id)).toBe(false);
   }, REVIEW_FLOW_TIMEOUT_MS);
 
   it('marks "Reviewing Files" done at finalize even when a degrade path left it running', async () => {
@@ -751,6 +791,481 @@ dbDescribe('Review Flow Lifecycle', () => {
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
 
+  // --- Phase 10-05 multi-pass security scheduling (MP-01 / MP-05 / NREG-01) ------------------------
+  describe('multi-pass security scheduling', () => {
+    // Repo config with the security pass enabled; everything else is default (NREG-01 baseline uses
+    // plain defaultRepoConfig, which has passes.security.enabled === false).
+    const securityConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: {
+          ...defaultRepoConfig.review.passes,
+          security: { enabled: true },
+        },
+      },
+    });
+
+    const insertReviewJob = (repo: string, config: RepoConfig, commitChar: string) =>
+      insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber: 7,
+        prTitle: 'Security Pass Test',
+        prAuthor: 'author',
+        commitSha: sha(commitChar),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: config,
+      });
+
+    const okReview = (path: string) => ({
+      parsed: {
+        comments: [],
+        verdict: 'approve' as const,
+        fileSummary: `Reviewed ${path}`,
+        overallCorrectness: 'no issues',
+        confidenceScore: 0.9,
+      },
+      modelUsed: 'test-model',
+      provider: 'test-provider',
+      inputTokens: 10,
+      outputTokens: 5,
+      rawText: '{}',
+      userPrompt: '',
+    });
+
+    it('schedules a (file,security) unit alongside (file,main) and persists both passes (MP-01)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-schedule`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const seen: Array<{ path: string; pass: string }> = [];
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        seen.push({ path: params.file.path, pass: params.pass ?? 'main' });
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'a');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-schedule' });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      for (const path of ['src/one.ts', 'src/two.ts']) {
+        const passes = reviews.filter((r) => r.file_path === path).map((r) => r.pass).sort();
+        expect(passes).toEqual(['main', 'security']);
+        expect(reviews.filter((r) => r.file_path === path && r.file_status === 'done')).toHaveLength(2);
+      }
+      // The security prompt (10-04) is actually routed for each eligible file, not just persisted.
+      expect(seen.filter((s) => s.pass === 'security').map((s) => s.path).sort()).toEqual(['src/one.ts', 'src/two.ts']);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('retries only the security unit on a transient failure and leaves the main row intact (per-unit retry)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService, RetryableModelError } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-retry`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      // Fail ONLY the security unit; the main unit succeeds. The tuple-keyed writers must record the
+      // security failure on the (file,'security') row without disturbing the (file,'main') row.
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        if ((params.pass ?? 'main') === 'security') {
+          throw new (RetryableModelError as any)('Google API timed out after 45000ms');
+        }
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'b');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runWithDb(env, async () => {
+        (env.REVIEW_QUEUE as any).sent.length = 0;
+        const result = await runReviewJob(env, {
+          jobId: job.id,
+          deliveryId: 'delivery-sec-retry',
+          phase: 'review',
+        });
+        // A transient security-unit failure defers the chunk (stays in-instance, freshInstance false)
+        // exactly like a transient main-unit failure would -- it does not fail the job.
+        expect(result).toEqual({ action: 'next_phase', phase: 'review', delaySeconds: expect.any(Number), jobId: expect.any(String), freshInstance: false });
+      });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      const main = reviews.find((r) => r.file_path === 'src/app.ts' && r.pass === 'main');
+      const security = reviews.find((r) => r.file_path === 'src/app.ts' && r.pass === 'security');
+      // Main row is terminal and untouched by the security failure.
+      expect(main?.file_status).toBe('done');
+      // Security row carries its OWN retryable-failure bookkeeping (separate (job,file,'security') row).
+      expect(security?.file_status).toBe('failed');
+      expect(security?.transient_error_count).toBeGreaterThanOrEqual(1);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('bounds concurrent in-flight model calls to budgetAwareFileLimit even with a doubled unit list (MP-05)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-sec-concurrency`;
+      // A large file whose security unit would fan out to multiple chunks inside the real reviewFile
+      // (bounded WITHIN the unit by isNearLimit); here it is one mocked call, but it stands in for the
+      // large multi-chunk security file the budget model must still bound at the UNIT-concurrency level.
+      const largeContent = Array.from({ length: 400 }, (_, i) => `const line${i} = ${i};`).join('\n');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+          { path: 'src/big.ts', content: largeContent },
+        ]),
+      );
+      let active = 0;
+      let maxActive = 0;
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(async (params: any) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        active -= 1;
+        return okReview(params.file.path);
+      });
+
+      const job = await insertReviewJob(repo, securityConfig(), 'c');
+      await updateJobFileCount(env, job.id, 3);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-concurrency' });
+
+      // The concurrency bound is derived from the SAME budget model the scheduler uses (default
+      // 'medium' concurrency). Even though security DOUBLES the unit list to 6 units, in-flight calls
+      // never exceed budgetAwareFileLimit -- the extra pass runs as MORE chunks, not wider chunks.
+      const bound = budgetAwareFileLimit(new TokenTracker().remainingSafeBudget(), REVIEW_CONCURRENCY_LIMITS.medium);
+      expect(maxActive).toBeLessThanOrEqual(bound);
+      // ...and the doubled unit list actually saturates the bound (proves it is genuinely bounded, not
+      // merely that too few units existed to reach the limit).
+      expect(maxActive).toBe(bound);
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.file_status === 'done')).toHaveLength(6);
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('writes no security rows and stays byte-identical when the security pass is off (NREG-01)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-sec-off`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+
+      const job = await insertReviewJob(repo, defaultRepoConfig, 'd');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-sec-off' });
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.pass === 'security')).toHaveLength(0);
+      expect(reviews.filter((r) => r.pass === 'main' && r.file_status === 'done')).toHaveLength(2);
+
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+  });
+
+  describe('multi-pass critic phase (MP-03)', () => {
+    // Repo config with the critic pass enabled. skip_threshold/input_char_budget/security are
+    // overridable so a case can force the model call (skip_threshold: 0/1) or leave the default guard.
+    const criticConfig = (overrides?: { skip_threshold?: number; input_char_budget?: number; security?: boolean }): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: {
+          security: { enabled: overrides?.security ?? false },
+          critic: {
+            enabled: true,
+            ...(overrides?.skip_threshold !== undefined ? { skip_threshold: overrides.skip_threshold } : {}),
+            ...(overrides?.input_char_budget !== undefined ? { input_char_budget: overrides.input_char_budget } : {}),
+          },
+        },
+      },
+    });
+
+    const insertCriticJob = (repo: string, config: RepoConfig, commitChar: string) =>
+      insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber: 8,
+        prTitle: 'Critic Pass Test',
+        prAuthor: 'author',
+        commitSha: sha(commitChar),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: config,
+      });
+
+    // A finding per reviewed file so a multi-file diff yields a multi-finding candidate set.
+    const findingReview = (params: any) => ({
+      parsed: {
+        comments: [{
+          path: params.file.path,
+          line: 1,
+          position: 1,
+          severity: 'P2',
+          category: 'quality',
+          title: `Finding in ${params.file.path}`,
+          body: `Issue body for ${params.file.path}`,
+        }],
+        verdict: 'comment' as const,
+        fileSummary: `Reviewed ${params.file.path}`,
+        overallCorrectness: 'issues found',
+        confidenceScore: 0.9,
+      },
+      modelUsed: 'test-model',
+      provider: 'test-provider',
+      inputTokens: 10,
+      outputTokens: 5,
+      rawText: '{}',
+      userPrompt: '',
+    });
+
+    // Drain the phase loop, recording the observed next_phase sequence so a test can assert whether
+    // the critic phase was (or was not) entered.
+    async function drainCapturingPhases(message: Parameters<typeof runReviewJob>[1]) {
+      const phases: string[] = [];
+      await runWithDb(env, async () => {
+        let currentMessage: typeof message | null = message;
+        let retries = 0;
+        while (currentMessage) {
+          const result = await runReviewJob(env, currentMessage);
+          if (result.action === 'next_phase') {
+            phases.push(result.phase);
+            currentMessage = { ...currentMessage, phase: result.phase };
+            retries = 0;
+            const jobId = (currentMessage as any).jobId;
+            if (jobId) {
+              await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [jobId]);
+            }
+          } else if (result.action === 'retry') {
+            if (++retries > 5) throw new Error('Max retries exceeded');
+            break;
+          } else {
+            currentMessage = null;
+          }
+        }
+      });
+      return phases;
+    }
+
+    const readCriticResult = async (jobId: string) => {
+      const row = await getJobForProcessing(env, jobId);
+      return row ? mapJob(row).criticResult : null;
+    };
+
+    it('persists { kept, pruned } and reconciles kept = deduped minus pruned-by-id', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-persist`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      // Prune the finding at index 0; the reconciliation keeps the rest.
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings').mockResolvedValue({
+        rawText: '{"prune":[{"id":0,"reason":"duplicate of another finding"}]}',
+        modelUsed: 'critic-model',
+        inputTokens: 5,
+        outputTokens: 2,
+      });
+
+      // skip_threshold: 1 so a 2-finding set is above the threshold and the model call runs.
+      const job = await insertCriticJob(repo, criticConfig({ skip_threshold: 1 }), 'a');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-persist' });
+
+      expect(phases).toContain('critic');
+      expect(phases.indexOf('critic')).toBeLessThan(phases.indexOf('finalize'));
+      expect(critiqueSpy).toHaveBeenCalledTimes(1);
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult).not.toBeNull();
+      expect(criticResult?.skipped).toBe(false);
+      expect(criticResult?.dedupedCount).toBe(2);
+      expect(criticResult?.pruned).toHaveLength(1);
+      expect(criticResult?.kept).toHaveLength(1);
+      // kept + pruned accounts for the whole deduped candidate set (nothing invented, nothing lost).
+      expect((criticResult?.kept.length ?? 0) + (criticResult?.pruned.length ?? 0)).toBe(2);
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('a'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('skips the model call and keeps all findings when the deduped set is at/below the skip threshold', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-skip`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/one.ts', content: 'console.log(1);' }]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      // Default skip_threshold (CRITIC_SKIP_THRESHOLD = 3); a single-finding set is below it.
+      const job = await insertCriticJob(repo, criticConfig(), 'b');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-skip' });
+
+      expect(phases).toContain('critic');
+      // The critic phase ran but did NOT call the model (keep-all skip).
+      expect(critiqueSpy).not.toHaveBeenCalled();
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult?.skipped).toBe(true);
+      expect(criticResult?.pruned).toHaveLength(0);
+      expect(criticResult?.kept).toHaveLength(1);
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('fails open (keeps all findings, job completes) when the critic model call errors', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService, RetryableModelError } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-failopen`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      // Even a RetryableModelError must fail OPEN inside the critic (never fail/wedge the job).
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings').mockRejectedValue(
+        new (RetryableModelError as any)('Critic provider timed out'),
+      );
+
+      const job = await insertCriticJob(repo, criticConfig({ skip_threshold: 1 }), 'c');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-failopen' });
+
+      expect(phases).toContain('critic');
+      expect(phases).toContain('finalize');
+
+      const criticResult = await readCriticResult(job.id);
+      expect(criticResult?.skipped).toBe(true);
+      expect(criticResult?.pruned).toHaveLength(0);
+      // All candidate findings survive a failed critic — nothing is lost.
+      expect(criticResult?.kept).toHaveLength(2);
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('c'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('routes a continuation-ceiling review degrade INTO the critic when the critic is enabled', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-degrade`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/one.ts', content: 'console.log(1);' }]),
+      );
+      // A subrequest-budget error makes the review chunk defer; with the continuation counter already
+      // at the ceiling, continueOrFailWedgedJob degrades — and must route through the critic selector.
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockRejectedValue(
+        new Error('Too many subrequests'),
+      );
+
+      const job = await insertCriticJob(repo, criticConfig(), 'd');
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      // Pre-set the continuation counter to the ceiling so the next deferral tips the degrade branch.
+      await queryRows(env, `UPDATE jobs SET continuation_count = 20 WHERE id = $1`, [job.id]);
+
+      await runWithDb(env, async () => {
+        const result = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-critic-degrade', phase: 'review' });
+        // A degraded review with the critic ON routes to 'critic' (not straight to 'finalize').
+        expect(result).toEqual({
+          action: 'next_phase',
+          phase: 'critic',
+          delaySeconds: expect.any(Number),
+          jobId: job.id,
+          freshInstance: true,
+        });
+      });
+
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with the critic off, no critic phase is entered and critic_result stays null', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-critic-off`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([
+          { path: 'src/one.ts', content: 'console.log(1);' },
+          { path: 'src/two.ts', content: 'console.log(2);' },
+        ]),
+      );
+      const reviewSpy = vi.spyOn(ModelService.prototype as any, 'reviewFile').mockImplementation(findingReview);
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const job = await insertCriticJob(repo, defaultRepoConfig, 'e');
+      await updateJobFileCount(env, job.id, 2);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+
+      const phases = await drainCapturingPhases({ jobId: job.id, deliveryId: 'delivery-critic-off' });
+
+      // review -> finalize directly; the critic phase is never observed and the model is never called.
+      expect(phases).not.toContain('critic');
+      expect(critiqueSpy).not.toHaveBeenCalled();
+      expect(await readCriticResult(job.id)).toBeNull();
+
+      const finalJob = await findExistingJobForHead(env, { owner: 'test-owner', repo, prNumber: 8, commitSha: sha('e'), trigger: 'auto' });
+      expect(finalJob?.status).toBe('done');
+
+      critiqueSpy.mockRestore();
+      reviewSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+  });
+
   it('marks completed jobs with skipped files as partial reviews', async () => {
     const { GitHubService } = await import('@server/services/github');
     const { ModelService } = await import('@server/services/model');
@@ -1118,4 +1633,1124 @@ dbDescribe('Review Flow Lifecycle', () => {
     createSpy.mockRestore();
     getDiffSpy.mockRestore();
   }, REVIEW_FLOW_TIMEOUT_MS);
+
+  // --- Phase 9 streaming walkthrough (WT-01/WT-02/WT-05, NREG-01/02) ------------------------------
+  describe('streaming walkthrough', () => {
+    const walkthroughConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        walkthrough: { enabled: true, sequence_diagram: { enabled: true } },
+      },
+    });
+
+    const baseJob = (repo: string, prNumber: number) => ({
+      installationId: '123',
+      owner: 'test-owner',
+      repo,
+      prAuthor: 'author',
+      baseSha: sha('b'),
+      trigger: 'auto' as const,
+      headRef: 'feature',
+      baseRef: 'main',
+      prNumber,
+      prTitle: `WT ${prNumber}`,
+      commitSha: sha('a'),
+    });
+
+    const mainComment = (
+      severity: ParsedReviewComment['severity'],
+      path = 'src/app.ts',
+    ): ParsedReviewComment => ({
+      path,
+      line: 1,
+      position: 1,
+      severity,
+      category: 'quality',
+      title: 'Finding',
+      body: 'finding body',
+      confidence: 0.95,
+    });
+
+    async function seedFinalizeJob(
+      repo: string,
+      prNumber: number,
+      opts: { ref?: string; comments?: ParsedReviewComment[]; config?: RepoConfig } = {},
+    ) {
+      const job = await insertJob(env, { ...baseJob(repo, prNumber), configSnapshot: opts.config ?? walkthroughConfig() });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+      await upsertFileReview(env, job.id, {
+        filePath: 'src/app.ts',
+        fileStatus: 'done',
+        modelUsed: 'test-model',
+        modelProvider: 'test-provider',
+        diffLineCount: 1,
+        diffInput: 'diff',
+        rawAiOutput: '{}',
+        parsedComments: opts.comments ?? [],
+        inputTokens: 1,
+        outputTokens: 1,
+        durationMs: 1,
+        verdict: 'comment',
+        fileSummary: 'one-line file summary',
+        errorMessage: null,
+      });
+      if (opts.ref) await updateJobWalkthroughCommentRef(env, job.id, opts.ref);
+      return job;
+    }
+
+    it('WT-01: posts the placeholder once in prepare and edits it once in finalize (github)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-happy`;
+      const job = await insertJob(env, { ...baseJob(repo, 40), configSnapshot: walkthroughConfig() });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-happy', phase: 'prepare' });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).toHaveBeenCalledTimes(1); // placeholder posted once in prepare
+      expect(editSpy).toHaveBeenCalledTimes(1); // single edit in finalize, never re-posted
+      expect(finalJob?.walkthrough_comment_ref).toBe('700');
+
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 idempotent create: a prepare with a ref already set does NOT re-post', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-idem`;
+      const job = await insertJob(env, { ...baseJob(repo, 44), configSnapshot: walkthroughConfig() });
+      // Simulate a prior prepare that already posted the placeholder.
+      await updateJobWalkthroughCommentRef(env, job.id, '4242');
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-idem', phase: 'prepare' });
+        // prepare enqueues the review phase (next_phase) -- it does not re-post the placeholder.
+        expect(res.action).toBe('next_phase');
+      });
+
+      expect(createSpy).not.toHaveBeenCalled();
+      const row = await getJobForProcessing(env, job.id);
+      expect(row?.walkthrough_comment_ref).toBe('4242'); // unchanged
+
+      createSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 delete-recovery: a null edit re-posts + updates the ref; the job still completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockResolvedValue(null);
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment').mockResolvedValue({ id: 808, user: { id: 1, login: 'bot' } });
+      const repo = `test-repo-${Date.now()}-wt-del`;
+      const job = await seedFinalizeJob(repo, 41, { ref: '555', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-del', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(editSpy).toHaveBeenCalledTimes(1); // attempted the edit -> null
+      expect(createSpy).toHaveBeenCalledTimes(1); // re-posted
+      expect(finalJob?.status).toBe('done'); // job still completes
+      expect(finalJob?.walkthrough_comment_ref).toBe('808'); // ref re-pointed
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('D-11: a job with zero reviewable files posts NO placeholder and NO edit', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue('');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-nofiles`;
+      const job = await insertJob(env, { ...baseJob(repo, 45), configSnapshot: walkthroughConfig() });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-nofiles', phase: 'prepare' });
+
+      expect(createSpy).not.toHaveBeenCalled(); // D-11: no placeholder
+      expect(editSpy).not.toHaveBeenCalled(); // and no defensive finalize create either
+      const row = await getJobForProcessing(env, job.id);
+      expect(row?.walkthrough_comment_ref).toBeNull();
+
+      getDiffSpy.mockRestore();
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('D-06: a superseded job skips the walkthrough edit yet the posted review still completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const repo = `test-repo-${Date.now()}-wt-sup`;
+      const job = await seedFinalizeJob(repo, 42, { ref: '321', comments: [mainComment('P2')] });
+      // Flip to superseded DURING submitReview (after the pre-submit supersede check, before the
+      // walkthrough re-check) so the review posts but the walkthrough edit is skipped.
+      const createReviewSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementationOnce(async () => {
+        await queryRows(env, `UPDATE jobs SET status = 'superseded' WHERE id = $1`, [job.id]);
+        return { id: 456 };
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-sup', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(createReviewSpy).toHaveBeenCalledTimes(1); // review posted
+      expect(editSpy).not.toHaveBeenCalled(); // walkthrough edit skipped (superseded)
+      expect(createSpy).not.toHaveBeenCalled(); // no re-post
+      expect(finalJob?.status).toBe('done'); // completeJob still ran; walkthrough did not fail the job
+      expect(Number(finalJob?.review_id)).toBe(456);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+      createReviewSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('ordering: the finalize walkthrough edit runs BEFORE completeJob (job still running)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const jobsMod = await import('@server/db/jobs');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const repo = `test-repo-${Date.now()}-wt-order`;
+      const job = await seedFinalizeJob(repo, 43, { ref: '321', comments: [mainComment('P2')] });
+      let statusAtEdit: string | null = null;
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(async () => {
+        const row = await getJobForProcessing(env, job.id);
+        statusAtEdit = row?.status ?? null;
+        return { id: 700 };
+      });
+      const completeSpy = vi.spyOn(jobsMod, 'completeJob');
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-order', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // The edit observed the job still 'running' -> it ran before completeJob marked it done.
+      expect(statusAtEdit).toBe('running');
+      expect(editSpy).toHaveBeenCalledTimes(1);
+      expect(completeSpy).toHaveBeenCalledTimes(1);
+      expect(editSpy.mock.invocationCallOrder[0]).toBeLessThan(completeSpy.mock.invocationCallOrder[0]);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      completeSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('recovery: a transient edit failure is retried within the invocation, then succeeds', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment')
+        .mockRejectedValueOnce(new Error('transient blip'))
+        .mockResolvedValue({ id: 700 });
+      const repo = `test-repo-${Date.now()}-wt-retry`;
+      const job = await seedFinalizeJob(repo, 46, { ref: '777', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-retry', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(editSpy).toHaveBeenCalledTimes(2); // first throw retried, second succeeds
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(finalJob?.review_id).not.toBeNull();
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('best-effort: a persistently-failing edit never fails the job (review still posted)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockRejectedValue(new Error('provider down'));
+      const repo = `test-repo-${Date.now()}-wt-persist`;
+      const job = await seedFinalizeJob(repo, 47, { ref: '888', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-persist', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(editSpy).toHaveBeenCalledTimes(2); // bounded in-invocation retry (EDIT_MAX_ATTEMPTS)
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done'); // best-effort: the job is not failed
+      expect(finalJob?.review_id).not.toBeNull(); // the review is posted
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-02: the finalize edit body carries per-severity counts and a coverage row per file', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_owner: string, _repo: string, _id: number, body: string) => {
+          capturedBody = body;
+          return { id: 700 };
+        },
+      );
+      const repo = `test-repo-${Date.now()}-wt-body`;
+      const job = await seedFinalizeJob(repo, 48, { ref: '901', comments: [mainComment('P0'), mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-body', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      expect(capturedBody).toContain('src/app.ts'); // coverage row for the reviewed file
+      expect(capturedBody).toMatch(/×2|×1/); // per-severity counts rendered
+      expect(capturedBody).toContain('1 file reviewed');
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03 (github): mermaid fence + diagram fed the REAL diff + exactly one call + tokens folded', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_owner: string, _repo: string, _id: number, body: string) => {
+          capturedBody = body;
+          return { id: 700 };
+        },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      const repo = `test-repo-${Date.now()}-wt03-gh`;
+      const job = await seedFinalizeJob(repo, 60, { ref: '910', comments: [mainComment('P1')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-gh', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // GitHub (supportsMermaid true) + sequence_diagram on + a valid diagram response -> fenced block.
+      expect(capturedBody).toContain('```mermaid');
+      expect(capturedBody).toContain('sequenceDiagram');
+      // Exactly ONE diagram inference request on the enabled GitHub path (no fallback fan-out).
+      expect(diagramSpy).toHaveBeenCalledTimes(1);
+      // Fed the ACTUAL parsed diff (FileDiff[] with hunks), not only the {path,summary,verdict} rows.
+      const diagramArg = diagramSpy.mock.calls[0][0] as any;
+      expect(Array.isArray(diagramArg.files)).toBe(true);
+      expect(diagramArg.files.length).toBeGreaterThan(0);
+      expect(diagramArg.files[0].path).toBe('src/app.ts');
+      expect(diagramArg.files[0]).toHaveProperty('hunks');
+      // The diagram call's tokens are folded into the persisted job totals (file + summary + diagram).
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.total_input_tokens).toBe(1 + 3 + 7);
+      expect(finalJob?.total_output_tokens).toBe(1 + 2 + 4);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03 (github): sub-toggle OFF makes no diagram call and emits no mermaid fence (D-09)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      const subToggleOff: RepoConfig = {
+        ...defaultRepoConfig,
+        review: {
+          ...defaultRepoConfig.review,
+          walkthrough: { enabled: true, sequence_diagram: { enabled: false } },
+        },
+      };
+      const repo = `test-repo-${Date.now()}-wt03-off`;
+      const job = await seedFinalizeJob(repo, 61, { ref: '911', comments: [mainComment('P2')], config: subToggleOff });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-off', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).not.toHaveBeenCalled(); // sub-toggle off -> the call is skipped entirely
+      expect(capturedBody).toContain('OpenCodra Walkthrough'); // walkthrough still posts
+      expect(capturedBody).not.toContain('```mermaid'); // but no diagram
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.total_input_tokens).toBe(1 + 3); // no diagram tokens folded
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03 (bitbucket): supportsMermaid false skips the diagram call and emits no fence (Pitfall #7)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const { VcsService } = await import('@server/services/vcs');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      // Drive the finalize path against a provider whose capabilities.supportsMermaid is false. Full
+      // Bitbucket client fixtures aren't needed to prove the capability gate: reuse the GitHub adapter
+      // (so all the mocked service plumbing works) but override name + capabilities to Bitbucket's.
+      const forRepoSpy = vi.spyOn(VcsService, 'forRepo').mockImplementation(async (e: any, j: any, t: any) => {
+        const { GithubAdapter } = await import('@server/vcs/github');
+        const adapter = new GithubAdapter(e, j.installationId ?? '', t);
+        Object.defineProperty(adapter, 'name', { value: 'bitbucket', configurable: true });
+        Object.defineProperty(adapter, 'capabilities', { value: { supportsMermaid: false }, configurable: true });
+        return adapter;
+      });
+      const repo = `test-repo-${Date.now()}-wt03-bb`;
+      const job = await seedFinalizeJob(repo, 62, { ref: '912', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-bb', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).not.toHaveBeenCalled(); // capability gate: the diagram call is NOT made
+      expect(capturedBody).not.toContain('```mermaid'); // no raw mermaid fence ever reaches Bitbucket
+      expect(capturedBody).toContain('OpenCodra Walkthrough'); // the rest of the walkthrough is intact
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+      forRepoSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03/WT-04 (github): a THROWN diagram call omits the diagram; the walkthrough still posts and the job completes', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram')
+        .mockRejectedValue(new Error('diagram model down'));
+      const repo = `test-repo-${Date.now()}-wt03-throw`;
+      const job = await seedFinalizeJob(repo, 63, { ref: '913', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-throw', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(diagramSpy).toHaveBeenCalledTimes(1);
+      expect(capturedBody).not.toContain('```mermaid'); // best-effort omit
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      expect(editSpy).toHaveBeenCalledTimes(1); // the walkthrough still posts
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done'); // the job completes
+      expect(finalJob?.review_id).not.toBeNull();
+      expect(finalJob?.total_input_tokens).toBe(1 + 3); // no diagram tokens folded on failure
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-03/WT-04 (github): unparseable diagram output omits the diagram but folds the spent tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'x' }]),
+      );
+      let capturedBody = '';
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: string, _r: string, _id: number, body: string) => { capturedBody = body; return { id: 700 }; },
+      );
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram')
+        .mockResolvedValue({ modelUsed: 'diagram-model', provider: 'google', rawText: 'this is not a diagram', inputTokens: 5, outputTokens: 2 });
+      const repo = `test-repo-${Date.now()}-wt03-garbage`;
+      const job = await seedFinalizeJob(repo, 64, { ref: '914', comments: [mainComment('P2')] });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt03-garbage', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      expect(capturedBody).not.toContain('```mermaid'); // parseWalkthroughDiagram returned null -> omitted
+      expect(capturedBody).toContain('OpenCodra Walkthrough');
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      // The call succeeded (tokens were spent) even though the parse returned null, so they're folded.
+      expect(finalJob?.total_input_tokens).toBe(1 + 3 + 5);
+
+      getDiffSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with the walkthrough OFF there are zero comment side effects and no ref write', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment');
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment');
+      const diagramSpy = vi.spyOn(ModelService.prototype as any, 'generateWalkthroughDiagram');
+      const repo = `test-repo-${Date.now()}-wt-off`;
+      // defaultRepoConfig has walkthrough.enabled === false.
+      const job = await insertJob(env, { ...baseJob(repo, 49), configSnapshot: defaultRepoConfig });
+
+      await runAndDrain({ jobId: job.id, deliveryId: 'delivery-wt-off', phase: 'prepare' });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(editSpy).not.toHaveBeenCalled();
+      expect(diagramSpy).not.toHaveBeenCalled(); // walkthrough off -> no diagram model call either
+      expect(finalJob?.walkthrough_comment_ref).toBeNull();
+
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+      diagramSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('WT-05 handoff: prepare + finalize as SEPARATE runReviewJob calls edit the SAME ref (DB-backed)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createIssueComment').mockResolvedValue({ id: 1234, user: { id: 1, login: 'bot' } });
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockResolvedValue({ id: 1234 });
+      const repo = `test-repo-${Date.now()}-wt-handoff`;
+      const job = await insertJob(env, { ...baseJob(repo, 51), configSnapshot: walkthroughConfig() });
+
+      // Drive prepare + review to completion (placeholder posts + ref persists in prepare).
+      await runWithDb(env, async () => {
+        let msg: any = { jobId: job.id, deliveryId: 'delivery-wt-handoff', phase: 'prepare' };
+        while (msg && msg.phase !== 'finalize') {
+          const res = await runReviewJob(env, msg);
+          if (res.action === 'next_phase') {
+            await queryRows(env, `UPDATE jobs SET last_queue_message_at = now() - interval '5 seconds' WHERE id = $1`, [job.id]);
+            if (res.phase === 'finalize') { msg = null; break; }
+            msg = { ...msg, phase: res.phase };
+          } else {
+            msg = null;
+          }
+        }
+      });
+
+      // The placeholder ref is now durable in Postgres.
+      const afterPrepare = await getJobForProcessing(env, job.id);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(afterPrepare?.walkthrough_comment_ref).toBe('1234');
+
+      // A FRESH finalize invocation re-reads the job row from the DB and edits the SAME comment.
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-wt-handoff-final', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(createSpy).toHaveBeenCalledTimes(1); // NO second placeholder across the handoff
+      expect(editSpy).toHaveBeenCalledTimes(1); // the same comment edited once
+      // The GitHub adapter converts the opaque ref '1234' -> numeric commentId before the service
+      // call, so the service-level spy sees the number; the durable ref (asserted below) is '1234'.
+      expect(editSpy.mock.calls[0][2]).toBe(1234); // edited by the ref read from the DB
+      expect(finalJob?.walkthrough_comment_ref).toBe('1234');
+
+      getDiffSpy.mockRestore();
+      createSpy.mockRestore();
+      editSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    // NREG-02: the placeholder create, single edit, and delete-recovery are asserted directly on the
+    // provider-agnostic core/walkthrough helpers for BOTH provider names (opaque ref, D-13). Driving a
+    // full Bitbucket runReviewJob would require the Bitbucket client fixtures; the core helpers are the
+    // provider seam, so a hand-rolled VcsProvider per name is the precise both-provider proof.
+    describe.each(['github', 'bitbucket'] as const)('NREG-02 core helpers (%s)', (providerName) => {
+      const makeVcs = (createRef: string, editResult: { ref: string } | null | 'throw' = { ref: createRef }) => {
+        const create = vi.fn(async () => ({ ref: createRef }));
+        const edit = vi.fn(async (_o: string, _r: string, ref: string) => {
+          if (editResult === 'throw') throw new Error('transient');
+          return editResult === null ? null : { ref };
+        });
+        const vcs = {
+          name: providerName,
+          capabilities: { supportsMermaid: providerName === 'github' },
+          createPrComment: create,
+          editPrComment: edit,
+        } as unknown as VcsProvider;
+        return { vcs, create, edit };
+      };
+
+      it('posts the placeholder once, persists the ref, and edits in place', async () => {
+        const ref = providerName === 'bitbucket' ? '10:20' : '700';
+        const { vcs, create, edit } = makeVcs(ref);
+        const repo = `test-repo-${Date.now()}-nreg2-${providerName}`;
+        const job = await insertJob(env, { ...baseJob(repo, 52), configSnapshot: walkthroughConfig() });
+        const formatter = new FormatterService(env.APP_URL);
+
+        await runWithDb(env, async () => {
+          await postWalkthroughPlaceholder({ env, job: { ...job, walkthroughCommentRef: null }, config: walkthroughConfig(), fileCount: 2, vcs });
+        });
+        expect(create).toHaveBeenCalledTimes(1);
+        const afterCreate = await getJobForProcessing(env, job.id);
+        expect(afterCreate?.walkthrough_comment_ref).toBe(ref);
+
+        // Idempotent: a second placeholder call with the ref set does not re-create.
+        await runWithDb(env, async () => {
+          await postWalkthroughPlaceholder({ env, job: { ...job, walkthroughCommentRef: ref }, config: walkthroughConfig(), fileCount: 2, vcs });
+        });
+        expect(create).toHaveBeenCalledTimes(1);
+
+        // Single in-place edit.
+        const data = buildWalkthroughData({
+          reviews: [{ file_path: 'src/app.ts', file_summary: 'ok', file_status: 'done', error_msg: null, verdict: 'comment', diff_line_count: 3, pass: 'main' }],
+          finalComments: [mainComment('P2')],
+        });
+        await runWithDb(env, async () => {
+          await editWalkthroughComment({ env, job: { ...job, walkthroughCommentRef: ref }, config: walkthroughConfig(), vcs, formatter, data, mermaid: null });
+        });
+        expect(edit).toHaveBeenCalledTimes(1);
+        expect(edit.mock.calls[0][2]).toBe(ref);
+      });
+
+      it('delete-recovery: a null edit re-posts and re-points the ref', async () => {
+        const oldRef = providerName === 'bitbucket' ? '10:20' : '700';
+        const newRef = providerName === 'bitbucket' ? '10:99' : '999';
+        const { vcs, create, edit } = makeVcs(newRef, null);
+        const repo = `test-repo-${Date.now()}-nreg2del-${providerName}`;
+        const job = await insertJob(env, { ...baseJob(repo, 53), configSnapshot: walkthroughConfig() });
+        await updateJobWalkthroughCommentRef(env, job.id, oldRef);
+        const formatter = new FormatterService(env.APP_URL);
+        const data = buildWalkthroughData({
+          reviews: [{ file_path: 'src/app.ts', file_summary: 'ok', file_status: 'done', error_msg: null, verdict: 'comment', diff_line_count: 3, pass: 'main' }],
+          finalComments: [mainComment('P2')],
+        });
+
+        await runWithDb(env, async () => {
+          await editWalkthroughComment({ env, job: { ...job, walkthroughCommentRef: oldRef }, config: walkthroughConfig(), vcs, formatter, data, mermaid: null });
+        });
+
+        expect(edit).toHaveBeenCalledTimes(1); // attempted the edit -> null
+        expect(create).toHaveBeenCalledTimes(1); // re-posted
+        const row = await getJobForProcessing(env, job.id);
+        expect(row?.walkthrough_comment_ref).toBe(newRef);
+      });
+    });
+
+    // Pure aggregation invariants (WT-04): pass filter, sort order, deterministic fallback.
+    describe('buildWalkthroughData (pure)', () => {
+      const row = (over: Partial<WalkthroughReviewRow>): WalkthroughReviewRow => ({
+        file_path: 'f',
+        file_summary: 'summary',
+        file_status: 'done',
+        error_msg: null,
+        verdict: 'comment',
+        diff_line_count: 0,
+        pass: 'main',
+        ...over,
+      });
+
+      it('excludes non-main-pass rows (forward-compat with Phase 10 security pass)', () => {
+        const data = buildWalkthroughData({
+          reviews: [
+            row({ file_path: 'main.ts', pass: 'main' }),
+            row({ file_path: 'sec.ts', pass: 'security' }),
+          ],
+          finalComments: [],
+        });
+        expect(data.filesReviewed).toBe(1);
+        expect(data.files.map((f) => f.path)).toEqual(['main.ts']);
+      });
+
+      it('sorts by highest severity present then most-changed (diff_line_count ?? 0)', () => {
+        const data = buildWalkthroughData({
+          reviews: [
+            row({ file_path: 'low.ts', diff_line_count: 5 }),
+            row({ file_path: 'high.ts', diff_line_count: 1 }),
+            row({ file_path: 'big.ts', diff_line_count: 100 }),
+          ],
+          finalComments: [
+            mainComment('nit', 'low.ts'),
+            mainComment('P0', 'high.ts'),
+            // big.ts has no findings -> sorts last despite the largest diff.
+          ],
+        });
+        expect(data.files.map((f) => f.path)).toEqual(['high.ts', 'low.ts', 'big.ts']);
+      });
+
+      it('renders a coverage row with a deterministic summary even when file_summary is empty', () => {
+        const data = buildWalkthroughData({
+          reviews: [row({ file_path: 'empty.ts', file_summary: '' })],
+          finalComments: [],
+        });
+        expect(data.files).toHaveLength(1);
+        expect(data.files[0].path).toBe('empty.ts');
+        expect(data.files[0].summary).toBe('');
+      });
+
+      it('uses the Review-failed fallback text for a failed row', () => {
+        const data = buildWalkthroughData({
+          reviews: [row({ file_path: 'boom.ts', file_status: 'failed', error_msg: 'kaboom', file_summary: null })],
+          finalComments: [],
+        });
+        expect(data.files[0].summary).toBe('Review failed: kaboom');
+      });
+    });
+  });
+
+  // --- Phase 10 finalize multi-pass pipeline (MP-02 / MP-04 / NREG-01 / NREG-02) -------------------
+  describe('finalize multi-pass pipeline (MP-02 / MP-04 / NREG)', () => {
+    const finding = (over: Partial<ParsedReviewComment>): ParsedReviewComment => ({
+      path: 'src/app.ts',
+      line: 1,
+      position: 1,
+      severity: 'P1',
+      category: 'security',
+      title: 'Finding',
+      body: 'Finding body',
+      confidence: 0.9,
+      ...over,
+    });
+
+    // security on, critic off
+    const securityConfig = (): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: { security: { enabled: true }, critic: { enabled: false } },
+      },
+    });
+
+    // critic on (security optionally on)
+    const criticEnabledConfig = (security: boolean): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        passes: { security: { enabled: security }, critic: { enabled: true } },
+      },
+    });
+
+    // walkthrough on, diagram off (deterministic body), security optionally on
+    const walkthroughSecurityConfig = (security: boolean): RepoConfig => ({
+      ...defaultRepoConfig,
+      review: {
+        ...defaultRepoConfig.review,
+        walkthrough: { enabled: true, sequence_diagram: { enabled: false } },
+        passes: { security: { enabled: security }, critic: { enabled: false } },
+      },
+    });
+
+    async function seedReadyJob(
+      repo: string,
+      prNumber: number,
+      opts: {
+        config: RepoConfig;
+        mainComments?: ParsedReviewComment[];
+        securityComments?: ParsedReviewComment[];
+        criticResult?: Parameters<typeof updateJobCriticResult>[2];
+        completingStarted?: boolean;
+        ref?: string;
+        commitChar?: string;
+      },
+    ) {
+      const job = await insertJob(env, {
+        installationId: '123',
+        owner: 'test-owner',
+        repo,
+        prNumber,
+        prTitle: 'MP finalize',
+        prAuthor: 'author',
+        commitSha: sha(opts.commitChar ?? 'a'),
+        baseSha: sha('0'),
+        trigger: 'auto',
+        headRef: 'feature',
+        baseRef: 'main',
+        configSnapshot: opts.config,
+      });
+      await updateJobFileCount(env, job.id, 1);
+      await updateJobStep(env, job.id, 'Preparation', { status: 'done' });
+      await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
+      // The (file,'main') row is always present.
+      await upsertFileReview(env, job.id, {
+        filePath: 'src/app.ts',
+        pass: 'main',
+        fileStatus: 'done',
+        modelUsed: 'test-model',
+        modelProvider: 'test-provider',
+        diffLineCount: 1,
+        diffInput: 'diff',
+        rawAiOutput: '{}',
+        parsedComments: opts.mainComments ?? [],
+        inputTokens: 10,
+        outputTokens: 5,
+        durationMs: 1,
+        verdict: 'comment',
+        fileSummary: 'main summary',
+        overallCorrectness: 'issues found',
+        confidenceScore: 0.9,
+        errorMessage: null,
+      });
+      // The (file,'security') row exists only when the security pass ran.
+      if (opts.securityComments) {
+        await upsertFileReview(env, job.id, {
+          filePath: 'src/app.ts',
+          pass: 'security',
+          fileStatus: 'done',
+          modelUsed: 'test-model',
+          modelProvider: 'test-provider',
+          diffLineCount: 1,
+          diffInput: 'diff',
+          rawAiOutput: '{}',
+          parsedComments: opts.securityComments,
+          inputTokens: 8,
+          outputTokens: 4,
+          durationMs: 1,
+          verdict: 'comment',
+          fileSummary: 'security summary',
+          overallCorrectness: 'issues found',
+          confidenceScore: 0.9,
+          errorMessage: null,
+        });
+      }
+      if (opts.criticResult) await updateJobCriticResult(env, job.id, opts.criticResult);
+      if (opts.ref) await updateJobWalkthroughCommentRef(env, job.id, opts.ref);
+      // Marks a prior finalize attempt that reached the posting stage (finalizeRetriedPastPost).
+      if (opts.completingStarted) await updateJobStep(env, job.id, 'Completing', { status: 'running' });
+      return job;
+    }
+
+    it('MP-02: a finding duplicated across the main and security passes posts exactly once', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-mp02-dedup`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+
+      const dupBody = 'User input flows into the SQL query without sanitization.';
+      const job = await seedReadyJob(repo, 70, {
+        config: securityConfig(),
+        mainComments: [finding({ title: 'SQL injection in query', body: dupBody })],
+        securityComments: [
+          finding({ title: 'SQL injection in query', body: dupBody }), // duplicate of the main finding
+          finding({ title: 'XSS in template render', body: 'Unescaped user data rendered into HTML.' }), // distinct
+        ],
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp02', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // union = [SQL(main), SQL(security-dup), XSS(security)] = 3; dedup collapses the two SQL findings
+      // to one while keeping the distinct XSS finding.
+      expect(captured).toHaveLength(2);
+      expect(captured.filter((c: any) => c.body.includes('SQL injection in query'))).toHaveLength(1);
+      expect(captured.filter((c: any) => c.body.includes('XSS in template render'))).toHaveLength(1);
+
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('MP-04: finalize consumes criticResult.kept (not the raw union) and folds critic tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-mp04-consume`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const kept = finding({ title: 'Kept finding', body: 'This one survives the critic.' });
+      const pruned = finding({ title: 'Pruned finding', body: 'This one was dropped by the critic.' });
+      // The main row carries BOTH findings; the persisted critic result keeps only one. If finalize
+      // re-derived the set from the rows it would post 2 — so posting exactly `kept` proves consumption.
+      const job = await seedReadyJob(repo, 71, {
+        config: criticEnabledConfig(false),
+        mainComments: [kept, pruned],
+        criticResult: {
+          kept: [kept],
+          pruned: [{ finding: pruned, reason: 'duplicate' }],
+          model: 'critic-model',
+          inputTokens: 11,
+          outputTokens: 7,
+          skipped: false,
+          dedupedCount: 2,
+        },
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp04-consume', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Posts ONLY the critic's kept set; the pruned finding never re-surfaces (D-08).
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body).toContain('Kept finding');
+      expect(captured.some((c: any) => c.body.includes('Pruned finding'))).toBe(false);
+      // Finalize NEVER calls the critic model (D-07); it only READS the persisted result.
+      expect(critiqueSpy).not.toHaveBeenCalled();
+
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      // Critic tokens folded in: file(10) + summary(3) + critic(11) in; file(5) + summary(2) + critic(7) out.
+      expect(finalJob?.total_input_tokens).toBe(10 + 3 + 11);
+      expect(finalJob?.total_output_tokens).toBe(5 + 2 + 7);
+
+      critiqueSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('MP-04: a finalize retry past the posting stage reuses the review and issues ZERO critic calls (non-vacuous)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { ModelService } = await import('@server/services/model');
+      const repo = `test-repo-${Date.now()}-mp04-retry`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      // A prior finalize attempt already posted this review (id 999) but died before recording it.
+      const findSpy = vi.spyOn(GitHubService.prototype, 'findBotReviewForCommit').mockResolvedValue({ id: 999 });
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview');
+      const critiqueSpy = vi.spyOn(ModelService.prototype as any, 'critiqueFindings');
+
+      const kept = finding({ title: 'Kept finding', body: 'survives' });
+      // Seed a RUNNING job (NOT completed) with the 'Completing' step already started and a persisted
+      // critic result — so finalize actually EXECUTES its body (a completed job would be acked before
+      // phase execution, making the assertion vacuous).
+      const job = await seedReadyJob(repo, 72, {
+        config: criticEnabledConfig(true),
+        mainComments: [kept],
+        securityComments: [finding({ title: 'Security finding', body: 'sec' })],
+        criticResult: {
+          kept: [kept],
+          pruned: [],
+          model: 'critic-model',
+          inputTokens: 11,
+          outputTokens: 7,
+          skipped: false,
+          dedupedCount: 2,
+        },
+        completingStarted: true,
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-mp04-retry', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // D-07: finalize never calls the critic model. The existing review is reused, not double-posted.
+      expect(critiqueSpy).not.toHaveBeenCalled();
+      expect(findSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy).not.toHaveBeenCalled();
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(finalJob?.status).toBe('done');
+      expect(Number(finalJob?.review_id)).toBe(999);
+      // Critic tokens are still folded on the reuse path: main(10) + security(8) + summary(3) + critic(11).
+      expect(finalJob?.total_input_tokens).toBe(10 + 8 + 3 + 11);
+
+      critiqueSpy.mockRestore();
+      findSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG: toggling passes.security never changes the Phase-9 walkthrough (coverage/counts/ordering)', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-wt-invariance`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      const walkBodies: string[] = [];
+      const editSpy = vi.spyOn(GitHubService.prototype, 'updateIssueComment').mockImplementation(
+        async (_o: any, _r: any, _id: any, body: string) => { walkBodies.push(body); return { id: 700 }; },
+      );
+      const reviewCommentCounts: number[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { reviewCommentCounts.push(input.comments.length); return { id: 456 }; },
+      );
+
+      const mainFinding = finding({ title: 'Main finding', body: 'main body' });
+
+      // Run 1: security OFF, main finding only.
+      const jobOff = await seedReadyJob(repo, 73, {
+        config: walkthroughSecurityConfig(false),
+        mainComments: [mainFinding],
+        ref: '801',
+        commitChar: 'a',
+      });
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: jobOff.id, deliveryId: 'delivery-wt-inv-off', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Run 2: security ON, same main finding + an extra distinct security finding.
+      const jobOn = await seedReadyJob(`${repo}-2`, 74, {
+        config: walkthroughSecurityConfig(true),
+        mainComments: [mainFinding],
+        securityComments: [finding({ title: 'Security finding', body: 'sec body' })],
+        ref: '802',
+        commitChar: 'b',
+      });
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: jobOn.id, deliveryId: 'delivery-wt-inv-on', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // The walkthrough body is byte-identical whether or not the security pass ran (Pitfall 3, corrected).
+      expect(walkBodies).toHaveLength(2);
+      expect(walkBodies[0]).toBe(walkBodies[1]);
+      // Non-vacuous: the security pass really did add a posted comment, so the invariance is meaningful.
+      expect(reviewCommentCounts).toEqual([1, 2]);
+
+      editSpy.mockRestore();
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-01: with security AND critic both off, finalize posts the main-only set and folds no critic tokens', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const repo = `test-repo-${Date.now()}-nreg01-finalize`;
+      const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+        generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+      );
+      let captured: any[] = [];
+      const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+        async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+      );
+
+      const a = finding({ title: 'Alpha finding', body: 'alpha' });
+      const b = finding({ title: 'Beta finding', body: 'beta' });
+      const job = await seedReadyJob(repo, 75, {
+        config: defaultRepoConfig, // security off, critic off, walkthrough off
+        mainComments: [a, b],
+        commitChar: 'a',
+      });
+
+      await runWithDb(env, async () => {
+        const res = await runReviewJob(env, { jobId: job.id, deliveryId: 'delivery-nreg01-finalize', phase: 'finalize' });
+        expect(res).toEqual({ action: 'ack' });
+      });
+
+      // Posted set == the main-only flatMap (no dedup, no critic consumption) — byte-identical to v1.0.
+      expect(captured).toHaveLength(2);
+      expect(captured.map((c: any) => c.path)).toEqual(['src/app.ts', 'src/app.ts']);
+      expect(captured.some((c: any) => c.body.includes('Alpha finding'))).toBe(true);
+      expect(captured.some((c: any) => c.body.includes('Beta finding'))).toBe(true);
+
+      const reviews = await getFileReviewsForJobs(env, [job.id]);
+      expect(reviews.filter((r) => r.pass === 'security')).toHaveLength(0);
+      const finalJob = await getJobForProcessing(env, job.id);
+      expect(mapJob(finalJob!).criticResult).toBeNull();
+      // No critic tokens folded (critic off -> +0): main(10) + summary(3) in, main(5) + summary(2) out.
+      expect(finalJob?.total_input_tokens).toBe(10 + 3);
+      expect(finalJob?.total_output_tokens).toBe(5 + 2);
+
+      createSpy.mockRestore();
+      getDiffSpy.mockRestore();
+    }, REVIEW_FLOW_TIMEOUT_MS);
+
+    it('NREG-02: the same deduped candidate set posts the same comments on GitHub and Bitbucket', async () => {
+      const { GitHubService } = await import('@server/services/github');
+      const { VcsService } = await import('@server/services/vcs');
+
+      const dupBody = 'user input flows into the query';
+      const seed = {
+        mainComments: [finding({ title: 'SQL injection', body: dupBody })],
+        securityComments: [
+          finding({ title: 'SQL injection', body: dupBody }), // dup of the main finding -> collapses
+          finding({ title: 'Missing authz check', body: 'no permission check on the route' }), // distinct
+        ],
+      };
+
+      const capture = async (repo: string, prNumber: number, commitChar: string, asBitbucket: boolean) => {
+        const getDiffSpy = vi.spyOn(GitHubService.prototype, 'getPullRequestDiff').mockResolvedValue(
+          generateMockDiff([{ path: 'src/app.ts', content: 'console.log(1);' }]),
+        );
+        let captured: any[] = [];
+        const createSpy = vi.spyOn(GitHubService.prototype, 'createReview').mockImplementation(
+          async (_o: any, _r: any, _p: any, input: any) => { captured = input.comments; return { id: 456 }; },
+        );
+        let forRepoSpy: any = null;
+        if (asBitbucket) {
+          // Explicit provider mock: reuse the GitHub adapter plumbing but present as Bitbucket, so
+          // finalize formats through the Bitbucket branch and posts via the same submitReview seam.
+          forRepoSpy = vi.spyOn(VcsService, 'forRepo').mockImplementation(async (e: any, j: any, t: any) => {
+            const { GithubAdapter } = await import('@server/vcs/github');
+            const adapter = new GithubAdapter(e, j.installationId ?? '', t);
+            Object.defineProperty(adapter, 'name', { value: 'bitbucket', configurable: true });
+            Object.defineProperty(adapter, 'capabilities', { value: { supportsMermaid: false }, configurable: true });
+            return adapter;
+          });
+        }
+        const job = await seedReadyJob(repo, prNumber, { config: securityConfig(), ...seed, commitChar });
+        await runWithDb(env, async () => {
+          const res = await runReviewJob(env, { jobId: job.id, deliveryId: `delivery-nreg02-${asBitbucket ? 'bb' : 'gh'}`, phase: 'finalize' });
+          expect(res).toEqual({ action: 'ack' });
+        });
+        createSpy.mockRestore();
+        getDiffSpy.mockRestore();
+        if (forRepoSpy) forRepoSpy.mockRestore();
+        return captured;
+      };
+
+      const gh = await capture(`test-repo-${Date.now()}-nreg02-gh`, 76, 'a', false);
+      const bb = await capture(`test-repo-${Date.now()}-nreg02-bb`, 77, 'b', true);
+
+      // Same candidate set -> same count, paths, and positions on both providers (D-11 / NREG-02).
+      expect(gh).toHaveLength(2);
+      expect(bb).toHaveLength(2);
+      expect(bb.map((c: any) => c.path)).toEqual(gh.map((c: any) => c.path));
+      expect(bb.map((c: any) => c.position)).toEqual(gh.map((c: any) => c.position));
+      // The same findings surface on both (only the provider-specific severity icon differs).
+      for (const title of ['SQL injection', 'Missing authz check']) {
+        expect(gh.filter((c: any) => c.body.includes(title))).toHaveLength(1);
+        expect(bb.filter((c: any) => c.body.includes(title))).toHaveLength(1);
+      }
+      // Non-vacuous: bitbucket really went through the provider override (emoji icon, not the GitHub <img>).
+      expect(gh.some((c: any) => c.body.includes('<img'))).toBe(true);
+      expect(bb.some((c: any) => c.body.includes('<img'))).toBe(false);
+    }, REVIEW_FLOW_TIMEOUT_MS);
+  });
 });

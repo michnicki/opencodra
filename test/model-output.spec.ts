@@ -1,4 +1,4 @@
-import { parseFileReviewResponse } from '@server/core/model-output';
+import { parseCriticPruneResponse, parseFileReviewResponse, parseWalkthroughDiagram } from '@server/core/model-output';
 import type { FileDiff } from '@server/core/diff';
 
 describe('Model Output Parsing Deep Dive', () => {
@@ -207,5 +207,136 @@ export function nextOwner(owner: string) {
     const result = parseFileReviewResponse(rawOutput, mockFile);
     expect(result.comments).toHaveLength(1);
     expect(result.comments[0].confidence == null).toBe(true);
+  });
+});
+
+describe('parseWalkthroughDiagram (WT-04)', () => {
+  const noFence = (s: string | null) => {
+    expect(s).not.toBeNull();
+    expect(s!.startsWith('```')).toBe(false);
+    expect(s!.endsWith('```')).toBe(false);
+  };
+
+  it('returns fence-free source for a bare sequenceDiagram payload', () => {
+    const out = parseWalkthroughDiagram('sequenceDiagram\n  A->>B: hi');
+    noFence(out);
+    expect(out).toContain('sequenceDiagram');
+    expect(out).toContain('A->>B: hi');
+  });
+
+  it('unwraps a ```mermaid fenced block and returns fence-free source', () => {
+    const out = parseWalkthroughDiagram('```mermaid\nsequenceDiagram\n  A->>B: hi\n```');
+    noFence(out);
+    expect(out).toBe('sequenceDiagram\n  A->>B: hi');
+  });
+
+  it('unwraps a bare ``` fenced block', () => {
+    const out = parseWalkthroughDiagram('```\nsequenceDiagram\n  A->>B: hi\n```');
+    noFence(out);
+    expect(out).toContain('sequenceDiagram');
+  });
+
+  it('strips a leading <think>...</think> block before validating', () => {
+    const out = parseWalkthroughDiagram(
+      '<think>let me reason about this</think>\nsequenceDiagram\n  A->>B: hi',
+    );
+    noFence(out);
+    expect(out).toBe('sequenceDiagram\n  A->>B: hi');
+    expect(out).not.toContain('reason');
+  });
+
+  it('strips a <think> block wrapping a fenced diagram', () => {
+    const out = parseWalkthroughDiagram(
+      '<think>planning</think>\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```',
+    );
+    noFence(out);
+    expect(out).toBe('sequenceDiagram\n  A->>B: hi');
+  });
+
+  it('accepts leading %% comment lines before sequenceDiagram', () => {
+    const out = parseWalkthroughDiagram('%% generated\nsequenceDiagram\n  A->>B: hi');
+    noFence(out);
+    expect(out).toContain('sequenceDiagram');
+  });
+
+  it('returns null for an empty string', () => {
+    expect(parseWalkthroughDiagram('')).toBeNull();
+    expect(parseWalkthroughDiagram('   \n  ')).toBeNull();
+  });
+
+  it('returns null for <think>-only output (no diagram)', () => {
+    expect(parseWalkthroughDiagram('<think>just reasoning, no diagram</think>')).toBeNull();
+  });
+
+  it('returns null when sequenceDiagram is only mentioned mid-paragraph (first token is prose)', () => {
+    expect(
+      parseWalkthroughDiagram('Here is a sequenceDiagram you might like: A talks to B.'),
+    ).toBeNull();
+  });
+
+  it('returns null for an over-length source', () => {
+    const huge = 'sequenceDiagram\n' + '  A->>B: x\n'.repeat(5000);
+    expect(huge.length).toBeGreaterThan(20_000);
+    expect(parseWalkthroughDiagram(huge)).toBeNull();
+  });
+
+  it('returns null for garbage / non-diagram output', () => {
+    expect(parseWalkthroughDiagram('{"foo": "bar"}')).toBeNull();
+    expect(parseWalkthroughDiagram('graph TD; A-->B;')).toBeNull();
+  });
+});
+
+describe('parseCriticPruneResponse (D-05 ID-based prune contract)', () => {
+  it('returns { id, reason }[] for a well-formed prune object', () => {
+    const out = parseCriticPruneResponse('{"prune":[{"id":0,"reason":"false positive"},{"id":2,"reason":"nitpick"}]}');
+    expect(out).toEqual([
+      { id: 0, reason: 'false positive' },
+      { id: 2, reason: 'nitpick' },
+    ]);
+  });
+
+  it('extracts the prune object from a ```json fenced block with surrounding prose', () => {
+    const raw = 'Here is my verdict:\n```json\n{ "prune": [ { "id": 1, "reason": "duplicate" } ] }\n```\nDone.';
+    expect(parseCriticPruneResponse(raw)).toEqual([{ id: 1, reason: 'duplicate' }]);
+  });
+
+  it('strips a leading <think> block before parsing', () => {
+    const raw = '<think>let me decide which to drop</think>\n{"prune":[{"id":3,"reason":"stylistic"}]}';
+    expect(parseCriticPruneResponse(raw)).toEqual([{ id: 3, reason: 'stylistic' }]);
+  });
+
+  it('skips malformed entries per-item (bad id / missing reason) and keeps valid ones', () => {
+    const raw = JSON.stringify({
+      prune: [
+        { id: 0, reason: 'keep this one' },
+        { id: 'nope', reason: 'bad id type' },
+        { id: -1, reason: 'negative id rejected' },
+        { id: 4 }, // missing reason
+        { reason: 'missing id' },
+        { id: 5, reason: 'also valid' },
+      ],
+    });
+    expect(parseCriticPruneResponse(raw)).toEqual([
+      { id: 0, reason: 'keep this one' },
+      { id: 5, reason: 'also valid' },
+    ]);
+  });
+
+  it('returns [] for an empty prune array', () => {
+    expect(parseCriticPruneResponse('{"prune":[]}')).toEqual([]);
+  });
+
+  it('returns [] for unparseable / non-JSON input', () => {
+    expect(parseCriticPruneResponse('not json at all, just prose')).toEqual([]);
+    expect(parseCriticPruneResponse('')).toEqual([]);
+    expect(parseCriticPruneResponse('   ')).toEqual([]);
+  });
+
+  it('returns [] when the JSON has no prune array', () => {
+    expect(parseCriticPruneResponse('{"kept":[1,2,3]}')).toEqual([]);
+  });
+
+  it('tolerates a jsonrepair-fixable trailing comma', () => {
+    expect(parseCriticPruneResponse('{"prune":[{"id":1,"reason":"x"},]}')).toEqual([{ id: 1, reason: 'x' }]);
   });
 });

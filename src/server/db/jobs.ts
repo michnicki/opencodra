@@ -1,6 +1,7 @@
 import type { AppBindings } from '@server/env';
 import { parseJsonColumn, queryRows } from './client';
-import { defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type RepoConfig } from '@shared/schema';
+import { criticResultSchema, defaultRepoConfig, jobDetailSchema, jobSummarySchema, repoConfigSchema, type CriticResult, type RepoConfig } from '@shared/schema';
+import { logger } from '@server/core/logger';
 import { getOrCreateRepository } from './repositories';
 
 export type JobRow = {
@@ -54,6 +55,22 @@ export type JobRow = {
   // 003; this is the first row-type exposure so mapJob can surface it on the JobSummary and
   // updateJobStatusCheckRef can write it without Number(ref) coercion.
   status_check_ref: string | null;
+  // Pattern 5 (status_check_ref precedent): pass-through for the migration-007 jobs columns.
+  // Both are NULLABLE and NOT written by insertJob's explicit column list, so every existing
+  // insert reads them back as null (behaviorally inert). walkthrough_comment_ref is the Phase 9
+  // streamed-walkthrough comment ref (opaque VCS ref, TEXT); critic_result is the Phase 10 critic
+  // pass result, stored JSONB -- parsed on read via parseJsonColumn and validated against
+  // criticResultSchema. In Phase 7 no writer is wired, so critic_result is always null.
+  walkthrough_comment_ref: string | null;
+  critic_result: CriticResult | string | null;
+  // Phase 11 (migration 009, REVIEW: Codex 11-05 HIGH): durable review-rest scope. Both NULLABLE and
+  // NOT written by insertJob's explicit column list unless a caller supplies them, so every existing
+  // insert reads them back as null (behaviorally inert, NREG-01). review_scope mirrors
+  // reviewJobMessageSchema.reviewScope ('all'|'rest'|'head'); scope_source_job_id links a review-rest
+  // job back to the original full-review job whose skips it re-reviews. They flow in via the SELECT
+  // j.* / SELECT i.* the existing accessors already use.
+  review_scope: 'all' | 'rest' | 'head' | null;
+  scope_source_job_id: string | null;
 };
 
 type JobStep = {
@@ -76,7 +93,7 @@ export type JobLeaseClaim =
   | { status: 'terminal'; row: JobRow }
   | { status: 'missing' };
 
-function hexToBytes(hex: string) {
+export function hexToBytes(hex: string) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
@@ -124,6 +141,24 @@ export function mapJob(row: JobRow) {
     row.last_queue_message_at,
   ) ?? row.created_at;
 
+  // WR-01: fail-soft the critic_result read. mapJob is on every hot read path (listJobs,
+  // getJobDetail, the runReviewJob claim). Once Phase 10 persists LLM-derived critic output into
+  // this JSONB column, a single malformed blob (or a finding missing a required field) would make
+  // the strict jobSummarySchema.parse THROW and fail the ENTIRE job-list page / detail read / job
+  // claim -- not just this field. Validate it out-of-band with safeParse and degrade a bad blob to
+  // null (logged) rather than poisoning the whole row parse. critic_result is always null in Phase
+  // 7 (no writer wired), so this stays behaviorally inert until a writer lands.
+  const rawCritic = parseJsonColumn<unknown>(row.critic_result, null);
+  const criticParsed = rawCritic === null ? null : criticResultSchema.safeParse(rawCritic);
+  let criticResult: CriticResult | null = null;
+  if (criticParsed !== null) {
+    if (criticParsed.success) {
+      criticResult = criticParsed.data;
+    } else {
+      logger.warn(`Ignoring unparseable critic_result for job ${row.id}`);
+    }
+  }
+
   return jobSummarySchema.parse({
     id: row.id,
     owner: row.owner,
@@ -165,6 +200,18 @@ export function mapJob(row: JobRow) {
     // REV-R-E: pass-through for jobs.status_check_ref (Bitbucket Code Insights report key /
     // generic status reference). Plan 03's runFinalizePhase gate reads it via this field.
     statusCheckRef: row.status_check_ref,
+    // Pattern 5: publish the migration-007 jobs columns. walkthrough_comment_ref is a plain TEXT
+    // ref; critic_result is JSONB, parsed on read (mirroring config_snapshot/steps) then validated
+    // by jobSummarySchema against criticResultSchema. Both are null on every existing insert this
+    // phase (no writer wired) -- additive, behaviorally inert.
+    walkthroughCommentRef: row.walkthrough_comment_ref,
+    // WR-01: pass the out-of-band-validated value (see above); a bad blob has already degraded to
+    // null so the strict schema field never throws on the whole-row parse.
+    criticResult,
+    // Phase 11: surface the migration-009 review-rest scope columns. Both are null on every existing
+    // insert (no writer supplies them) -- additive, behaviorally inert (NREG-01).
+    reviewScope: row.review_scope,
+    scopeSourceJobId: row.scope_source_job_id,
   });
 }
 
@@ -277,6 +324,11 @@ export async function insertJob(
     repositoryId?: number;
     vcsProvider?: 'github' | 'bitbucket' | string;
     workspace?: string | null;
+    // Phase 11 (REVIEW: Codex 11-05 HIGH): optional review-rest scope persisted on the job row.
+    // Omitted by every existing caller -> bound as NULL -> byte-identical inserts (NREG-01). A
+    // review-rest job passes reviewScope:'rest' + scopeSourceJobId = the original full-review job id.
+    reviewScope?: 'all' | 'rest' | 'head' | null;
+    scopeSourceJobId?: string | null;
   },
 ) {
   // REV-C-1: when repositoryId is supplied, the caller has already resolved the row id (typically
@@ -314,9 +366,11 @@ export async function insertJob(
           config_snapshot,
           head_ref,
           base_ref,
-          retry_of_job_id
+          retry_of_job_id,
+          review_scope,
+          scope_source_job_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid, $12, $13::uuid)
         RETURNING *
       )
       SELECT i.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", i.status_check_ref
@@ -335,6 +389,8 @@ export async function insertJob(
       input.headRef,
       input.baseRef,
       input.retryOfJobId ?? null,
+      input.reviewScope ?? null,
+      input.scopeSourceJobId ?? null,
     ],
   );
 
@@ -1156,6 +1212,42 @@ export async function updateJobStatusCheckRef(
     env,
     `UPDATE jobs SET status_check_ref = $2 WHERE id = $1`,
     [jobId, statusCheckRef],
+  );
+}
+
+/**
+ * Pattern 5 (status_check_ref precedent): single writer of jobs.walkthrough_comment_ref. Phase 9's
+ * streamed walkthrough persists the created comment's opaque VCS ref here so a fresh Workflow
+ * instance can idempotently edit-or-repost it across hibernation. No consumer is wired in Phase 7;
+ * this establishes the typed writer surface. Single parameterized UPDATE, no string interpolation.
+ */
+export async function updateJobWalkthroughCommentRef(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  walkthroughCommentRef: string | null,
+) {
+  await queryRows(
+    env,
+    `UPDATE jobs SET walkthrough_comment_ref = $2 WHERE id = $1`,
+    [jobId, walkthroughCommentRef],
+  );
+}
+
+/**
+ * Pattern 5: single writer of jobs.critic_result. Phase 10's critic pass persists its result blob
+ * here (JSONB). The value is JSON.stringify'd on write and cast $2::jsonb; mapJob parses it back and
+ * validates against criticResultSchema on read. No consumer is wired in Phase 7. Single
+ * parameterized UPDATE, no string interpolation.
+ */
+export async function updateJobCriticResult(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  jobId: string,
+  criticResult: CriticResult | null,
+) {
+  await queryRows(
+    env,
+    `UPDATE jobs SET critic_result = $2::jsonb WHERE id = $1`,
+    [jobId, criticResult === null ? null : JSON.stringify(criticResult)],
   );
 }
 

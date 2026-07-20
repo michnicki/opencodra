@@ -38,6 +38,34 @@ export class GitHubService {
     return this.client.findBotReviewForCommit(owner, repo, prNumber, commitSha, botLogin);
   }
 
+  // Comment-primitive pass-throughs (Pitfall 1): REQUIRED so the GithubAdapter can reach the client
+  // AND so the vi.mock('@server/services/github') seam intercepts. Each is a one-line delegate.
+  async createIssueComment(owner: string, repo: string, issueNumber: number, body: string) {
+    return this.client.createIssueComment(owner, repo, issueNumber, body);
+  }
+
+  async listIssueComments(owner: string, repo: string, issueNumber: number) {
+    return this.client.listIssueComments(owner, repo, issueNumber);
+  }
+
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string) {
+    return this.client.updateIssueComment(owner, repo, commentId, body);
+  }
+
+  // Command-authorization pass-through (Phase 11, CMD-08): the adapter re-verifies the returned
+  // immutable id against the authorId before trusting the permission. REQUIRED here so the
+  // vi.mock('@server/services/github') seam intercepts.
+  async getUserRepoPermission(owner: string, repo: string, authorLogin: string) {
+    return this.client.getUserRepoPermission(owner, repo, authorLogin);
+  }
+
+  // Bot-identity pass-through (Phase 11, CMD-07): the adapter surfaces this on the VcsProvider seam
+  // so the Plan 06 dispatch layer builds a BotIdentityResolver from the provider. REQUIRED here so
+  // the vi.mock('@server/services/github') seam intercepts.
+  async resolveBotUserIdentity() {
+    return this.client.resolveBotUserIdentity();
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return this.client.ensureLabel(owner, repo, name, color);
   }

@@ -272,6 +272,41 @@ describe('FormatterService.formatReviewOverview', () => {
     expect(withoutOmitted).not.toContain('comments trimmed to');
   });
 
+  // (c2) commands-feature footer (D-10 skipped-for-size line + D-11 commands hint, Plan 11-05)
+  it('adds NOTHING to the footer when the commands feature is off (byte-identical, NREG-01)', () => {
+    const off = formatter.formatReviewOverview(overviewInput());
+    const explicitOff = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: false, skippedForSizeCount: 5 }),
+    );
+    // Even with a non-zero skipped count, a disabled feature renders neither line.
+    expect(explicitOff).toBe(off);
+    expect(off).not.toContain('Commands:');
+    expect(off).not.toContain('skipped for size');
+  });
+
+  it('shows the "Commands: review · pause · help" hint whenever the feature is enabled, regardless of omissions (D-11, Codex 11-05 MED)', () => {
+    const enabledNoSkips = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 0 }),
+    );
+    expect(enabledNoSkips).toContain('Commands: @codra-app review · pause · help');
+    // With zero omissions ONLY the hint is added, never the skipped line.
+    expect(enabledNoSkips).not.toContain('skipped for size');
+  });
+
+  it('adds the "N files skipped for size — comment @bot review-rest" line only when enabled AND omissions exist (D-10)', () => {
+    const withSkips = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 3, botUsername: 'codra-app' }),
+    );
+    expect(withSkips).toContain('3 files skipped for size — comment @codra-app review-rest');
+    expect(withSkips).toContain('Commands: @codra-app review · pause · help');
+
+    // Singular file wording.
+    const singular = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 1, botUsername: 'codra-app' }),
+    );
+    expect(singular).toContain('1 file skipped for size — comment @codra-app review-rest');
+  });
+
   // (d) narrative null vs present
   it('starts directly with the recap when narrative is null or empty (no stray blank narrative line)', () => {
     const nullNarrative = formatter.formatReviewOverview(overviewInput({ narrative: null, verdict: 'approve' }));
@@ -308,5 +343,137 @@ describe('FormatterService.formatReviewOverview', () => {
     expect(output).not.toContain('<img');
     expect(output).toContain(`${BASE_URL}/repos`);
     expect(output).toContain('automatically reviews pull requests');
+  });
+});
+
+describe('FormatterService.formatWalkthrough (WT-02/WT-03/D-04/D-13)', () => {
+  type Severity = ParsedReviewComment['severity'];
+  const zeroCounts = (): Record<Severity, number> => ({ P0: 0, P1: 0, P2: 0, P3: 0, nit: 0 });
+
+  function walkInput(
+    overrides: Partial<Parameters<FormatterService['formatWalkthrough']>[0]> = {},
+  ): Parameters<FormatterService['formatWalkthrough']>[0] {
+    return {
+      files: [
+        { path: 'src/a.ts', summary: 'Explains change A.', counts: { ...zeroCounts(), P1: 1 } },
+        { path: 'src/b.ts', summary: 'Explains change B.', counts: { ...zeroCounts(), nit: 2 } },
+      ],
+      severityCounts: { ...zeroCounts(), P1: 1, nit: 2 },
+      filesReviewed: 2,
+      mermaid: null,
+      ...overrides,
+    };
+  }
+
+  const MERMAID = 'sequenceDiagram\n  A->>B: hello';
+
+  it('renders a ```mermaid fence on GitHub when a non-null mermaid arg is passed', () => {
+    const body = formatter.formatWalkthrough(walkInput({ mermaid: MERMAID }));
+    expect(body).toContain('```mermaid');
+    expect(body).toContain('A->>B: hello');
+  });
+
+  it('NEVER renders a mermaid fence on Bitbucket even when a mermaid arg is passed (WT-03/D-13)', () => {
+    const body = formatter.formatWalkthrough(walkInput({ mermaid: MERMAID }), {
+      provider: 'bitbucket',
+    });
+    expect(body).not.toContain('```mermaid');
+    expect(body).not.toContain('A->>B: hello');
+  });
+
+  it.each(['github', 'bitbucket'] as const)(
+    'renders per-severity counts and one row per file on %s (WT-02)',
+    (provider) => {
+      const body = formatter.formatWalkthrough(walkInput(), { provider });
+      // per-severity totals line present (emoji counts)
+      expect(body).toContain('×1');
+      expect(body).toContain('×2');
+      // a table row per file
+      expect(body).toContain('src/a.ts');
+      expect(body).toContain('src/b.ts');
+      expect(body).toContain('| File | Summary | Findings |');
+    },
+  );
+
+  it('renders a summary containing |, backtick, and newline as exactly one intact row', () => {
+    const hostile = 'first | col `code`\nsecond line | more';
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/x.ts', summary: hostile, counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+      }),
+    );
+    // the raw pipe/backtick are escaped; the newline is flattened
+    expect(body).not.toContain('first | col');
+    expect(body).toContain('first \\| col');
+    expect(body).toContain('\\`code\\`');
+    expect(body).not.toContain('second line | more');
+    expect(body).toContain('second line \\| more');
+    // exactly one data row: header + separator + 1 row => the src/x.ts path appears once
+    const rowLines = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('src/x.ts'));
+    expect(rowLines).toHaveLength(1);
+  });
+
+  it('renders a summary with a backslash immediately before a pipe with an odd escape count, closing the incomplete-sanitization gap (T-09-11)', () => {
+    const hostile = 'a\\|b';
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/x.ts', summary: hostile, counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+      }),
+    );
+    // safe form: three backslashes then a correctly-escaped pipe (odd count)
+    expect(body).toContain('a\\\\\\|b');
+    // buggy form: two backslashes then a raw, unescaped pipe (even count) must be absent
+    expect(body).not.toContain('a\\\\|b');
+    // exactly one data row: the table must not be split/broken by the hostile input
+    const rowLines = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('src/x.ts'));
+    expect(rowLines).toHaveLength(1);
+  });
+
+  it('caps at WALKTHROUGH_FILE_CAP rows and collapses the remainder (D-04)', () => {
+    const CAP = 30;
+    const files = Array.from({ length: CAP + 5 }, (_, i) => ({
+      path: `src/file-${i}.ts`,
+      summary: `summary ${i}`,
+      counts: zeroCounts(),
+    }));
+    const body = formatter.formatWalkthrough(
+      walkInput({ files, severityCounts: zeroCounts(), filesReviewed: files.length }),
+    );
+    const dataRows = body
+      .split('\n')
+      .filter((l) => l.startsWith('| src/file-'));
+    expect(dataRows).toHaveLength(CAP);
+    expect(body).toContain('+5 more files reviewed');
+  });
+
+  it('keeps the body under WALKTHROUGH_BODY_MAX for a pathological large-summary input', () => {
+    const bigSummary = 'x'.repeat(8_000);
+    const files = Array.from({ length: 30 }, (_, i) => ({
+      path: `src/file-${i}.ts`,
+      summary: bigSummary,
+      counts: zeroCounts(),
+    }));
+    const body = formatter.formatWalkthrough(
+      walkInput({ files, severityCounts: zeroCounts(), filesReviewed: files.length }),
+    );
+    expect(body.length).toBeLessThanOrEqual(60_000);
+  });
+
+  it('renders coverage + counts with an empty summary and null mermaid, no throw (D-02/D-04a)', () => {
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/empty.ts', summary: '', counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+        mermaid: null,
+      }),
+    );
+    expect(body).toContain('src/empty.ts');
+    expect(body).toContain('1 file reviewed');
+    expect(body).not.toContain('```mermaid');
   });
 });

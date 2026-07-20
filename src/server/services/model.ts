@@ -4,9 +4,12 @@ import { reviewWithCloudflare, submitCloudflareBatch, pollCloudflareBatch } from
 import { reviewWithOpenAI } from '../models/openai';
 import { reviewWithAnthropic } from '../models/anthropic';
 import { buildFileReviewPrompts } from '../prompts/file-review';
+import { buildSecurityReviewPrompts } from '../prompts/security-review';
+import { buildCriticPrompts, type CriticCandidateFinding } from '../prompts/critic';
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from '../prompts/summary';
-import { parseFileReviewResponse } from '../core/model-output';
-import { truncateFileDiff, chunkFileDiff } from '../core/diff';
+import { WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT, buildWalkthroughDiagramPrompt } from '../prompts/walkthrough-diagram';
+import { parseFileReviewResponse, parseAnswerResponse } from '../core/model-output';
+import { truncateFileDiff, chunkFileDiff, type FileDiff } from '../core/diff';
 import type { RepoConfig } from '@shared/schema';
 import type { TokenTracker } from '../core/token-tracker';
 import { UnparseableModelResponseError, type ModelResponse } from '../models/types';
@@ -186,15 +189,24 @@ export class ModelService {
   private selectModel(params: {
     totalLineCount: number;
     config: RepoConfig;
+    // When false, the size-override block is skipped entirely and model.main + fallbacks resolve
+    // directly. Two reasons this exists (both from the review-verified HIGH bug): (1) a size-override
+    // is only meaningful for a single SIZED file/diff, but the critic reviews a whole finding SET,
+    // not a sized file; (2) with overrides applied, selectModel({ totalLineCount: 0 }) matches the
+    // FIRST override (0 <= any positive max_lines) instead of using model.main — so 0 (a valid line
+    // count / "not a sized call") must NOT silently swap the model. Defaults to true so every
+    // existing caller is behavior-identical.
+    applySizeOverrides?: boolean;
   }): { primary: string; fallbacks: string[] } {
     const { model: modelCfg } = params.config;
     const thresholdBase = params.totalLineCount;
+    const applySizeOverrides = params.applySizeOverrides ?? true;
 
     let selectedModel = modelCfg?.main ? normalizeModel(modelCfg.main) : null;
     let fallbackModels = (modelCfg?.fallbacks || []).map(normalizeModel);
 
     // Apply size overrides based on total PR lines
-    if (modelCfg?.size_overrides && modelCfg.size_overrides.length > 0) {
+    if (applySizeOverrides && modelCfg?.size_overrides && modelCfg.size_overrides.length > 0) {
       const sortedOverrides = [...modelCfg.size_overrides].sort((a, b) => a.max_lines - b.max_lines);
       const matched = sortedOverrides.find(o => thresholdBase <= o.max_lines);
       if (matched) {
@@ -299,10 +311,6 @@ export class ModelService {
     );
   }
 
-  private async callModel(model: string, input: { systemPrompt: string; userPrompt: string }, timeoutMs?: number): Promise<ModelResponse> {
-    return this.callResolvedModel(await this.resolveModel(model), input, timeoutMs);
-  }
-
   async reviewFile(params: {
     file: any;
     prTitle: string | null;
@@ -310,6 +318,11 @@ export class ModelService {
     config: RepoConfig;
     totalLineCount: number;
     compactPrompt?: boolean;
+    // Selects which review PROMPT this unit uses (D-01). 'security' routes through
+    // buildSecurityReviewPrompts; 'main' (default) is behavior-identical to today. This selects only
+    // the prompt — model resolution, chunking, fallback chain, and retry classification are shared
+    // (D-02: there is NO per-pass model override).
+    pass?: 'main' | 'security';
   }) {
     const configuredLineCap = params.config.review.max_diff_lines_per_file;
     const modelLineCap = params.compactPrompt
@@ -475,12 +488,24 @@ export class ModelService {
     config: RepoConfig;
     totalLineCount: number;
     compactPrompt?: boolean;
+    pass?: 'main' | 'security';
   }) {
-    const { systemPrompt, userPrompt } = buildFileReviewPrompts({
-      ...params,
-      file: params.file,
-      config: params.config.review,
-    });
+    // The security pass swaps in buildSecurityReviewPrompts (same input shape, identical findings
+    // JSON contract so parseFileReviewResponse handles it unchanged). Everything below —
+    // selectModel, resolveModel, the fallback chain, adaptive timeout, tracker recording, and
+    // RetryableModelError classification — is reused verbatim, so a transient failure on a
+    // (file,'security') unit classifies retryable exactly like the main pass (D-01/D-02).
+    const { systemPrompt, userPrompt } = params.pass === 'security'
+      ? buildSecurityReviewPrompts({
+          ...params,
+          file: params.file,
+          config: params.config.review,
+        })
+      : buildFileReviewPrompts({
+          ...params,
+          file: params.file,
+          config: params.config.review,
+        });
 
     const { primary, fallbacks } = this.selectModel({
       totalLineCount: params.totalLineCount,
@@ -667,5 +692,237 @@ export class ModelService {
     // As in reviewFile: guard against `throw undefined` when every summary model was skipped via
     // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
     throw lastError ?? new Error('No summary model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * MP-03 / D-05: the critic's single whole-set, ID-based, PRUNE-ONLY model call. Mirrors
+   * generateSummary's fallback-chain + RetryableModelError discipline (a transient failure across the
+   * whole chain defers rather than wedges), but with two critic-specific properties:
+   *   1. `applySizeOverrides: false` — the critic reviews a finding SET, not a single sized file, so
+   *      it MUST resolve the MAIN model chain and never a size-override model (review-verified HIGH:
+   *      selectModel({ totalLineCount: 0 }) would otherwise match the first override).
+   *   2. It returns only `rawText` (+ token accounting) — the id->finding mapping and
+   *      `kept = deduped minus pruned-by-id` reconciliation happen in code in runCriticPhase (10-06),
+   *      parsed by parseCriticPruneResponse. There is NO per-pass model override (D-02).
+   * Each finding is assigned a numeric id equal to its index in the input array; the critic returns
+   * ONLY { prune: [{ id, reason }] } — never a keep-list, never full findings.
+   */
+  async critiqueFindings(params: {
+    findings: Array<{ path: string; line?: number | null; severity: string; title: string; body: string }>;
+    prTitle: string | null;
+    config: RepoConfig;
+  }): Promise<{ rawText: string; modelUsed: string; inputTokens: number; outputTokens: number }> {
+    const candidates: CriticCandidateFinding[] = params.findings.map((f, index) => ({
+      id: index,
+      path: f.path,
+      line: f.line ?? null,
+      severity: f.severity,
+      title: f.title,
+      body: f.body,
+    }));
+    const { systemPrompt, userPrompt } = buildCriticPrompts({
+      findings: candidates,
+      prTitle: params.prTitle,
+      config: params.config.review,
+    });
+
+    // Size overrides DISABLED: resolve the MAIN chain, never a size-override model (D-05).
+    const { primary, fallbacks } = this.selectModel({
+      totalLineCount: 0,
+      config: params.config,
+      applySizeOverrides: false,
+    });
+    const modelsToTry = [primary, ...fallbacks];
+
+    let lastError: unknown;
+    let lastTransientError: unknown;
+    let sawTransientFailure = false;
+    for (const currentModel of modelsToTry) {
+      let resolved: ResolvedModelConfig;
+      try {
+        resolved = await this.resolveModel(currentModel);
+      } catch (error) {
+        lastError = error;
+        logger.warn(`Critic model ${currentModel} could not be resolved`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      if (resolved.apiFormat === 'cloudflare-workers-ai' && await this.isProviderUnavailable(resolved.providerId)) {
+        logger.warn(`Skipping ${resolved.providerName} critic model ${currentModel} because the provider is unavailable for job ${this.options.jobId ?? 'unknown'}`);
+        continue;
+      }
+
+      try {
+        const response = await this.callResolvedModel(resolved, { systemPrompt, userPrompt }, adaptiveModelTimeoutMs(0));
+
+        if (this.tracker) {
+          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+        }
+
+        return {
+          rawText: response.rawText,
+          modelUsed: response.modelUsed,
+          inputTokens: response.inputTokens,
+          outputTokens: response.outputTokens,
+        };
+      } catch (error) {
+        lastError = error;
+        if (isTransientModelFailure(error)) {
+          sawTransientFailure = true;
+          lastTransientError = error;
+        }
+        if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
+          await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
+        }
+        logger.warn(`Critic model ${currentModel} failed`, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (sawTransientFailure) {
+      const retryCause = lastTransientError ?? lastError;
+      const lastMessage = retryCause instanceof Error ? retryCause.message : String(retryCause ?? 'Unknown model error');
+      throw new RetryableModelError(
+        `All configured critic models failed; retrying later. Last error: ${lastMessage}`,
+        retryCause,
+      );
+    }
+
+    // As in generateSummary: guard against `throw undefined` when every critic model was skipped via
+    // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
+    throw lastError ?? new Error('No critic model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * Phase 11, Plan 04 (QA-01/QA-02): the SINGLE public prose model path for PR Q&A. It exists
+   * because the rest of the model stack cannot produce prose for core/qa.ts:
+   *   - selectModel / callResolvedModel are PRIVATE (a caller outside this class cannot reach them), and
+   *   - the provider adapters are JSON-only (OpenAI response_format:json_object, Anthropic '{'
+   *     pre-fill), so a bare-prose request is not reliable across providers.
+   * So this method owns the whole Q&A model call: it requests + parses a `{ "answer": string }` JSON
+   * envelope (compatible with every JSON-only adapter) via the model-output tolerant parser, and
+   * returns the answer string.
+   *
+   * Mirrors generateSummary/critiqueFindings' fallback-chain + RetryableModelError discipline (a
+   * transient failure across the whole chain defers rather than wedges), with ONE Q&A-specific
+   * property: `applySizeOverrides: false` (REVIEW: Codex 11-04 HIGH). Q&A is not a sized file review,
+   * so totalLineCount is 0; with overrides applied, selectModel({ totalLineCount: 0 }) would match the
+   * FIRST positive size override (0 <= any max_lines) instead of the main model — disabling overrides
+   * resolves the MAIN chain, exactly like the critic.
+   */
+  async answerPrQuestion(params: {
+    systemPrompt: string;
+    userPrompt: string;
+    config: RepoConfig;
+  }): Promise<string> {
+    // Size overrides DISABLED: resolve the MAIN chain, never a size-override model (Q&A is not sized).
+    const { primary, fallbacks } = this.selectModel({
+      totalLineCount: 0,
+      config: params.config,
+      applySizeOverrides: false,
+    });
+    const modelsToTry = [primary, ...fallbacks];
+
+    let lastError: unknown;
+    let lastTransientError: unknown;
+    let sawTransientFailure = false;
+    for (const currentModel of modelsToTry) {
+      let resolved: ResolvedModelConfig;
+      try {
+        resolved = await this.resolveModel(currentModel);
+      } catch (error) {
+        lastError = error;
+        logger.warn(`Q&A model ${currentModel} could not be resolved`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      if (resolved.apiFormat === 'cloudflare-workers-ai' && await this.isProviderUnavailable(resolved.providerId)) {
+        logger.warn(`Skipping ${resolved.providerName} Q&A model ${currentModel} because the provider is unavailable for job ${this.options.jobId ?? 'unknown'}`);
+        continue;
+      }
+
+      try {
+        const response = await this.callResolvedModel(
+          resolved,
+          { systemPrompt: params.systemPrompt, userPrompt: params.userPrompt },
+          adaptiveModelTimeoutMs(0),
+        );
+
+        if (this.tracker) {
+          this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+        }
+
+        return parseAnswerResponse(response.rawText);
+      } catch (error) {
+        lastError = error;
+        if (isTransientModelFailure(error)) {
+          sawTransientFailure = true;
+          lastTransientError = error;
+        }
+        if (resolved.apiFormat === 'cloudflare-workers-ai' && isCloudflareAllocationError(error)) {
+          await this.markProviderUnavailable(resolved.providerId, error instanceof Error ? error.message : String(error));
+        }
+        logger.warn(`Q&A model ${currentModel} failed`, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (sawTransientFailure) {
+      const retryCause = lastTransientError ?? lastError;
+      const lastMessage = retryCause instanceof Error ? retryCause.message : String(retryCause ?? 'Unknown model error');
+      throw new RetryableModelError(
+        `All configured Q&A models failed; retrying later. Last error: ${lastMessage}`,
+        retryCause,
+      );
+    }
+
+    // As in generateSummary: guard against `throw undefined` when every model was skipped via
+    // `continue` (all resolveModel failures or all providers unavailable) without setting lastError.
+    throw lastError ?? new Error('No Q&A model produced a result; all configured models were skipped or unavailable.');
+  }
+
+  /**
+   * WT-03 (Plan 09-03): the OPTIONAL, best-effort Mermaid sequence-diagram call. Unlike
+   * generateSummary/reviewFile this tries ONLY the selected PRIMARY model — there is NO
+   * `...fallbacks` iteration — so the "one whole-diff diagram call" is literally exactly ONE outbound
+   * inference request (cross-AI budget MEDIUM: "one model call" must not fan out across a fallback
+   * chain in the budget-fragile finalize phase). It is fed the ACTUAL bounded whole-diff (FileDiff[]),
+   * not per-file correctness summaries (cross-AI blocker 2) — see buildWalkthroughDiagramPrompt.
+   *
+   * The method itself may throw (resolveModel not configured / provider error) and does NOT retry;
+   * the finalize call site wraps it in a best-effort try/catch and simply OMITS the diagram on any
+   * failure (D-07, WT-04). Returns the raw model text plus its token counts + modelUsed so the caller
+   * can fold the diagram's tokens into the job's completeJob totals (token-accounting MEDIUM).
+   */
+  async generateWalkthroughDiagram(params: {
+    prTitle: string | null;
+    files: FileDiff[];
+    fileSummaries: Array<{ path: string; summary: string; verdict: string }>;
+    config: RepoConfig;
+  }): Promise<ModelResponse> {
+    // Primary model ONLY — deliberately NOT `[primary, ...fallbacks]`. One outbound request.
+    const { primary } = this.selectModel({ totalLineCount: 0, config: params.config });
+    const resolved = await this.resolveModel(primary);
+
+    const response = await this.callResolvedModel(
+      resolved,
+      {
+        systemPrompt: WALKTHROUGH_DIAGRAM_SYSTEM_PROMPT,
+        userPrompt: buildWalkthroughDiagramPrompt({
+          prTitle: params.prTitle,
+          files: params.files,
+          fileSummaries: params.fileSummaries,
+        }),
+      },
+      adaptiveModelTimeoutMs(0),
+    );
+
+    if (this.tracker) {
+      this.tracker.record(response.modelUsed, response.inputTokens, response.outputTokens);
+    }
+
+    return response;
   }
 }

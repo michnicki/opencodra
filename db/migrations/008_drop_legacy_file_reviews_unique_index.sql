@@ -1,0 +1,26 @@
+-- 008_drop_legacy_file_reviews_unique_index
+--
+-- D-12 (CONTRACT step of the EXPAND/CONTRACT begun in 007): drop the legacy 2-column unique index
+-- file_reviews_job_file_path_key (job_id, file_path) created in 001_initial.sql:528.
+--
+-- WHY: Phase 10 introduces a second review pass ('security') alongside 'main', so a single file can
+-- now hold BOTH a (job_id, file_path, 'main') row AND a (job_id, file_path, 'security') row. The
+-- legacy 2-column unique index would REJECT the second-pass row on (job_id, file_path) — it cannot
+-- tell the two passes apart. The 3-column unique index file_reviews_job_file_path_pass_key
+-- (job_id, file_path, pass), created in 007_multipass_contract_foundation.sql, is ALREADY the sole
+-- ON CONFLICT arbiter at every upsert/inherit/bulk-fail site in src/server/db/file-reviews.ts, so
+-- dropping the 2-column index removes nothing the writers depend on.
+--
+-- SAFE ORDERING: Codra deploys `build -> migrate -> wrangler deploy` (package.json), and 007 already
+-- shipped the 3-column arbiter in a prior deploy, so by the time 008 runs the running Worker has long
+-- been conflicting on the 3-column index. Dropping the redundant 2-column index is therefore a no-op
+-- for correctness.
+--
+-- ADDITIVE / RE-RUN-SAFE: `DROP INDEX IF EXISTS` is a clean no-op on replay (a second run finds the
+-- index already gone and does nothing). No backfill, no data change; applied under the advisory lock
+-- in a single BEGIN/COMMIT by scripts/migrate.mjs. The object is a unique INDEX (not a table
+-- constraint), so DROP INDEX — never ALTER TABLE ... DROP CONSTRAINT — is the correct verb.
+--
+-- This migration must NEVER drop file_reviews_job_file_path_pass_key (the retained 3-column arbiter).
+
+DROP INDEX IF EXISTS file_reviews_job_file_path_key;

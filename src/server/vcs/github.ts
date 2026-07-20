@@ -21,6 +21,9 @@ import type {
  */
 export class GithubAdapter implements VcsProvider {
   readonly name = 'github' as const;
+  // GitHub renders Mermaid fenced code blocks in markdown, so the walkthrough formatter may emit a
+  // Mermaid diagram for GitHub PRs (D-09). Required member on VcsProvider; inert this phase.
+  readonly capabilities = { supportsMermaid: true } as const;
   private gh: GitHubService;
 
   constructor(
@@ -132,6 +135,114 @@ export class GithubAdapter implements VcsProvider {
     // The interface omits botLogin; the adapter injects env.BOT_USERNAME internally (Pitfall 5).
     const found = await this.gh.findBotReviewForCommit(owner, repo, prNumber, commitSha, this.env.BOT_USERNAME);
     return found ? { ref: String(found.id) } : null;
+  }
+
+  async createPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+  ): Promise<{ ref: string }> {
+    const { id } = await this.gh.createIssueComment(owner, repo, prNumber, body);
+    // WR-04 finite-guard copied from submitReview (:123-125): createIssueComment casts its body
+    // with an unchecked `as { id: number }`, so a non-numeric/NaN id would otherwise stringify into
+    // a corrupt ref. Fail loudly at the seam.
+    if (typeof id !== 'number' || !Number.isFinite(id)) {
+      throw new Error(`createIssueComment returned a non-numeric id for ${owner}/${repo}#${prNumber}: ${String(id)}`);
+    }
+    // GitHub ref is the bare comment id (D-02).
+    return { ref: String(id) };
+  }
+
+  async editPrComment(
+    owner: string,
+    repo: string,
+    ref: string,
+    body: string,
+  ): Promise<{ ref: string } | null> {
+    // Validate the ref STRICTLY (review F4): Number.isFinite(Number(ref)) is too weak -- it accepts
+    // '', '  ', '1.5', '1e3', '-1', '0'. Require a canonical positive safe-integer string (no leading
+    // zeros, no sign, no decimal/exponent, no whitespace, > 0) BEFORE any request. No prNumber arg (D-02).
+    if (!/^[1-9][0-9]*$/.test(ref) || !Number.isSafeInteger(Number(ref))) {
+      throw new Error(`editPrComment received a malformed ref for ${owner}/${repo}: ${JSON.stringify(ref)}`);
+    }
+    const commentId = Number(ref);
+    const result = await this.gh.updateIssueComment(owner, repo, commentId, body);
+    // null flows straight through from the client for both 404 and 410 (amended D-05 / review F3);
+    // the adapter never inspects a raw HTTP status.
+    // WR-01: echo the already-validated input ref instead of re-deriving from `result.id`.
+    // `updateIssueComment` casts its body with an unchecked `as { id: number }`, so a malformed/absent
+    // id would otherwise stringify into a corrupt ref ("undefined"/"NaN") that gets persisted and
+    // breaks the next edit. `ref` was validated as a canonical positive safe-integer above; echoing
+    // it matches the Bitbucket sibling and needs no extra guard.
+    return result ? { ref } : null;
+  }
+
+  async listPrComments(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>> {
+    const items = await this.gh.listIssueComments(owner, repo, prNumber);
+    const results: Array<{ ref: string; body: string; author: { id: string; login: string } }> = [];
+    for (const c of items) {
+      // OMIT any comment whose author identity is missing/invalid (review F5): a false '' /
+      // 'undefined' id would defeat the Phase 11 self-filter, which requires a non-null immutable id
+      // (core/bot-identity.ts:105-108). Skip rather than emit a forgeable empty id.
+      if (!c.user || typeof c.user.id !== 'number' || !Number.isFinite(c.user.id)) {
+        continue;
+      }
+      // IN-01: guard c.id the same way as author.id -- the list is an unchecked `as`-cast, so a
+      // non-numeric/NaN comment id would stringify into a corrupt ref. Skip such rows.
+      if (typeof c.id !== 'number' || !Number.isFinite(c.id)) {
+        continue;
+      }
+      // author.id is String(c.user.id), the immutable numeric user id, never login (NREG-02, D-03).
+      // login is best-effort (only author.id is load-bearing); default to '' so it is never
+      // undefined, matching the Bitbucket sibling's `?? ''` normalization (IN-01).
+      results.push({ ref: String(c.id), body: c.body, author: { id: String(c.user.id), login: c.user.login ?? '' } });
+    }
+    return results;
+  }
+
+  async getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null> {
+    // authorLogin forms the GitHub URL (the endpoint needs a username in the path); without it we
+    // cannot query, so fail closed. authorId is what we AUTHORIZE on (NREG-02) — never the login.
+    if (!authorLogin) {
+      return null;
+    }
+    const result = await this.gh.getUserRepoPermission(owner, repo, authorLogin);
+    if (!result) {
+      return null;
+    }
+    // Re-verify the IMMUTABLE id (review: all-3 HIGH/MED): a login can be reassigned between capture
+    // and check, so the endpoint's resolved user.id MUST equal the authorId we were asked to
+    // authorize. A mismatch (or an unparseable/absent id) fails closed to null.
+    const expectedId = Number(authorId);
+    if (!Number.isFinite(expectedId) || result.userId === null || result.userId !== expectedId) {
+      return null;
+    }
+    switch (result.permission) {
+      case 'admin':
+      case 'write':
+      case 'read':
+      case 'none':
+        return result.permission;
+      default:
+        // An unrecognized permission string fails closed rather than being treated as authorized.
+        return null;
+    }
+  }
+
+  // Phase 11 (CMD-07): resolve the bot's own immutable identity so the Plan 06 dispatch layer can
+  // build a self-filter resolver from this provider. Delegates to the unchanged GitHubService seam.
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    return this.gh.resolveBotUserIdentity();
   }
 
   labels = {

@@ -109,6 +109,66 @@ export const reviewConfigSchema = z.object({
       on_file_types: ['.ts', '.tsx', '.js'],
       command: 'npm run lint && npm run typecheck',
     }),
+  // Phase 7 contract-first feature toggles (D-04/D-05/D-06). Every block and every `enabled`
+  // carries an explicit `false` default so `repoConfigSchema.parse({})` yields all-off (NREG-01
+  // inertness). Grouped (never a flat boolean namespace, never a single master switch) so later
+  // phases (8-11) can wire each capability behind its own toggle without a breaking contract edit.
+  // Uniform `{ enabled: boolean }` shape leaves room for per-toggle config fields later.
+  // D-09: `sequence_diagram` defaults ON so that enabling the walkthrough gets a Mermaid diagram on
+  // GitHub by default — it stays inert while `walkthrough.enabled` is false (the whole feature is off),
+  // and is additionally hard-gated at render time by provider (Bitbucket never emits a Mermaid fence).
+  // So the sub-toggle's `true` default cannot regress NREG-01: `repoConfigSchema.parse({})` still has
+  // `walkthrough.enabled === false`, i.e. no walkthrough is produced at all.
+  walkthrough: z
+    .object({
+      enabled: z.boolean().default(false),
+      sequence_diagram: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
+    })
+    .default({ enabled: false, sequence_diagram: { enabled: true } }),
+  passes: z
+    .object({
+      security: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+      // `skip_threshold` / `input_char_budget` are OPTIONAL critic tuning knobs (review suggestion):
+      // when unset, 10-06 falls back to its in-code constants, so absence is behavior-identical.
+      // Additive optional fields keep `passes.critic` all-off by default (NREG-01 inertness).
+      critic: z
+        .object({
+          enabled: z.boolean().default(false),
+          skip_threshold: z.number().int().nonnegative().optional(),
+          input_char_budget: z.number().int().positive().optional(),
+        })
+        .default({ enabled: false }),
+    })
+    .default({ security: { enabled: false }, critic: { enabled: false } }),
+  interactive: z
+    .object({
+      commands: z
+        .object({
+          enabled: z.boolean().default(false),
+          // REVIEW (A1 authorization redesign, D-06): the deterministic per-repo Bitbucket
+          // authorization allow-list the Bitbucket authz path now depends on. Additive + defaulted
+          // to [] so repoConfigSchema.parse({}) is byte-identical to today (NREG-01).
+          bitbucket_allowed_account_ids: z.array(z.string()).default([]),
+          // CMD-07 (Layer 2): the IMMUTABLE Bitbucket account_id of the bot user. A Repository
+          // Access Token 403s on `GET /2.0/user`, so a configured id lets the Bitbucket bot-identity
+          // resolver self-filter WITHOUT that call. Nullable + defaulted to null so
+          // repoConfigSchema.parse({}) stays byte-identical to today (NREG-01).
+          bitbucket_bot_account_id: z.string().nullable().default(null),
+        })
+        .default({ enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null }),
+      qa: z
+        .object({
+          enabled: z.boolean().default(false),
+          // REVIEW (OpenCode 11-04): the Q&A hourly cap as a config knob, not a hardcoded constant.
+          // Additive + defaulted so an existing config parses byte-identically (NREG-01).
+          rate_limit_per_hour: z.number().int().positive().default(10),
+        })
+        .default({ enabled: false, rate_limit_per_hour: 10 }),
+    })
+    .default({
+      commands: { enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null },
+      qa: { enabled: false, rate_limit_per_hour: 10 },
+    }),
 });
 
 export const repoConfigSchema = z.object({
@@ -136,6 +196,15 @@ export const repoConfigSchema = z.object({
       on_file_types: ['.ts', '.tsx', '.js'],
       command: 'npm run lint && npm run typecheck',
     },
+    // Mirror the Phase 7 toggle blocks all-off in the inline literal default too, so
+    // `repoConfigSchema.parse({})` yields every toggle false regardless of Zod default
+    // short-circuit semantics for the nested `review` object (RESEARCH Open Q2).
+    walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
+    passes: { security: { enabled: false }, critic: { enabled: false } },
+    interactive: {
+      commands: { enabled: false, bitbucket_allowed_account_ids: [], bitbucket_bot_account_id: null },
+      qa: { enabled: false, rate_limit_per_hour: 10 },
+    },
   }),
   model: z
     .object({
@@ -162,7 +231,15 @@ export const repoConfigSchema = z.object({
 export const reviewJobMessageSchema = z.object({
   jobId: z.uuid().optional(),
   deliveryId: z.string().min(1),
-  phase: z.enum(['prepare', 'review', 'finalize']).optional(),
+  // WIRE contract widened with 'critic' (D-07). The INTERNAL ReviewJobRunResult.phase union
+  // (review.ts:57) and the dispatch switch (review.ts:412-417) intentionally stay
+  // prepare|review|finalize — Phase 10 owns critic dispatch. A stray phase:'critic' message is
+  // REJECTED at the resolveQueuedJob boundary (return null → acked), never coerced/run.
+  phase: z.enum(['prepare', 'review', 'finalize', 'critic']).optional(),
+  // Optional multi-pass routing fields (D-07). Kept `.optional()` (no default) so every
+  // pre-widening producer/fixture — and ReviewJobMessage = z.input<...> — keeps compiling.
+  kind: z.enum(['review', 'qa', 'command']).optional(),
+  reviewScope: z.enum(['all', 'rest', 'head']).optional(),
   eventName: z.string().min(1).optional(),
   payload: z.unknown().optional(),
   installationId: z.string().min(1).optional(),
@@ -181,7 +258,54 @@ export const reviewJobMessageSchema = z.object({
   // Optional + defaulted so a queue message enqueued by code that predates this field (no
   // `provider` key at all) still validates and resolves to 'github' (NREG-03/Pitfall 10).
   provider: z.enum(vcsProviders).optional().default('github'),
+  // Phase 11 (D-09/D-12): the classified command/Q&A context for kind='command'|'qa' messages. The
+  // WHOLE object is `.optional()` (no default) so every pre-widening producer — and
+  // ReviewJobMessage = z.input<typeof reviewJobMessageSchema> — keeps validating byte-identically
+  // (NREG-01). Within it, authorId + body + workspace are REQUIRED so a consumer can reconstruct a
+  // full CommentContext downstream (a reject persists reason=body, D-09). The superRefine below
+  // tightens ONLY the kind ∈ {command, qa} branch to require this object + those identity fields.
+  interactive: z
+    .object({
+      commandName: z.enum(['review', 'review-rest', 'pause', 'resume', 'help', 'reject']).optional(),
+      question: z.string().optional(),
+      authorId: z.string().min(1),
+      authorLogin: z.string().optional(),
+      body: z.string(),
+      workspace: z.string().min(1),
+      commentRef: z.string().optional(),
+      parentRef: z.string().optional(),
+      findingRef: z.string().optional(),
+      sourceCommentRef: z.string().optional(),
+      // Phase 11 (WR-01): the PROVIDER-SAFE per-repo config the webhook route already resolved at
+      // classification time (GitHub via loadRepoConfig; Bitbucket via getRepoConfigByRepositoryId +
+      // global-model overlay). Carried on the message so the INLINE consumer
+      // (index.ts::dispatchInteractiveMessage) uses it directly instead of re-deriving via the
+      // owner/repo path — which for Bitbucket collides across providers (getRepoConfigRecord has no
+      // vcs_provider filter) and also triggers loadRepoConfig's GitHub-shaped getOrCreateRepository
+      // side effect. Optional so pre-Phase-11 producers and in-flight messages still validate
+      // (NREG-01); the consumer falls back to the legacy load only when it is absent.
+      configSnapshot: repoConfigSchema.optional(),
+    })
+    .optional(),
 }).superRefine((message, ctx) => {
+  // Phase 11 (REVIEW: Codex 11-01 MED — weak interactive validation): an INTERNAL command/qa message
+  // MUST carry a full interactive identity payload so a malformed message fails fast at parse rather
+  // than deep in the consumer. This branch is checked FIRST and returns, so the no-kind path below is
+  // never reached for these kinds (a command/qa message legitimately has no jobId/eventName).
+  if (message.kind === 'command' || message.kind === 'qa') {
+    const interactive = message.interactive;
+    if (!interactive || !interactive.authorId || !interactive.body || !interactive.workspace) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          "Interactive messages (kind 'command'|'qa') require interactive.authorId, interactive.body, and interactive.workspace.",
+        path: ['interactive'],
+      });
+    }
+    return;
+  }
+
+  // Unchanged no-kind path (NREG-01 byte-identity — do NOT touch).
   if (message.jobId || message.eventName) {
     return;
   }
@@ -192,6 +316,52 @@ export const reviewJobMessageSchema = z.object({
     path: ['jobId'],
   });
 });
+
+// Critic-pass result (D-08). The critic re-judges main-review findings, keeping some and pruning
+// others (each pruned finding carries a human-readable reason). `.passthrough()` so Phase 10 can
+// add prune/audit metadata fields WITHOUT a breaking contract edit (the D-08 additive guardrail).
+// Metadata scalars are optional/tolerant for the same reason. Reuses parsedReviewCommentSchema for
+// kept/pruned findings so the critic speaks the same finding vocabulary as the main review.
+export const criticResultSchema = z
+  .object({
+    kept: z.array(parsedReviewCommentSchema),
+    pruned: z.array(
+      z.object({
+        finding: parsedReviewCommentSchema,
+        reason: z.string(),
+      }),
+    ),
+    model: z.string().optional(),
+    inputTokens: z.number().int().optional(),
+    outputTokens: z.number().int().optional(),
+    // D-08 additive-only refinement (never touch the locked fields above). `skipped` is true when
+    // 10-06 bypasses the critic model call (skip-threshold / input-char-budget / fail-open), so the
+    // stored critic-result blob records that no pruning ran rather than looking like an empty prune.
+    // `dedupedCount` records the deduped candidate-set size the critic was shown. Both optional so
+    // every existing critic-result blob (and `criticResultSchema.parse({ kept: [], pruned: [] })`)
+    // still parses unchanged.
+    skipped: z.boolean().optional(),
+    dedupedCount: z.number().int().optional(),
+  })
+  .passthrough();
+export type CriticResult = z.infer<typeof criticResultSchema>;
+
+// D-05 ID-based critic MODEL-OUTPUT contract (distinct from the DB-persisted criticResultSchema
+// above). The critic returns ONLY opaque numeric ids to DROP plus a reason per id — never full
+// findings, never a keep-list — which 10-06 reconciles back to findings in code (the index-assigned
+// ids close the gap that parsedReviewCommentSchema has no stable id). `.passthrough()` so a critic
+// that emits extra metadata still parses fail-soft.
+export const criticPruneOutputSchema = z
+  .object({
+    prune: z.array(
+      z.object({
+        id: z.number().int().nonnegative(),
+        reason: z.string(),
+      }),
+    ),
+  })
+  .passthrough();
+export type CriticPruneOutput = z.infer<typeof criticPruneOutputSchema>;
 
 export const jobSummarySchema = z.object({
   id: z.uuid(),
@@ -234,6 +404,18 @@ export const jobSummarySchema = z.object({
   // report key / generic status reference). Used by Plan 03's runPreparePhase writer and the
   // runFinalizePhase gate widening. Optional so pre-widening fixtures still parse.
   statusCheckRef: z.string().nullable().optional(),
+  // Phase 7 pass-through for the new jobs.walkthrough_comment_ref / jobs.critic_result columns
+  // (Plan 04 adds the accessors; Phase 8/10 wire the writers). Optional so pre-widening fixtures
+  // still parse; `.nullable()` because the DB columns are nullable and unset until a later phase.
+  walkthroughCommentRef: z.string().nullable().optional(),
+  criticResult: criticResultSchema.nullable().optional(),
+  // Phase 11 (REVIEW: Codex 11-05 HIGH): pass-through for the migration-009 jobs.review_scope /
+  // jobs.scope_source_job_id columns so the review-rest scope lives on the PERSISTED job row and
+  // survives fresh-instance handoff + lease recovery (not the transient queue message). Both are
+  // null on every existing insert (no writer wired this plan) — additive, behaviorally inert
+  // (NREG-01). `.nullable().optional()` so pre-widening fixtures still parse.
+  reviewScope: z.enum(['all', 'rest', 'head']).nullable().optional(),
+  scopeSourceJobId: z.uuid().nullable().optional(),
 });
 
 export const jobsQuerySchema = z.object({
@@ -249,10 +431,35 @@ export const jobsQuerySchema = z.object({
 export type JobsQuery = z.infer<typeof jobsQuerySchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 
+// D-07 pass value-set, locked contract-first (closes the file_reviews.pass gap so Phase 10 needs
+// no cross-layer contract edit). 'main' is today's single review pass; 'security' is Phase 10's
+// dedicated pass. Widen this enum when a new pass is introduced.
+export const fileReviewPassSchema = z.enum(['main', 'security']);
+export type FileReviewPass = z.infer<typeof fileReviewPassSchema>;
+
+// Canonical (file_path, pass) tuple identity for the multi-pass engine. The review-consensus HIGH
+// finding was that the engine introduced a second `pass` dimension while keeping identity path-only,
+// which conflates a file's main and security units. This helper is the single source of truth the
+// review maps / completion / inheritance in 10-05/10-06 key on. The separator is NUL ('\0'), which
+// cannot occur in a POSIX file path, so the key is injective over (file_path, pass).
+export type ReviewUnitKey = string;
+export function reviewUnitKey(filePath: string, pass: FileReviewPass): ReviewUnitKey {
+  // Separator is NUL, written as the readable `\0` escape (an invisible literal NUL byte here is
+  // easily misread as a space). NUL cannot occur in a POSIX file path, so the key is injective
+  // over (file_path, pass) for ANY future pass value. Used purely as an opaque in-memory Map/Set
+  // key — never persisted, split, or serialized.
+  return `${filePath}\0${pass}`;
+}
+
 export const fileReviewRecordSchema = z.object({
   id: z.uuid(),
   jobId: z.uuid(),
   filePath: z.string(),
+  // `.default('main')` is REQUIRED for inertness: jobDetailSchema.parse (jobs.ts) builds `files`
+  // from a JSON_BUILD_OBJECT that omits `pass`, so a required-no-default field would break that
+  // parse — with the default it resolves to 'main' and the job-detail read path stays byte-identical
+  // (Plan 02 surfaces the real value via getFileReviewsForJobs; Phase 10 may then emit `pass`).
+  pass: fileReviewPassSchema.default('main'),
   fileStatus: z.enum(fileStatuses),
   modelUsed: z.string(),
   modelProvider: z.string().optional(),

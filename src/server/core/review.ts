@@ -1,6 +1,6 @@
 import { logger } from './logger';
 import { isSupportedGitHubWebhookEvent, type GitHubWebhookEventName, type GitHubWebhookPayload, type IssueCommentWebhookPayload, type PullRequestWebhookPayload } from '@shared/github';
-import { defaultRepoConfig, normalizeModelId, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
+import { defaultRepoConfig, normalizeModelId, reviewUnitKey, type CriticResult, type FileReviewPass, type ParsedReviewComment, type RepoConfig, type ReviewJobMessage } from '@shared/schema';
 import { isTimeoutMessage, matchesAnyTransientSubstring } from '@shared/transient-errors';
 import type { AppBindings } from '@server/env';
 import { bulkInheritFileReviews, bulkMarkFilesFailed, getFileReviewsForJobs, recordRetryableFileReviewFailure, upsertFileReview } from '@server/db/file-reviews';
@@ -24,11 +24,15 @@ import {
   setJobWorkflowInstance,
   supersedeOlderJobs,
   updateJobCheckRun,
+  updateJobCriticResult,
   updateJobStatusCheckRef,
   updateJobStep,
 } from '@server/db/jobs';
-import { filterReviewableFiles, parseUnifiedDiff } from './diff';
-import { parseSummaryResponse } from './model-output';
+import { filterReviewableFiles, parseUnifiedDiff, partitionReviewableFiles } from './diff';
+import { insertSkippedFiles, listSkippedFilesForHead, type SkippedFilesHeadKey } from '@server/db/skipped-files';
+import { dedupeFindings, SEVERITY_RANK } from './dedup';
+import { parseCriticPruneResponse, parseSummaryResponse, parseWalkthroughDiagram } from './model-output';
+import { buildWalkthroughData, editWalkthroughComment, postWalkthroughPlaceholder } from './walkthrough';
 
 import { VcsService } from '../services/vcs';
 import type { VcsProvider, VcsPullRequest, VcsUpdateStatusCheckInput } from '../vcs/types';
@@ -54,7 +58,7 @@ export type ReviewJobRunResult =
   // subrequest budget anymore: either a subrequest-limit deferral (a long-lived instance has stopped
   // hibernating, so its budget never resets) or the transition into finalize (which needs ~20
   // subrequests at once to post the review). A fresh instance's first step always gets a clean budget.
-  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize'; delaySeconds: number; jobId?: string; freshInstance?: boolean };
+  | { action: 'next_phase'; phase: 'prepare' | 'review' | 'finalize' | 'critic'; delaySeconds: number; jobId?: string; freshInstance?: boolean };
 
 const REVIEW_CHUNK_WALL_CLOCK_MS = 12 * 60 * 1000;
 const JOB_LEASE_SECONDS = 15 * 60;
@@ -94,25 +98,49 @@ const MAX_JOB_CONTINUATIONS = 20;
 // a clean budget, more retries won't help -- so cap them low and fail fast (the check-run reconciler
 // and an inheriting re-run recover) instead of churning ~20 min against the shared ceiling.
 const MAX_FINALIZE_CONTINUATIONS = 3;
+// Critic skip threshold (D-06): a deduped candidate set this small isn't worth a model round-trip.
+// The critic's value is triaging a LARGE finding set (deduping main+security noise); re-judging a
+// handful of findings risks pruning a genuine issue for negligible noise reduction. At or below this
+// count runCriticPhase keeps ALL findings and records { skipped: true } instead of calling the model.
+// Overridable per-repo via passes.critic.skip_threshold; kept low so the critic still runs on any set
+// big enough to plausibly contain duplicates.
+const CRITIC_SKIP_THRESHOLD = 3;
+// Critic input char budget (D-06): an upper bound on the serialized candidate set handed to the
+// single whole-set critic call. Beyond this the prompt would risk the model's context window and this
+// invocation's subrequest/latency budget — and the plan forbids CHUNKING the critic (a chunked critic
+// can't reason about the whole set), so an oversized set fail-opens keep-all rather than being
+// partially judged. ~50k chars comfortably fits a large multi-finding set while staying well inside a
+// single model context. Overridable per-repo via passes.critic.input_char_budget.
+const CRITIC_INPUT_CHAR_BUDGET = 50_000;
 // A job's commit (and therefore its diff) never changes, so the raw diff can be
 // cached for the job's entire lifetime instead of being re-fetched from GitHub on
 // every prepare/review-chunk/finalize phase. 6h comfortably covers even a job that
 // hits every retryable-failure backoff (up to 15 min each, several times over).
 const DIFF_CACHE_TTL_SECONDS = 6 * 60 * 60;
-// Estimated subrequest cost of reviewing one file, used only to size how many files can
-// safely be reviewed concurrently in a chunk given the job's remaining subrequest budget for
-// this invocation (see budgetAwareChunkFileLimit below). A file walks a fallback chain of up
+// Estimated subrequest cost of reviewing one (file, pass) WORK UNIT, used only to size how many
+// units can safely run concurrently in a chunk given the job's remaining subrequest budget for
+// this invocation (see budgetAwareFileLimit below). A unit walks a fallback chain of up
 // to ~3 models, but the per-model model-config lookup is now cached per invocation
-// (ModelService.resolveModel), so the recurring cost per file is ~1 provider call per model
+// (ModelService.resolveModel), so the recurring cost per unit is ~1 provider call per model
 // tried plus the persisted-review write -- roughly 5 in the worst case rather than 9. Lower
-// estimate => more files reviewed in parallel per chunk within the same 50-subrequest cap.
+// estimate => more units reviewed in parallel per chunk within the same 50-subrequest cap.
+//
+// This is a per-(file,pass)-UNIT cost that governs CONCURRENCY (how many units run in one chunk),
+// NOT a per-file cost. Phase 10's security pass is modelled as a SEPARATE (file,'security') unit
+// alongside (file,'main'), so enabling it DOUBLES the unit-list LENGTH (more hibernating chunks),
+// it does NOT raise this per-unit estimate. A single unit may still fan out internally to
+// MAX_CHUNKS (=4) chunks inside ModelService.reviewFile, but that intra-unit fan-out is bounded
+// WITHIN the unit by tracker.isNearLimit() (model.ts:320-337) -- the 5-estimate governs how many
+// units run concurrently; the isNearLimit guard governs a single unit's internal chunk fan-out.
 //
 // Sized to the ~5 worst-case figure above (not padded higher): with the TokenTracker's
 // SAFE_MARGIN reserve of 25 the fresh-budget headroom is 25, and 25 / 5 == 5 keeps even the
 // highest configured concurrency level (max == 4) fully honored at a healthy budget. Padding
 // this to 8 would make floor(25 / 8) == 3 silently cap the "max" slider to 3 -- the exact
 // "concurrency slider is dead above medium" regression pinned by chunk-concurrency.spec.ts.
-const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
+// Raising it to ~10 to "absorb" the second pass would make floor(25/10) == 2 cap the slider to 2:
+// the second pass is absorbed by a longer unit list, never by a higher per-unit cost.
+export const ESTIMATED_SUBREQUESTS_PER_FILE = 5;
 
 /**
  * How many files a single review chunk may process concurrently: the configured concurrency
@@ -413,6 +441,8 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
       await runPreparePhase(env, job, leaseOwner, vcs);
     } else if (phase === 'finalize') {
       await runFinalizePhase(env, job, leaseOwner, vcs, formatter);
+    } else if (phase === 'critic') {
+      await runCriticPhase(env, job, leaseOwner, model);
     } else {
       await runReviewPhase(env, job, leaseOwner, vcs, model, tracker);
     }
@@ -429,10 +459,12 @@ export async function runReviewJob(env: AppBindings, message: ReviewJobMessage):
 
     if (error instanceof NextPhaseError) {
       await releaseJobLease(env, job.id, leaseOwner);
-      // Finalize needs a fresh instance for a clean subrequest budget to post the review; other
-      // phase transitions (e.g. the per-chunk review yield) stay in this instance and rely on the
-      // normal step.sleep hibernation to reset the budget.
-      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds, jobId: job.id, freshInstance: error.phase === 'finalize' };
+      // Finalize AND critic each need a fresh instance for a clean subrequest budget: finalize posts
+      // the review (~20 subrequests at once) and critic makes its single whole-set model call on its
+      // OWN budget (D-07 — the critic must never share finalize's budget). Other phase transitions
+      // (e.g. the per-chunk review yield) stay in this instance and rely on the normal step.sleep
+      // hibernation to reset the budget.
+      return { action: 'next_phase', phase: error.phase, delaySeconds: error.delaySeconds, jobId: job.id, freshInstance: error.phase === 'finalize' || error.phase === 'critic' };
     }
 
     if (isRetryableModelError(error)) {
@@ -483,16 +515,18 @@ async function continueOrFailWedgedJob(
   job: PersistedReviewJob,
   vcs: VcsProvider,
   leaseOwner: string,
-  phase: 'prepare' | 'review' | 'finalize',
+  phase: 'prepare' | 'review' | 'finalize' | 'critic',
   delaySeconds: number,
   reason: string,
 ): Promise<ReviewJobRunResult> {
   const continuationCount = await markJobContinuationQueued(env, job.id, delaySeconds);
 
-  // Finalize burns its low ceiling fast so a saturated instance that can't post the review fails
-  // within a few minutes instead of looping ~20 min against the review-sized ceiling; every other
-  // phase keeps the generous ceiling because it makes real per-file progress.
-  const ceiling = phase === 'finalize' ? MAX_FINALIZE_CONTINUATIONS : MAX_JOB_CONTINUATIONS;
+  // Finalize AND critic burn their low ceiling fast so a saturated instance that can't post the
+  // review / can't run the critic on a clean budget fails over within a few minutes instead of
+  // looping ~20 min against the review-sized ceiling; review keeps the generous ceiling because it
+  // makes real per-file progress. (Critic never terminal-fails on exceed — it fails OPEN to finalize
+  // in the branch below — but it still uses the low ceiling to bound its fresh-instance retries.)
+  const ceiling = phase === 'finalize' || phase === 'critic' ? MAX_FINALIZE_CONTINUATIONS : MAX_JOB_CONTINUATIONS;
 
   if (continuationCount > ceiling) {
     if (phase === 'review') {
@@ -512,6 +546,11 @@ async function continueOrFailWedgedJob(
       for (const review of stillPending) {
         await persistFailedFileReview(env, job.id, {
           filePath: review.file_path,
+          // Thread the row's own pass (IN-03) so the failed row is keyed on the correct
+          // (job_id, file_path, pass) tuple, matching the async-poll degrade path. Async rows are
+          // main-only today (submitReviewBatch gates on pass === 'main'), so this is behavior-
+          // preserving now and correct if async batching is ever extended to the security pass.
+          pass: review.pass,
           modelUsed: review.async_model ?? review.model_used,
           diffLineCount: review.diff_line_count,
           errorMessage: 'Async batch review did not complete before the job wedged.',
@@ -524,7 +563,24 @@ async function continueOrFailWedgedJob(
       // and fail terminally -- exactly the large-PR "Too many subrequests" failure this guards.
       await resetJobContinuationCount(env, job.id);
       await releaseJobLease(env, job.id, leaseOwner);
-      // Finalize on a fresh instance/budget -- this instance is the one that hit the wall.
+      // Route the degrade through the SAME selector as a healthy review completion: when the critic
+      // pass is enabled a degraded review must still enter the critic (never bypass it straight to
+      // finalize), so a partial review is critiqued exactly like a full one (MP-03). Critic-off keeps
+      // the pre-critic behavior byte-identically (nextPhaseAfterReview -> 'finalize', NREG-01).
+      const configFromJob = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+      return { action: 'next_phase', phase: nextPhaseAfterReview(configFromJob), delaySeconds: FRESH_INVOCATION_YIELD_SECONDS, jobId: job.id, freshInstance: true };
+    } else if (phase === 'critic') {
+      // FAIL-OPEN ceiling (MP-03): a wedged critic (repeated subrequest-budget exhaustion on its
+      // fresh-instance retries) must NEVER terminal-fail the job. Reset the continuation counter and
+      // hand finalize its own fresh instance/budget; finalize's null-critic_result branch (10-07)
+      // reconstructs the deduped candidate set, so no finding is lost by skipping the critic.
+      logger.error(`Critic phase exceeded the continuation ceiling; failing OPEN to finalize (no critique applied): ${job.owner}/${job.repo} PR #${job.prNumber}`, {
+        phase,
+        continuationCount,
+        reason,
+      });
+      await resetJobContinuationCount(env, job.id);
+      await releaseJobLease(env, job.id, leaseOwner);
       return { action: 'next_phase', phase: 'finalize', delaySeconds: FRESH_INVOCATION_YIELD_SECONDS, jobId: job.id, freshInstance: true };
     } else {
       const message = `Review could not make progress after ${continuationCount} continuation attempts (${reason}). Failing the job to avoid an endless retry loop; re-run it once the underlying provider issue clears.`;
@@ -550,10 +606,23 @@ async function continueOrFailWedgedJob(
 async function resolveQueuedJob(
   env: AppBindings,
   message: ReviewJobMessage,
-): Promise<{ job: PersistedReviewJob; phase: 'prepare' | 'review' | 'finalize' } | null> {
+): Promise<{ job: PersistedReviewJob; phase: 'prepare' | 'review' | 'finalize' | 'critic' } | null> {
+  // The WIRE contract (reviewJobMessageSchema.phase) includes 'critic' (D-07). Phase 10 DISPATCHES it
+  // — but ONLY for a jobId-bearing message. A critic phase is only ever reached AFTER a job exists
+  // (review→critic hands off keyed on the resolved jobId), so a phase:'critic' message WITHOUT a jobId
+  // can only be a spoof/premature delivery (Pitfall 5, T-10-11): REJECT it HERE at the boundary
+  // (return null → runReviewJob acks it) so a stray critic message can never resolve a job by webhook
+  // payload and run against it. A jobId-bearing critic message falls through to the getJobForProcessing
+  // branch below and is dispatched normally.
+  const requestedPhase = message.phase;
+  if (requestedPhase === 'critic' && !message.jobId) {
+    logger.warn('Queue message ignored: phase "critic" requires a jobId (a jobId-less critic message is treated as a spoof).');
+    return null;
+  }
+
   if (message.jobId) {
     const row = await getJobForProcessing(env, message.jobId);
-    return row ? { job: mapJob(row), phase: message.phase ?? 'review' } : null;
+    return row ? { job: mapJob(row), phase: requestedPhase ?? 'review' } : null;
   }
 
   if (!message.eventName) {
@@ -650,7 +719,7 @@ async function resolveQueuedJob(
   if (duplicateJob) {
     if (duplicateJob.status === 'queued' || duplicateJob.status === 'running') {
       logger.info(`Resuming duplicate in-flight job ${duplicateJob.id} for ${resolved.owner}/${resolved.repo} PR #${resolved.prNumber}.`);
-      return { job: duplicateJob, phase: message.phase ?? 'prepare' };
+      return { job: duplicateJob, phase: requestedPhase ?? 'prepare' };
     }
 
     logger.info(`Duplicate terminal job found for ${resolved.owner}/${resolved.repo} PR #${resolved.prNumber}, skipping.`);
@@ -735,7 +804,32 @@ async function runPreparePhase(
     }
   }
 
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
+
+  // CMD-02 / D-10 skipped-for-size producer: when the commands feature is active, persist the files
+  // this full review DROPPED past max_files so a later `review-rest` job (a different job_id) can
+  // re-review exactly them via listSkippedFilesForHead by PR identity + head. Only for a NORMAL full
+  // review (scope !== 'rest' -- a review-rest job CONSUMES the skips, it must not re-record them) and
+  // only when we have a concrete head to key on. Best-effort: a bookkeeping-write failure must never
+  // block enqueuing the review phase. When the feature is off this whole block is skipped, so the
+  // disabled path is byte-identical (NREG-01).
+  const commandsEnabled = config.review.interactive?.commands?.enabled ?? false;
+  if (commandsEnabled && job.reviewScope !== 'rest' && job.commitSha) {
+    try {
+      const rawDiff = await getCachedRawDiff(env, job, vcs);
+      const { omitted } = partitionReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+      if (omitted.length > 0) {
+        await insertSkippedFiles(env, {
+          jobId: job.id,
+          ...skippedFilesKeyForJob(job),
+          files: omitted.map((file) => ({ filePath: file.path, reason: 'max_files' })),
+        });
+      }
+    } catch (error) {
+      logger.warn(`Failed to record skipped-for-size files for job ${job.id}; review-rest may be unavailable for this head`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   await completePreparationStep(env, job.id, files.length);
   await heartbeatJobLease(env, job.id, leaseOwner, JOB_LEASE_SECONDS);
 
@@ -743,6 +837,20 @@ async function runPreparePhase(
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
     await enqueueJobPhase(env, job.id, 'finalize');
     return;
+  }
+
+  // WT-01/WT-05: post the standalone walkthrough placeholder once we know there is ≥1 reviewable
+  // file (D-11: never when files.length === 0 — hence inside the files.length > 0 path). Best-effort,
+  // mirroring the check-run cosmetics below: a placeholder failure must not block enqueuing the
+  // review phase that does the actual work. postWalkthroughPlaceholder is itself gated on
+  // walkthrough.enabled and idempotent on the durable jobs.walkthrough_comment_ref, so a retried
+  // prepare / fresh-instance handoff never double-posts. The ACCEPTED RESIDUAL (create-success then
+  // ref-write throw) surfaces here as a logged warn so the residual stays observable (not swallowed
+  // inside postWalkthroughPlaceholder).
+  try {
+    await postWalkthroughPlaceholder({ env, job, config, fileCount: files.length, vcs });
+  } catch (error) {
+    logger.warn(`Failed to post walkthrough placeholder for job ${job.id}; continuing to the review phase anyway`, error instanceof Error ? error : new Error(String(error)));
   }
 
   if (checkRunId) {
@@ -783,7 +891,7 @@ async function runReviewPhase(
     failureModelProviderPromise ??= resolveModelProviderName(env, failureModelId);
     return failureModelProviderPromise;
   };
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
   const totalLineCount = files.reduce((sum, file) => sum + file.lineCount, 0);
   const { concurrencyLevel } = await getReviewSettings(env);
   const configuredChunkFileLimit = REVIEW_CONCURRENCY_LIMITS[concurrencyLevel];
@@ -798,11 +906,27 @@ async function runReviewPhase(
   const startedAt = Date.now();
   let processedThisChunk = 0;
 
+  // Build the (file, pass) WORK-UNIT list once. Every eligible file always yields a 'main' unit;
+  // when the repo's security pass is enabled it ALSO yields a 'security' unit, scheduled as a
+  // separate budget-visible unit alongside main (D-01 / MP-01) rather than a hidden inline second
+  // model call. With security off the list is main-only and every downstream path (scheduling,
+  // skip, inherit, completion) is byte-identical to v1.0 (NREG-01).
+  const securityPassEnabled = config.review.passes?.security?.enabled ?? false;
+  const units: Array<{ file: (typeof files)[number]; pass: FileReviewPass }> = [];
+  for (const file of files) {
+    units.push({ file, pass: 'main' });
+    if (securityPassEnabled) units.push({ file, pass: 'security' });
+  }
+
   const jobIdsToQuery = [job.id];
   if (job.retryOfJobId) jobIdsToQuery.push(job.retryOfJobId);
   const allExistingReviews = await getFileReviewsForJobs(env, jobIdsToQuery);
-  const currentReviews = new Map(allExistingReviews.filter((review) => review.job_id === job.id).map((review) => [review.file_path, review]));
-  const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [review.file_path, review]));
+  // Maps are keyed on reviewUnitKey(file_path, pass) -- NOT file_path -- so a file's 'main' and
+  // 'security' rows are distinct entries: one pass can never overwrite, skip, or inherit the other
+  // (tuple identity, 10-01). Keying on file_path alone here would let a security row clobber a main
+  // row and leak orphan security rows into finalize.
+  const currentReviews = new Map(allExistingReviews.filter((review) => review.job_id === job.id).map((review) => [reviewUnitKey(review.file_path, review.pass), review]));
+  const parentReviews = new Map(allExistingReviews.filter((review) => review.job_id !== job.id && review.file_status === 'done').map((review) => [reviewUnitKey(review.file_path, review.pass), review]));
 
   const reviewTasks: Array<Promise<void>> = [];
   // Counters shared across the concurrent review tasks below (single-threaded JS, so ++ is safe):
@@ -817,43 +941,55 @@ async function runReviewPhase(
   // (which handles its own inherit/re-review decision). This lets a fully-inheritable retry finish
   // the whole review phase in a single invocation rather than crawling through ~12 hibernated chunks.
   if (job.retryOfJobId && parentReviews.size > 0) {
-    const inheritablePaths = files
-      .filter((file) => {
-        if (currentReviews.has(file.path)) return false;
-        const parent = parentReviews.get(file.path);
+    // Build a UNIT list (only the (file, pass) units THIS job actually expects) so the inherit is
+    // tuple-keyed: a security-DISABLED retry's unit list is main-only, so it requests only main
+    // units and can never inherit a stray parent 'security' row (no orphan security row leaks into
+    // finalize). Each unit is inheritable only when it has no current row AND a done parent row for
+    // the SAME (path, pass) exists under the current model strategy.
+    const inheritableUnits = units
+      .filter((unit) => {
+        const key = reviewUnitKey(unit.file.path, unit.pass);
+        if (currentReviews.has(key)) return false;
+        const parent = parentReviews.get(key);
         return Boolean(parent && canInheritParentFileReview(config, parent));
       })
-      .map((file) => file.path);
+      .map((unit) => ({ filePath: unit.file.path, pass: unit.pass }));
 
-    if (inheritablePaths.length > 0) {
-      const inheritedPaths = await bulkInheritFileReviews(env, {
+    if (inheritableUnits.length > 0) {
+      const inheritedUnits = await bulkInheritFileReviews(env, {
         jobId: job.id,
         parentJobId: job.retryOfJobId,
-        filePaths: inheritablePaths,
+        units: inheritableUnits,
       });
-      // Mark the just-copied files handled so the loop below skips them (no per-file re-work).
-      for (const path of inheritedPaths) {
-        const parent = parentReviews.get(path);
-        if (parent) currentReviews.set(path, parent);
+      // Mark the just-copied units handled (by unit key) so the loop below skips them.
+      for (const { filePath, pass } of inheritedUnits) {
+        const key = reviewUnitKey(filePath, pass);
+        const parent = parentReviews.get(key);
+        if (parent) currentReviews.set(key, parent);
       }
-      terminalProgress += inheritedPaths.length;
-      if (inheritedPaths.length > 0) {
-        logger.info(`Bulk-inherited ${inheritedPaths.length} parent file reviews for job ${job.id} in one pass`);
+      terminalProgress += inheritedUnits.length;
+      if (inheritedUnits.length > 0) {
+        logger.info(`Bulk-inherited ${inheritedUnits.length} parent file review units for job ${job.id} in one pass`);
       }
     }
   }
 
-  for (const file of files) {
-    const existingReview = currentReviews.get(file.path);
+  for (const unit of units) {
+    const { file, pass } = unit;
+    const unitKey = reviewUnitKey(file.path, pass);
+    const existingReview = currentReviews.get(unitKey);
     // An in-flight async submission must be polled (not skipped as "handled" and not resubmitted).
+    // The skip check is per-UNIT: a completed (file,'main') row never skips the (file,'security')
+    // unit and vice-versa, because existingReview is looked up by unitKey.
     const awaitingReview = existingReview && isAwaitingAsyncReview(existingReview) ? existingReview : null;
     if (existingReview && countsAsHandledFileReview(existingReview) && !awaitingReview) {
       continue;
     }
 
-    const inherited = parentReviews.get(file.path);
+    const inherited = parentReviews.get(unitKey);
     const reviewTask = async () => {
-      // (0) Poll an already-submitted async batch review.
+      // (0) Poll an already-submitted async batch review. Only the main pass ever submits to the
+      // async batch queue (see below), so awaitingReview is main-only; the pass is threaded anyway.
       if (awaitingReview) {
         const poll = await model.pollReviewBatch({
           model: awaitingReview.async_model ?? awaitingReview.model_used,
@@ -869,61 +1005,67 @@ async function runReviewPhase(
           logger.warn(`Async batch poll failed for ${file.path}; falling back to synchronous review`, {
             error: poll.error instanceof Error ? poll.error.message : String(poll.error),
           });
-          await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+          await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
           terminalProgress += 1;
           return;
         }
-        await persistCompletedReview(env, job, file, poll.response);
+        await persistCompletedReview(env, job, file, poll.response, pass);
         terminalProgress += 1;
         return;
       }
 
       if (!inherited) {
-        // (1) Try the async batch queue first; on any unavailability fall back to sync review.
-        const submitted = await model.submitReviewBatch({
-          file,
-          prTitle: pr.title ?? null,
-          prDescription: pr.body ?? null,
-          config,
-          totalLineCount,
-          compactPrompt: (existingReview?.transient_error_count ?? 0) > 0,
-        });
-        if (submitted) {
-          await upsertFileReview(env, job.id, {
-            filePath: file.path,
-            fileStatus: 'pending',
-            modelUsed: submitted.model,
-            modelProvider: null,
-            diffLineCount: file.lineCount,
-            diffInput: null,
-            rawAiOutput: null,
-            parsedComments: [],
-            inputTokens: null,
-            outputTokens: null,
-            durationMs: null,
-            verdict: null,
-            fileSummary: null,
-            overallCorrectness: null,
-            confidenceScore: null,
-            errorMessage: null,
-            asyncRequestId: submitted.requestId,
-            asyncModel: submitted.model,
+        // (1) The MAIN pass tries the async batch queue first; on any unavailability it falls back
+        // to a synchronous review. The SECURITY pass is a separate scheduled unit that always runs
+        // through the synchronous reviewFile path -- it is never submitted to the async batch queue.
+        if (pass === 'main') {
+          const submitted = await model.submitReviewBatch({
+            file,
+            prTitle: pr.title ?? null,
+            prDescription: pr.body ?? null,
+            config,
+            totalLineCount,
+            compactPrompt: (existingReview?.transient_error_count ?? 0) > 0,
           });
-          awaitingAsync += 1;
-          return;
+          if (submitted) {
+            await upsertFileReview(env, job.id, {
+              filePath: file.path,
+              pass,
+              fileStatus: 'pending',
+              modelUsed: submitted.model,
+              modelProvider: null,
+              diffLineCount: file.lineCount,
+              diffInput: null,
+              rawAiOutput: null,
+              parsedComments: [],
+              inputTokens: null,
+              outputTokens: null,
+              durationMs: null,
+              verdict: null,
+              fileSummary: null,
+              overallCorrectness: null,
+              confidenceScore: null,
+              errorMessage: null,
+              asyncRequestId: submitted.requestId,
+              asyncModel: submitted.model,
+            });
+            awaitingAsync += 1;
+            return;
+          }
         }
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
         terminalProgress += 1;
         return;
       }
 
       if (!canInheritParentFileReview(config, inherited)) {
-        logger.info(`Ignoring inherited review for ${file.path}; parent model ${inherited.model_used} is not in the current model strategy`);
-        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview);
+        logger.info(`Ignoring inherited review for ${file.path} (${pass}); parent model ${inherited.model_used} is not in the current model strategy`);
+        await reviewAndPersistFile(env, job, file, pr, config, totalLineCount, model, resolveFailureModelProvider, existingReview, pass);
         terminalProgress += 1;
       } else {
         await upsertFileReview(env, job.id, {
           filePath: file.path,
+          pass,
           fileStatus: 'done',
           modelUsed: inherited.model_used,
           modelProvider: inherited.model_provider,
@@ -940,7 +1082,7 @@ async function runReviewPhase(
           confidenceScore: inherited.confidence_score,
           errorMessage: null,
         });
-        currentReviews.set(file.path, inherited);
+        currentReviews.set(unitKey, inherited);
         terminalProgress += 1;
       }
     };
@@ -985,21 +1127,33 @@ async function runReviewPhase(
   }
 
   const latestReviews = await getFileReviewsForJobs(env, [job.id]);
-  // A file still awaiting its async batch result is NOT complete yet -- exclude it so the job
+  // A unit still awaiting its async batch result is NOT complete yet -- exclude it so the job
   // doesn't finalize with pending reviews.
-  const reviewedPaths = new Set(
-    latestReviews.filter((review) => countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => review.file_path),
+  const terminalUnitKeys = new Set(
+    latestReviews.filter((review) => countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => reviewUnitKey(review.file_path, review.pass)),
   );
-  const completedCount = files.filter((file) => reviewedPaths.has(file.path)).length;
+  // COMPLETION counts terminal (file,pass) UNITS against units.length: with security on, the phase
+  // must not finalize until BOTH passes of every eligible file are terminal.
+  const completedUnitCount = units.filter((unit) => terminalUnitKeys.has(reviewUnitKey(unit.file.path, unit.pass))).length;
+  // PROGRESS stays FILE-based (distinct main-pass terminal files over files.length) so the check-run
+  // never shows a value like 3/2 when security doubles the unit count. This is a SEPARATE counter
+  // from the completion check above.
+  const terminalMainFilePaths = new Set(
+    latestReviews.filter((review) => review.pass === 'main' && countsAsHandledFileReview(review) && !isAwaitingAsyncReview(review)).map((review) => review.file_path),
+  );
+  const completedCount = files.filter((file) => terminalMainFilePaths.has(file.path)).length;
 
-  if (completedCount >= files.length) {
+  if (completedUnitCount >= units.length) {
     await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
-    // Finalize (post the GitHub review, labels, check run) needs its OWN fresh subrequest budget.
-    // Always hibernate into a new invocation first: the review phase that just finished spent this
-    // invocation's budget, and TokenTracker under-reports real usage (it doesn't see Hyperdrive/
-    // GitHub subrequests), so a conditional yield let finalize run in the exhausted invocation and
-    // die with "Too many subrequests". Unconditional yield trades a one-time delay for reliability.
-    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    // The next phase (critic when enabled, else finalize) needs its OWN fresh subrequest budget:
+    // finalize posts the GitHub review/labels/check run, and the critic makes its single whole-set
+    // model call on a clean budget (D-07). Always hibernate into a new invocation first: the review
+    // phase that just finished spent this invocation's budget, and TokenTracker under-reports real
+    // usage (it doesn't see Hyperdrive/GitHub subrequests), so a conditional yield let the next phase
+    // run in the exhausted invocation and die with "Too many subrequests". Unconditional yield trades
+    // a one-time delay for reliability. nextPhaseAfterReview routes through the critic when enabled so
+    // a healthy completion can never bypass it (MP-03); critic-off stays 'finalize' (NREG-01).
+    await enqueueJobPhase(env, job.id, nextPhaseAfterReview(config), FRESH_INVOCATION_YIELD_SECONDS);
     return;
   }
 
@@ -1016,6 +1170,7 @@ async function runReviewPhase(
       for (const review of latestReviews.filter(isAwaitingAsyncReview)) {
         await persistFailedFileReview(env, job.id, {
           filePath: review.file_path,
+          pass: review.pass,
           modelUsed: review.async_model ?? review.model_used,
           diffLineCount: review.diff_line_count,
           errorMessage: 'Async batch review did not complete in time.',
@@ -1023,7 +1178,9 @@ async function runReviewPhase(
         });
       }
       await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
-      throw new NextPhaseError('finalize', FRESH_INVOCATION_YIELD_SECONDS);
+      // Async-batch exhaustion degrade: route through the critic selector exactly like a healthy
+      // completion so a degraded review still enters the critic when enabled (never bypasses it).
+      throw new NextPhaseError(nextPhaseAfterReview(config), FRESH_INVOCATION_YIELD_SECONDS);
     }
     throw new NextPhaseError('review', ASYNC_BATCH_POLL_DELAY_SECONDS);
   }
@@ -1070,9 +1227,15 @@ async function persistCompletedReview(
       confidenceScore?: number;
     };
   },
+  // Defaults to 'main' (NREG-01). Threaded from the poll call site (IN-03) so a completed row is
+  // keyed on the correct (job_id, file_path, pass) tuple. Async batch rows are main-only today
+  // (submitReviewBatch gates on pass === 'main'), so this is behavior-preserving now and correct if
+  // async batching is ever extended to the security pass.
+  pass: FileReviewPass = 'main',
 ) {
   await upsertFileReview(env, job.id, {
     filePath: file.path,
+    pass,
     fileStatus: 'done',
     modelUsed: response.modelUsed,
     modelProvider: response.provider,
@@ -1104,6 +1267,9 @@ async function persistFailedFileReview(
   jobId: string,
   input: {
     filePath: string;
+    // Defaults to 'main' (NREG-01). A failed security unit records its OWN failed row keyed on
+    // (job_id, file_path, 'security') rather than clobbering the main row for the same file.
+    pass?: FileReviewPass;
     modelUsed: string;
     modelProvider?: string | null;
     diffLineCount: number;
@@ -1114,6 +1280,7 @@ async function persistFailedFileReview(
 ) {
   await upsertFileReview(env, jobId, {
     filePath: input.filePath,
+    pass: input.pass ?? 'main',
     fileStatus: 'failed',
     modelUsed: input.modelUsed,
     modelProvider: input.modelProvider ?? null,
@@ -1141,6 +1308,11 @@ async function reviewAndPersistFile(
   model: ModelService,
   resolveFailureModelProvider: () => Promise<string | null>,
   previousReview?: { transient_error_count: number },
+  // Which review PASS this call persists. Defaults to 'main' (NREG-01: existing behavior). 'security'
+  // routes the SAME resolved model through the security prompt (10-04) and persists a row keyed on
+  // (job_id, file_path, 'security'); all failure bookkeeping below is threaded with this pass so a
+  // security-unit failure never touches the main row.
+  pass: FileReviewPass = 'main',
 ) {
   const startedAt = Date.now();
   const compactPrompt = (previousReview?.transient_error_count ?? 0) > 0;
@@ -1152,10 +1324,12 @@ async function reviewAndPersistFile(
       config,
       totalLineCount,
       compactPrompt,
+      pass,
     });
 
     await upsertFileReview(env, job.id, {
       filePath: file.path,
+      pass,
       fileStatus: 'done',
       modelUsed: response.modelUsed,
       modelProvider: response.provider,
@@ -1196,6 +1370,7 @@ async function reviewAndPersistFile(
     if (isRetryableModelError(error)) {
       const failureCount = await recordRetryableFileReviewFailure(env, job.id, {
         filePath: file.path,
+        pass,
         modelUsed: modelId,
         modelProvider,
         diffLineCount: file.lineCount,
@@ -1208,6 +1383,7 @@ async function reviewAndPersistFile(
         const finalError = `Review skipped after ${failureCount} repeated model provider outages.`;
         await persistFailedFileReview(env, job.id, {
           filePath: file.path,
+          pass,
           modelUsed: modelId,
           modelProvider,
           diffLineCount: file.lineCount,
@@ -1250,6 +1426,7 @@ async function reviewAndPersistFile(
 
     await persistFailedFileReview(env, job.id, {
       filePath: file.path,
+      pass,
       modelUsed: modelId,
       modelProvider,
       diffLineCount: file.lineCount,
@@ -1281,23 +1458,47 @@ async function runFinalizePhase(
 
   const pr = await vcs.getPullRequest(job.owner, job.repo, job.prNumber);
   const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
-  const files = await getDiffFiles(env, job, vcs, config);
+  const files = await getJobDiffFiles(env, job, vcs, config);
   let reviews = await getFileReviewsForJobs(env, [job.id]);
 
-  if (reviews.length < files.length) {
-    const reviewedPaths = new Set(reviews.map((r) => r.file_path));
-    const missingFiles = files.filter((f) => !reviewedPaths.has(f.path));
-    
-    if (missingFiles.length > 0) {
-      logger.warn(`Job ${job.id} reached finalize phase with ${missingFiles.length} missing file reviews. Forcing them to failed state.`);
-      // Batch the backfill into one INSERT. Doing it per-file (a transaction each) scales the
-      // subrequest cost with the number of missing files and, on a large/growing PR, exhausts the
+  // MP-04 / Pitfall 2: pass-aware missing-row reconciliation. Build the EXPECTED set of (path, pass)
+  // UNITS — every file has a 'main' unit, plus a 'security' unit when the security pass is on — and
+  // compare it against the PRESENT reviewUnitKey(file_path, pass) rows. This replaces the old
+  // `reviews.length < files.length` + path-Set check, which could not distinguish passes: once a file
+  // can carry both a 'main' and a 'security' row, a security row would pad the count and mask an absent
+  // main row (or vice versa). A security row must NEVER satisfy a missing main unit.
+  const securityEnabled = config.review.passes?.security?.enabled ?? false;
+  const expectedUnits: Array<{ filePath: string; pass: FileReviewPass; diffLineCount: number }> = files.flatMap(
+    (file) => {
+      const units: Array<{ filePath: string; pass: FileReviewPass; diffLineCount: number }> = [
+        { filePath: file.path, pass: 'main', diffLineCount: file.lineCount },
+      ];
+      if (securityEnabled) {
+        units.push({ filePath: file.path, pass: 'security', diffLineCount: file.lineCount });
+      }
+      return units;
+    },
+  );
+
+  if (reviews.length < expectedUnits.length) {
+    const presentUnitKeys = new Set(reviews.map((review) => reviewUnitKey(review.file_path, review.pass)));
+    const missingUnits = expectedUnits.filter(
+      (unit) => !presentUnitKeys.has(reviewUnitKey(unit.filePath, unit.pass)),
+    );
+
+    if (missingUnits.length > 0) {
+      logger.warn(`Job ${job.id} reached finalize phase with ${missingUnits.length} missing (file, pass) review units. Forcing them to failed state.`);
+      // Batch the backfill into one INSERT. Doing it per-unit (a transaction each) scales the
+      // subrequest cost with the number of missing units and, on a large/growing PR, exhausts the
       // per-invocation budget right before the review is posted (finalize can't safely hibernate --
-      // it posts the GitHub review -- so it must stay within one invocation's budget).
+      // it posts the review -- so it must stay within one invocation's budget). The UNIT-keyed
+      // bulkMarkFilesFailed (10-01) writes one 'failed' row per (path, pass), so a missing main unit
+      // and a missing security unit are backfilled independently — a security row never satisfies a
+      // missing main unit.
       await bulkMarkFilesFailed(
         env,
         job.id,
-        missingFiles.map((file) => ({ filePath: file.path, diffLineCount: file.lineCount })),
+        missingUnits,
         { modelUsed: config.model?.main ?? 'unconfigured', errorMessage: 'This file was not reviewed before the review run completed.' },
       );
 
@@ -1318,8 +1519,37 @@ async function runFinalizePhase(
   // no-ops the timestamp when the review phase already marked it done.
   await updateJobStep(env, job.id, 'Reviewing Files', { status: 'done' });
 
-  const reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
-  const fileSummaries = reviews.map((review) => ({
+  // D-09 / MP-04: resolve the finalize candidate set that feeds the (untouched) deterministic floor
+  // block below. Precedence:
+  //   (i)   a persisted critic result  -> reviewedComments = criticResult.kept. This is READ-ONLY:
+  //         finalize NEVER issues a critic model call (D-07); the kept set was computed once in the
+  //         critic phase (10-06) and is consumed here (and on any finalize retry) idempotently.
+  //   (ii)  else, security pass on      -> dedupeFindings(union(main, security)). This also covers a
+  //         FAIL-OPEN wedged critic that left criticResult null (10-06): nothing is lost — the deduped
+  //         union still posts. Dedup is gated on passes.security (Pitfall 4): deduping a single main
+  //         source would suppress two genuinely similar main-pass findings that post today (NREG).
+  //   (iii) else                        -> the v1.0 main-only flatMap, byte-identical to the
+  //         pre-multipass engine (NREG-01).
+  // Pruned findings are never re-surfaced here (D-08): they live only in jobs.critic_result.pruned.
+  let reviewedComments: ParsedReviewComment[];
+  if (job.criticResult) {
+    reviewedComments = job.criticResult.kept;
+  } else if (securityEnabled) {
+    reviewedComments = dedupeFindings(
+      reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]),
+    );
+  } else {
+    reviewedComments = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  }
+  // Pitfall 3 (NREG): split the reviews into the main pass for every Phase-9 surface. mainReviews
+  // feeds fileSummaries, the verdict aggregation, successfulReviews/confidence/correctness, and the
+  // walkthrough — so toggling passes.security/critic never changes the summary narrative inputs, the
+  // verdict, or the walkthrough coverage/counts/ordering. ALL `reviews` rows feed ONLY the token
+  // totals (security tokens were really spent) and the finding candidate union (reviewedComments).
+  // When passes.security is off, mainReviews === reviews so everything below is byte-identical (NREG-01).
+  const mainReviews = reviews.filter((review) => review.pass === 'main');
+
+  const fileSummaries = mainReviews.map((review) => ({
     path: review.file_path,
     summary: review.file_status === 'failed'
       ? `Review failed: ${review.error_msg ?? 'Unknown file review error'}`
@@ -1335,7 +1565,7 @@ async function runFinalizePhase(
 
   const hasFailures = fileSummaries.some((file) => file.verdict === 'failed');
   const failedFileCount = fileSummaries.filter((file) => file.verdict === 'failed').length;
-  const severityRanks: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, nit: 4 };
+  const severityRanks = SEVERITY_RANK; // single source of truth lives in ./dedup (IN-01, no drift)
   const minRank = severityRanks[config.review.min_severity] ?? 4;
   const { maxComments: globalMaxComments } = await getReviewSettings(env);
   const effectiveMaxComments = Math.min(config.review.max_comments, globalMaxComments);
@@ -1350,7 +1580,28 @@ async function runFinalizePhase(
     finalComments = finalComments.slice(0, effectiveMaxComments);
   }
 
-  const verdictSummary = formatter.summarizeVerdict(finalComments, hasFailures);
+  // Pitfall 3 (corrected): buildWalkthroughData ALREADY filters its `reviews` arg to pass==='main'
+  // internally (walkthrough.ts), but it derives per-file counts and global severity counts from its
+  // `finalComments` arg — so passing the MIXED finalComments (main + security + critic-kept) would
+  // leak security findings into the Phase-9 walkthrough counts and file ordering. Compute a SEPARATE
+  // main-only finalComments by applying the EXACT SAME floor block (min_severity rank filter ->
+  // confidence floor -> severity sort -> slice to effectiveMaxComments) to the main-pass findings.
+  // This is the exact v1.0 main-only finalComments computation, so the walkthrough coverage, per-file
+  // + global severity counts, and file ordering are identical whether or not security/critic is on.
+  // The verdict is likewise driven by this main-only set (a Phase-9 surface — security findings post
+  // as inline comments but must not change the overall approve/comment verdict). When both toggles are
+  // off, mainReviews === reviews and reviewedComments is the main-only flatMap, so mainFinalComments
+  // is element-wise identical to finalComments (NREG-01).
+  const mainCandidateComments = mainReviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  let mainFinalComments = mainCandidateComments
+    .filter(c => (severityRanks[c.severity] ?? 4) <= minRank)
+    .filter(c => passesConfidenceFloor(c, config.review.min_confidence));
+  mainFinalComments.sort((a, b) => (severityRanks[a.severity] ?? 4) - (severityRanks[b.severity] ?? 4));
+  if (mainFinalComments.length > effectiveMaxComments) {
+    mainFinalComments = mainFinalComments.slice(0, effectiveMaxComments);
+  }
+
+  const verdictSummary = formatter.summarizeVerdict(mainFinalComments, hasFailures);
   await updateJobStep(env, job.id, 'Generating Summary', { status: 'done' });
   await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
 
@@ -1360,7 +1611,7 @@ async function runFinalizePhase(
   // passed them, so both columns were always null. Only successfully-reviewed (non-failed) files
   // count toward the aggregate -- a failed file's null confidence/correctness would otherwise
   // silently drag the average/verdict down.
-  const successfulReviews = reviews.filter((review) => review.file_status !== 'failed');
+  const successfulReviews = mainReviews.filter((review) => review.file_status !== 'failed');
   const confidenceScores = successfulReviews
     .map((review) => review.confidence_score)
     .filter((score): score is number => score !== null && score !== undefined);
@@ -1406,6 +1657,23 @@ async function runFinalizePhase(
   }
   const topFindings = finalComments.slice(0, 5).map((c) => ({ severity: c.severity, title: c.title, path: c.path }));
 
+  // D-10/D-11 footer inputs: surface the commands hint whenever the commands feature is enabled, and
+  // the skipped-for-size line when a full review recorded omissions for this head. The skip count is
+  // read from skipped_files (best-effort -- a read failure degrades to no skipped line, never fails
+  // finalize) and only for a NORMAL full review (a review-rest job IS the rest pass, so it shows the
+  // hint but never the "N skipped" line). When commands is off, both stay inert and the footer is
+  // byte-identical to today (NREG-01).
+  const commandsEnabled = config.review.interactive?.commands?.enabled ?? false;
+  let skippedForSizeCount = 0;
+  if (commandsEnabled && job.reviewScope !== 'rest' && job.commitSha) {
+    try {
+      const skipped = await listSkippedFilesForHead(env, skippedFilesKeyForJob(job));
+      skippedForSizeCount = skipped.length;
+    } catch (error) {
+      logger.warn(`Failed to read skipped-for-size count for job ${job.id}; omitting the review-rest footer line`, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   const formattedSummary = formatter.formatReviewOverview(
     {
       commitSha: pr.headSha,
@@ -1418,6 +1686,8 @@ async function runFinalizePhase(
       filesReviewed: files.length,
       omittedCount,
       maxComments: effectiveMaxComments,
+      commandsEnabled,
+      skippedForSizeCount,
     },
     { provider: vcs.name },
   );
@@ -1452,10 +1722,15 @@ async function runFinalizePhase(
   const partialErrorMessage = hasFailures
     ? `Partial review: ${failedFileCount} of ${files.length} file${files.length === 1 ? '' : 's'} could not be reviewed.`
     : null;
-  // Record the posted review and mark the job done IMMEDIATELY after createReview -- before the
-  // best-effort cosmetics below. The review is already on GitHub at this point; if the remaining
-  // label/check-run calls exhaust this invocation's subrequest budget (large PR), we must not leave
-  // the job stranded as 'failed' with review_id null. This is the critical, must-not-lose write.
+  // The review is already on GitHub at this point (submitReview above). completeJob below is the
+  // critical, must-not-lose write that records the posted review id and marks the job done. Between
+  // here and completeJob run best-effort steps: the walkthrough edit (which now precedes completeJob
+  // BY DESIGN so the supersede re-check is effective — see the block comment there — NOT "immediately
+  // after createReview" as this comment once claimed), its optional one-shot diagram model call, and
+  // the remaining label/check-run cosmetics. Any of these can consume this invocation's shared
+  // subrequest budget on a large PR; we must not let them exhaust it and leave the job stranded as
+  // 'failed' with review_id null. The diagram call is additionally skipped when the finalize budget
+  // is already tight (WR-01) so it cannot push the invocation over the cap ahead of completeJob.
   // Guard the ref -> id conversion (WR-03): a non-numeric ref (the Bitbucket case this seam
   // anticipates) would otherwise write NaN into review_id unguarded. Fail loudly here until
   // review_id becomes `text` to hold opaque refs (Phase 4/5 schema decision).
@@ -1463,12 +1738,116 @@ async function runFinalizePhase(
   if (!Number.isFinite(numericReviewId)) {
     throw new Error(`Provider ${vcs.name} returned a non-numeric review ref: ${review.ref}`);
   }
+
+  // WT-01/WT-05/D-06: edit the placeholder into the complete walkthrough. This runs AFTER
+  // submitReview (the review is already posted, and the finalizeRetriedPastPost double-post guard
+  // above covers a finalize retry) and BEFORE completeJob (the job is still `running`, so the
+  // supersede re-check is EFFECTIVE and a natural finalize re-run re-attempts the idempotent edit) —
+  // cross-AI blockers 1 + 3. It is its OWN best-effort try/catch, separate from the cosmetics block
+  // below: a walkthrough failure must NEVER re-throw out of finalize, because a generic throw here
+  // would fail an already-posted review at the runReviewJob catch (review.ts failJobAndCheckRun).
+  //
+  // Gated on files.length > 0 to stay symmetric with the D-11 placeholder gate: a 0-file job posts
+  // no placeholder in prepare, so finalize must not fall into editWalkthroughComment's defensive
+  // "no ref -> create" branch and post a walkthrough for a job that legitimately has nothing to show.
+  // (The defensive branch still fires for the real case — files exist but the ref write failed in
+  // prepare — because files.length > 0 there.)
+  // WT-03 (Plan 09-03): the optional Mermaid diagram is ONE whole-diff, best-effort model call whose
+  // tokens must reach completeJob. These accumulate 0 unless the diagram is actually attempted AND
+  // succeeds — so with the diagram gated off they stay 0 and the completeJob totals are byte-identical
+  // to before (NREG-01). Declared here (function scope) so they are in scope at completeJob below.
+  let diagramInputTokens = 0;
+  let diagramOutputTokens = 0;
+
+  if (config.review.walkthrough.enabled && files.length > 0) try {
+    // (a) Supersede re-check INLINE (D-06): the private heartbeatAndCheckSuperseded is already in
+    // scope here, so core/walkthrough.ts never imports it (no core/ module cycle — cross-AI blocker
+    // 4). A superseded (stale-commit) job must not edit the walkthrough; catch JOB_SUPERSEDED
+    // LOCALLY and skip only the edit — the already-posted review must still reach completeJob, so we
+    // never re-throw.
+    let superseded = false;
+    try {
+      await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'JOB_SUPERSEDED') {
+        superseded = true;
+        logger.info(`Job ${job.id} superseded at the walkthrough edit; skipping the walkthrough (review already posted)`);
+      } else {
+        throw error;
+      }
+    }
+    if (!superseded) {
+      // (b) WT-03: the OPTIONAL Mermaid diagram. Gated on BOTH the provider capability
+      // (capabilities.supportsMermaid — GitHub true / Bitbucket false, D-13) AND the sequence_diagram
+      // sub-toggle (D-09). When gated OFF the diagram model call is NOT made at all — Bitbucket and the
+      // sub-toggle-off path skip the outbound request entirely (Pitfall #7, saves the subrequest), and
+      // mermaid stays null so formatWalkthrough emits no fence. Its OWN best-effort try/catch: any model
+      // error OR a null parse (WT-04) omits the diagram and posts the walkthrough without it — it never
+      // fails the job (D-07, D-04a). It is exactly ONE outbound request (generateWalkthroughDiagram is
+      // primary-model-only) and never touches the per-file subrequest budget (Pitfall #1).
+      let mermaid: string | null = null;
+      if (
+        vcs.capabilities.supportsMermaid &&
+        config.review.walkthrough.sequence_diagram.enabled &&
+        // WR-01: graceful omission. The diagram is one more outbound model fetch that counts against
+        // this invocation's shared Cloudflare subrequest cap AND runs BEFORE the must-not-lose
+        // completeJob write. If finalize's budget is already tight, skip the diagram entirely rather
+        // than risk pushing the invocation over the cap ahead of completeJob — the walkthrough simply
+        // posts without a diagram (best-effort, D-07). summaryTracker is finalize's own tracker,
+        // reused for the diagram call below so this guard reflects the subrequests finalize has
+        // actually spent instead of a fresh, always-empty tracker's false sense of isolation.
+        !summaryTracker.isNearLimit()
+      ) {
+        try {
+          // Reuse summaryTracker (the finalize-level tracker) rather than a fresh one: the diagram
+          // fetch shares this invocation's subrequest budget, so it must be accounted against the
+          // same tracker the near-limit guard above reads (WR-01). It is still exactly ONE
+          // primary-model-only call (generateWalkthroughDiagram) — no fallback fan-out, and it never
+          // touches the per-file subrequest budget. Diagram tokens are read from the response below,
+          // not the tracker, so folding them into completeJob stays correct.
+          const diagramModelService = new ModelService(env, summaryTracker, { jobId: job.id });
+          const diagramResponse = await diagramModelService.generateWalkthroughDiagram({
+            prTitle: pr.title,
+            files, // the ACTUAL parsed diff (FileDiff[]), not only fileSummaries (cross-AI blocker 2)
+            fileSummaries,
+            config,
+          });
+          mermaid = parseWalkthroughDiagram(diagramResponse.rawText); // tolerant parse -> null on garbage
+          // Fold the diagram call's tokens into the completeJob totals (token-accounting MEDIUM).
+          diagramInputTokens = diagramResponse.inputTokens;
+          diagramOutputTokens = diagramResponse.outputTokens;
+        } catch (error) {
+          logger.warn(
+            `generateWalkthroughDiagram failed for job ${job.id}; posting the walkthrough without a diagram`,
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          mermaid = null;
+        }
+      }
+      // (c) deterministic aggregation over the main-pass reviews + the floored/capped finalComments.
+      const data = buildWalkthroughData({ reviews: mainReviews, finalComments: mainFinalComments });
+      // (d) single in-place edit (delete-recovery + bounded transient retry live in the helper). The
+      // mermaid fence is added GitHub-only by formatWalkthrough (Plan 01), filling the Plan 02 seam.
+      await editWalkthroughComment({ env, job, config, vcs, formatter, data, mermaid });
+    }
+  } catch (error) {
+    // (d) Best-effort: the review is posted; a persistent walkthrough failure logs a warn and the
+    // job still completes. The block MUST NOT re-throw.
+    logger.warn(`Walkthrough edit failed for job ${job.id}; review is posted, leaving it best-effort`, error instanceof Error ? error : new Error(String(error)));
+  }
+
   await completeJob(env, job.id, {
     verdict: verdictSummary.verdict,
     fileCount: files.length,
     commentCount: finalComments.length,
-    totalInputTokens: fileInputTokens,
-    totalOutputTokens: fileOutputTokens,
+    // Diagram tokens (0 unless the WT-03 diagram was attempted and succeeded) are folded in here so
+    // the optional diagram's usage is not lost from persisted job accounting (token-accounting MEDIUM).
+    // Critic tokens (0 when the critic is off — criticResult is null — so byte-identical to v1.0) are
+    // folded in alongside the file, summary, and diagram tokens so the critic's usage is not dropped
+    // from persisted job accounting (token-accounting MEDIUM). Finalize only READS these persisted
+    // values; it never re-calls the critic model (D-07).
+    totalInputTokens: fileInputTokens + diagramInputTokens + (job.criticResult?.inputTokens ?? 0),
+    totalOutputTokens: fileOutputTokens + diagramOutputTokens + (job.criticResult?.outputTokens ?? 0),
     summaryMarkdown: formattedSummary,
     // ref -> id at this boundary (D-02); the numeric review_id column stays canonical.
     reviewId: numericReviewId,
@@ -1544,6 +1923,165 @@ async function runFinalizePhase(
   }
 }
 
+/**
+ * The dedicated critic phase (D-07 / D-05 / MP-03). Runs BETWEEN review and finalize on its OWN fresh
+ * subrequest budget: it assembles the full candidate finding set (union of every (file, pass) review
+ * row), dedupes it (only when the security pass is on — Pitfall 4), then makes at most ONE whole-set,
+ * ID-based, PRUNE-ONLY model call and reconciles `kept = deduped MINUS pruned-by-index` in code (a
+ * model keep-list is never trusted — T-10-10). The result blob { kept, pruned } is persisted to
+ * jobs.critic_result for finalize (10-07) to consume.
+ *
+ * Two hard contracts:
+ *   - IDEMPOTENT: a valid persisted job.criticResult short-circuits straight to finalize with NO model
+ *     call, so a re-invocation after a persist-then-enqueue-failure never re-critiques (review-verified
+ *     HIGH).
+ *   - FAIL-OPEN (D-05): the critic is conservative and NEVER terminal-fails or loses a finding. On any
+ *     model/parse error (including RetryableModelError) it keeps ALL findings and records
+ *     { skipped: true, pruned: [] }; only a subrequest-budget error is re-thrown so it retries on a
+ *     fresh instance (continueOrFailWedgedJob's critic ceiling), then fails open to finalize.
+ * The critic model call NEVER runs inside finalize (D-07) — it lives only here.
+ */
+async function runCriticPhase(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  leaseOwner: string,
+  model: ModelService,
+) {
+  const config = (job.configSnapshot ?? defaultRepoConfig) as RepoConfig;
+
+  // (1) IDEMPOTENCY: a valid persisted result means the model call already ran (or was skipped) on a
+  // prior invocation that then died before finalize picked up. mapJob has already safeParsed the blob
+  // (a malformed one degrades to null), so a non-null criticResult is trustworthy. Skip straight to
+  // finalize with NO model call so a re-entry after hibernation never re-critiques (T-10-12 / cost).
+  if (job.criticResult) {
+    logger.info(`Critic result already persisted for job ${job.id}; skipping the model call and transitioning to finalize.`);
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  // (2) TOGGLE-OFF fail-open: a critic phase reached with passes.critic off (config drift / a stale
+  // in-flight message after the toggle was turned off) must NOT run — fail open straight to finalize
+  // so behavior is byte-identical to the critic-off engine (NREG-01, Pitfall 5).
+  if (!config.review.passes?.critic?.enabled) {
+    logger.info(`Critic phase reached for job ${job.id} but passes.critic is off; failing open to finalize.`);
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  await heartbeatAndCheckSuperseded(env, job.id, leaseOwner);
+
+  // (3) TERMINAL-ROWS ASSERTION (Pitfall 5 / OpenCode #3): the critic assembles the candidate set from
+  // the persisted (file, pass) review rows and assumes the review phase FULLY completed — every row is
+  // terminal (done/failed/skipped). A 'pending' row means the review phase is not actually finished
+  // (an async batch still in flight), so critiquing now would judge an incomplete set. This is an
+  // invariant violation, not a transient: the review-completion / degrade paths mark any lingering
+  // async row failed before handing off to the critic, so a pending row here is a scheduling bug.
+  const reviews = await getFileReviewsForJobs(env, [job.id]);
+  const pendingRow = reviews.find((review) => review.file_status === 'pending');
+  if (pendingRow) {
+    throw new Error(`Critic phase reached with a non-terminal review row (${pendingRow.file_path}/${pendingRow.pass}); the review phase did not fully complete.`);
+  }
+
+  // (4) Candidate set = union of EVERY row's findings (main + security), in stable row order. dedup is
+  // applied ONLY when the security pass is on: a single main source has no cross-pass duplicates, and
+  // deduping it would change the main-only finding set — an NREG-01 violation (Pitfall 4).
+  const candidateSet = reviews.flatMap((review) => review.parsed_comments as ParsedReviewComment[]);
+  const securityEnabled = config.review.passes?.security?.enabled ?? false;
+  const dedupedSet = securityEnabled ? dedupeFindings(candidateSet) : candidateSet;
+
+  // (5) SKIP conditions (D-06): a trivially small set isn't worth a round-trip, and an oversized set
+  // can't be chunked — both keep ALL findings and record skipped:true (nothing lost, audit-visible).
+  const skipThreshold = config.review.passes.critic.skip_threshold ?? CRITIC_SKIP_THRESHOLD;
+  const charBudget = config.review.passes.critic.input_char_budget ?? CRITIC_INPUT_CHAR_BUDGET;
+  const serializedChars = JSON.stringify(dedupedSet).length;
+  if (dedupedSet.length <= skipThreshold || serializedChars > charBudget) {
+    logger.info(`Critic skipping the model call for job ${job.id} (keep-all).`, {
+      dedupedCount: dedupedSet.length,
+      skipThreshold,
+      serializedChars,
+      charBudget,
+      reason: dedupedSet.length <= skipThreshold ? 'below-skip-threshold' : 'over-char-budget',
+    });
+    await updateJobCriticResult(env, job.id, {
+      kept: dedupedSet,
+      pruned: [],
+      skipped: true,
+      dedupedCount: dedupedSet.length,
+    });
+    await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+    return;
+  }
+
+  // (6) The single whole-set, ID-based, PRUNE-ONLY model call + in-code reconciliation. Wrapped in a
+  // fail-open try/catch (7): any error EXCEPT a subrequest-budget hit keeps all findings and continues.
+  let criticResult: CriticResult;
+  try {
+    const response = await model.critiqueFindings({
+      findings: dedupedSet.map((finding) => ({
+        path: finding.path,
+        line: finding.line ?? null,
+        severity: finding.severity,
+        title: finding.title,
+        body: finding.body,
+      })),
+      prTitle: job.prTitle,
+      config,
+    });
+
+    // RECONCILE IN CODE (T-10-10): map each pruned INDEX id back to a finding. Ignore out-of-range and
+    // duplicate ids; a model keep-list is never trusted — kept = deduped MINUS pruned-by-index. This is
+    // what makes a hallucinated/injected finding structurally unable to enter the posted set.
+    const pruneList = parseCriticPruneResponse(response.rawText);
+    const prunedIndices = new Set<number>();
+    const pruned: CriticResult['pruned'] = [];
+    for (const { id, reason } of pruneList) {
+      if (!Number.isInteger(id) || id < 0 || id >= dedupedSet.length) continue; // out-of-range id ignored
+      if (prunedIndices.has(id)) continue; // duplicate id ignored
+      prunedIndices.add(id);
+      pruned.push({ finding: dedupedSet[id], reason });
+    }
+    const kept = dedupedSet.filter((_finding, index) => !prunedIndices.has(index));
+
+    criticResult = {
+      kept,
+      pruned,
+      model: response.modelUsed,
+      inputTokens: response.inputTokens,
+      outputTokens: response.outputTokens,
+      dedupedCount: dedupedSet.length,
+      skipped: false,
+    };
+    logger.info(`Critic pruned ${pruned.length}/${dedupedSet.length} findings for job ${job.id}.`, {
+      kept: kept.length,
+      pruned: pruned.length,
+      model: response.modelUsed,
+    });
+  } catch (error) {
+    // (7) A subrequest-budget error is NOT a critic failure — it clears on a fresh invocation. Re-throw
+    // so runReviewJob's catch routes it through continueOrFailWedgedJob (critic ceiling), which retries
+    // on a fresh instance and ultimately fails OPEN to finalize. Everything else (including
+    // RetryableModelError, a parse failure, a resolveModel miss) fails open HERE: keep all findings.
+    if (isSubrequestBudgetError(error)) {
+      throw error;
+    }
+    logger.warn(
+      `Critic model call failed for job ${job.id}; failing open (keeping all findings, no prune applied)`,
+      error instanceof Error ? error : new Error(String(error)),
+    );
+    criticResult = {
+      kept: dedupedSet,
+      pruned: [],
+      skipped: true,
+      dedupedCount: dedupedSet.length,
+    };
+  }
+
+  // Persist BEFORE the (throwing) finalize hand-off so a persist-then-enqueue-failure re-enters this
+  // phase, hits the idempotency short-circuit (1), and never re-critiques.
+  await updateJobCriticResult(env, job.id, criticResult);
+  await enqueueJobPhase(env, job.id, 'finalize', FRESH_INVOCATION_YIELD_SECONDS);
+}
+
 async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leaseOwner: string) {
   await heartbeatJobLease(env, jobId, leaseOwner, JOB_LEASE_SECONDS);
   const currentJob = await getJobForProcessing(env, jobId);
@@ -1553,15 +2091,28 @@ async function heartbeatAndCheckSuperseded(env: AppBindings, jobId: string, leas
 }
 
 export class NextPhaseError extends Error {
-  constructor(public phase: 'prepare' | 'review' | 'finalize', public delaySeconds: number) {
+  constructor(public phase: 'prepare' | 'review' | 'finalize' | 'critic', public delaySeconds: number) {
     super(`NextPhase: ${phase}`);
   }
+}
+
+/**
+ * Single source of truth for where the review phase hands off (D-07 / MP-03). When the critic pass is
+ * enabled the critic runs as its OWN fresh-budget phase BETWEEN review and finalize; otherwise the
+ * review goes straight to finalize exactly as it did pre-critic. EVERY review-exit path — normal
+ * completion, async-batch exhaustion, and the continuation-ceiling degrade in continueOrFailWedgedJob
+ * — routes through this selector, so a degraded review can NEVER bypass the critic when it is enabled.
+ * With passes.critic off this returns 'finalize' unconditionally, so routing is byte-identical to the
+ * pre-critic engine (NREG-01).
+ */
+function nextPhaseAfterReview(config: RepoConfig): 'critic' | 'finalize' {
+  return config.review.passes?.critic?.enabled ? 'critic' : 'finalize';
 }
 
 async function enqueueJobPhase(
   env: AppBindings,
   jobId: string,
-  phase: 'prepare' | 'review' | 'finalize',
+  phase: 'prepare' | 'review' | 'finalize' | 'critic',
   delaySeconds = 0,
 ) {
   await markJobContinuationQueued(env, jobId, delaySeconds);
@@ -1577,15 +2128,16 @@ function diffCacheKey(jobId: string) {
 }
 
 /**
- * Returns the job's reviewable files, fetching and parsing the PR diff from
- * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ * Fetches and parses the PR diff from the VCS only once per job (cached in KV) instead of once per
+ * phase invocation. Extracted from getDiffFiles so both getDiffFiles and the scope-aware
+ * getJobDiffFiles / the prepare-phase skipped-for-size producer share one cached fetch (the diff is
+ * immutable for a job's head, so re-reading it from KV never hits the VCS again).
  */
-export async function getDiffFiles(
+async function getCachedRawDiff(
   env: AppBindings,
   job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
   vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
-  config: RepoConfig,
-) {
+): Promise<string> {
   const cacheKey = diffCacheKey(job.id);
   let rawDiff = await env.APP_KV.get(cacheKey);
 
@@ -1598,7 +2150,78 @@ export async function getDiffFiles(
     }
   }
 
+  return rawDiff;
+}
+
+/**
+ * Returns the job's reviewable files, fetching and parsing the PR diff from
+ * GitHub only once per job (cached in KV) instead of once per phase invocation.
+ */
+export async function getDiffFiles(
+  env: AppBindings,
+  job: Pick<PersistedReviewJob, 'id' | 'owner' | 'repo' | 'prNumber'>,
+  vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  const rawDiff = await getCachedRawDiff(env, job, vcs);
   return filterReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+}
+
+/**
+ * The PR-identity + head key for a job's skipped_files rows. For GitHub `repositoryWorkspace` is
+ * null, so the workspace falls back to `owner` (the login); Bitbucket rows carry the workspace slug.
+ * `headSha` is the job's current head (jobs.commit_sha, hex). Used by BOTH the prepare-phase producer
+ * (insertSkippedFiles) and the review-rest consumer (listSkippedFilesForHead) so a review-rest job --
+ * a DIFFERENT job_id -- finds the original full-review job's skips by PR+head (REVIEW: Codex 11-01 HIGH).
+ */
+function skippedFilesKeyForJob(
+  job: Pick<PersistedReviewJob, 'owner' | 'repo' | 'prNumber' | 'commitSha' | 'repositoryVcsProvider' | 'repositoryWorkspace'>,
+): SkippedFilesHeadKey {
+  return {
+    vcsProvider: job.repositoryVcsProvider ?? 'github',
+    workspace: job.repositoryWorkspace ?? job.owner,
+    repoSlug: job.repo,
+    prNumber: job.prNumber,
+    headSha: job.commitSha,
+  };
+}
+
+/**
+ * Scope-aware wrapper around getDiffFiles that honors the review scope persisted on the JOB ROW
+ * (jobs.review_scope, surfaced by mapJob -- Plan 01). It REPLACES the three getDiffFiles call sites
+ * (prepare/review/finalize) so 'rest' scoping is applied in EVERY phase, not just prepare (REVIEW:
+ * Codex 11-05 HIGH -- every phase refetches the file set). Because scope lives on the persisted job,
+ * it survives fresh-instance handoff (workflows/review.ts) and lease recovery (job-recovery.ts) with
+ * NO queue-message threading -- those paths preserve only jobId/deliveryId/phase and mapJob rehydrates
+ * review_scope.
+ *
+ *  - 'rest'  -> the review-rest set: the files a prior full review OMITTED for size, read from
+ *               skipped_files by PR identity + current head (listSkippedFilesForHead) and matched
+ *               against the current diff, bypassing the max_files slice for this run. A head with
+ *               zero recorded skips yields an empty set -> a no-op review (NOT an error); Plan 06
+ *               short-circuits before creating such a job, so this is defense-in-depth.
+ *  - 'all' / 'head' / undefined -> delegate to getDiffFiles unchanged (undefined is byte-identical
+ *               to today, NREG-01).
+ */
+export async function getJobDiffFiles(
+  env: AppBindings,
+  job: PersistedReviewJob,
+  vcs: Pick<VcsProvider, 'getPullRequestDiff'>,
+  config: RepoConfig,
+) {
+  if (job.reviewScope === 'rest') {
+    const restPaths = new Set(await listSkippedFilesForHead(env, skippedFilesKeyForJob(job)));
+    if (restPaths.size === 0) return [];
+
+    const rawDiff = await getCachedRawDiff(env, job, vcs);
+    const { kept, omitted } = partitionReviewableFiles(parseUnifiedDiff(rawDiff, config.review), config.review);
+    // The recorded skips are a subset of the full reviewable set; restrict the current diff to
+    // exactly those paths that are still present. Combining kept+omitted (the whole filtered set,
+    // unsliced) makes the match robust even if a repo's max_files changed between runs.
+    return [...kept, ...omitted].filter((file) => restPaths.has(file.path));
+  }
+
+  return getDiffFiles(env, job, vcs, config);
 }
 
 /**
