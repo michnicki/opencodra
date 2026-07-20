@@ -142,10 +142,28 @@ export const reviewConfigSchema = z.object({
     .default({ security: { enabled: false }, critic: { enabled: false } }),
   interactive: z
     .object({
-      commands: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
-      qa: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+      commands: z
+        .object({
+          enabled: z.boolean().default(false),
+          // REVIEW (A1 authorization redesign, D-06): the deterministic per-repo Bitbucket
+          // authorization allow-list the Bitbucket authz path now depends on. Additive + defaulted
+          // to [] so repoConfigSchema.parse({}) is byte-identical to today (NREG-01).
+          bitbucket_allowed_account_ids: z.array(z.string()).default([]),
+        })
+        .default({ enabled: false, bitbucket_allowed_account_ids: [] }),
+      qa: z
+        .object({
+          enabled: z.boolean().default(false),
+          // REVIEW (OpenCode 11-04): the Q&A hourly cap as a config knob, not a hardcoded constant.
+          // Additive + defaulted so an existing config parses byte-identically (NREG-01).
+          rate_limit_per_hour: z.number().int().positive().default(10),
+        })
+        .default({ enabled: false, rate_limit_per_hour: 10 }),
     })
-    .default({ commands: { enabled: false }, qa: { enabled: false } }),
+    .default({
+      commands: { enabled: false, bitbucket_allowed_account_ids: [] },
+      qa: { enabled: false, rate_limit_per_hour: 10 },
+    }),
 });
 
 export const repoConfigSchema = z.object({
@@ -178,7 +196,10 @@ export const repoConfigSchema = z.object({
     // short-circuit semantics for the nested `review` object (RESEARCH Open Q2).
     walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
     passes: { security: { enabled: false }, critic: { enabled: false } },
-    interactive: { commands: { enabled: false }, qa: { enabled: false } },
+    interactive: {
+      commands: { enabled: false, bitbucket_allowed_account_ids: [] },
+      qa: { enabled: false, rate_limit_per_hour: 10 },
+    },
   }),
   model: z
     .object({
@@ -232,7 +253,45 @@ export const reviewJobMessageSchema = z.object({
   // Optional + defaulted so a queue message enqueued by code that predates this field (no
   // `provider` key at all) still validates and resolves to 'github' (NREG-03/Pitfall 10).
   provider: z.enum(vcsProviders).optional().default('github'),
+  // Phase 11 (D-09/D-12): the classified command/Q&A context for kind='command'|'qa' messages. The
+  // WHOLE object is `.optional()` (no default) so every pre-widening producer — and
+  // ReviewJobMessage = z.input<typeof reviewJobMessageSchema> — keeps validating byte-identically
+  // (NREG-01). Within it, authorId + body + workspace are REQUIRED so a consumer can reconstruct a
+  // full CommentContext downstream (a reject persists reason=body, D-09). The superRefine below
+  // tightens ONLY the kind ∈ {command, qa} branch to require this object + those identity fields.
+  interactive: z
+    .object({
+      commandName: z.enum(['review', 'review-rest', 'pause', 'resume', 'help', 'reject']).optional(),
+      question: z.string().optional(),
+      authorId: z.string().min(1),
+      authorLogin: z.string().optional(),
+      body: z.string(),
+      workspace: z.string().min(1),
+      commentRef: z.string().optional(),
+      parentRef: z.string().optional(),
+      findingRef: z.string().optional(),
+      sourceCommentRef: z.string().optional(),
+    })
+    .optional(),
 }).superRefine((message, ctx) => {
+  // Phase 11 (REVIEW: Codex 11-01 MED — weak interactive validation): an INTERNAL command/qa message
+  // MUST carry a full interactive identity payload so a malformed message fails fast at parse rather
+  // than deep in the consumer. This branch is checked FIRST and returns, so the no-kind path below is
+  // never reached for these kinds (a command/qa message legitimately has no jobId/eventName).
+  if (message.kind === 'command' || message.kind === 'qa') {
+    const interactive = message.interactive;
+    if (!interactive || !interactive.authorId || !interactive.body || !interactive.workspace) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          "Interactive messages (kind 'command'|'qa') require interactive.authorId, interactive.body, and interactive.workspace.",
+        path: ['interactive'],
+      });
+    }
+    return;
+  }
+
+  // Unchanged no-kind path (NREG-01 byte-identity — do NOT touch).
   if (message.jobId || message.eventName) {
     return;
   }
@@ -336,6 +395,13 @@ export const jobSummarySchema = z.object({
   // still parse; `.nullable()` because the DB columns are nullable and unset until a later phase.
   walkthroughCommentRef: z.string().nullable().optional(),
   criticResult: criticResultSchema.nullable().optional(),
+  // Phase 11 (REVIEW: Codex 11-05 HIGH): pass-through for the migration-009 jobs.review_scope /
+  // jobs.scope_source_job_id columns so the review-rest scope lives on the PERSISTED job row and
+  // survives fresh-instance handoff + lease recovery (not the transient queue message). Both are
+  // null on every existing insert (no writer wired this plan) — additive, behaviorally inert
+  // (NREG-01). `.nullable().optional()` so pre-widening fixtures still parse.
+  reviewScope: z.enum(['all', 'rest', 'head']).nullable().optional(),
+  scopeSourceJobId: z.uuid().nullable().optional(),
 });
 
 export const jobsQuerySchema = z.object({

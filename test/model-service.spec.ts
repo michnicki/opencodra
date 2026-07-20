@@ -541,7 +541,10 @@ describe('ModelService', () => {
             },
             walkthrough: { enabled: false, sequence_diagram: { enabled: true } },
             passes: { security: { enabled: false }, critic: { enabled: false } },
-            interactive: { commands: { enabled: false }, qa: { enabled: false } },
+            interactive: {
+              commands: { enabled: false, bitbucket_allowed_account_ids: [] },
+              qa: { enabled: false, rate_limit_per_hour: 10 },
+            },
           },
           model: {
             main: '@cf/zai-org/glm-4.7-flash',
