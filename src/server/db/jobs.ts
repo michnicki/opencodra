@@ -63,6 +63,14 @@ export type JobRow = {
   // criticResultSchema. In Phase 7 no writer is wired, so critic_result is always null.
   walkthrough_comment_ref: string | null;
   critic_result: CriticResult | string | null;
+  // Phase 11 (migration 009, REVIEW: Codex 11-05 HIGH): durable review-rest scope. Both NULLABLE and
+  // NOT written by insertJob's explicit column list unless a caller supplies them, so every existing
+  // insert reads them back as null (behaviorally inert, NREG-01). review_scope mirrors
+  // reviewJobMessageSchema.reviewScope ('all'|'rest'|'head'); scope_source_job_id links a review-rest
+  // job back to the original full-review job whose skips it re-reviews. They flow in via the SELECT
+  // j.* / SELECT i.* the existing accessors already use.
+  review_scope: 'all' | 'rest' | 'head' | null;
+  scope_source_job_id: string | null;
 };
 
 type JobStep = {
@@ -85,7 +93,7 @@ export type JobLeaseClaim =
   | { status: 'terminal'; row: JobRow }
   | { status: 'missing' };
 
-function hexToBytes(hex: string) {
+export function hexToBytes(hex: string) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
@@ -200,6 +208,10 @@ export function mapJob(row: JobRow) {
     // WR-01: pass the out-of-band-validated value (see above); a bad blob has already degraded to
     // null so the strict schema field never throws on the whole-row parse.
     criticResult,
+    // Phase 11: surface the migration-009 review-rest scope columns. Both are null on every existing
+    // insert (no writer supplies them) -- additive, behaviorally inert (NREG-01).
+    reviewScope: row.review_scope,
+    scopeSourceJobId: row.scope_source_job_id,
   });
 }
 
@@ -312,6 +324,11 @@ export async function insertJob(
     repositoryId?: number;
     vcsProvider?: 'github' | 'bitbucket' | string;
     workspace?: string | null;
+    // Phase 11 (REVIEW: Codex 11-05 HIGH): optional review-rest scope persisted on the job row.
+    // Omitted by every existing caller -> bound as NULL -> byte-identical inserts (NREG-01). A
+    // review-rest job passes reviewScope:'rest' + scopeSourceJobId = the original full-review job id.
+    reviewScope?: 'all' | 'rest' | 'head' | null;
+    scopeSourceJobId?: string | null;
   },
 ) {
   // REV-C-1: when repositoryId is supplied, the caller has already resolved the row id (typically
@@ -349,9 +366,11 @@ export async function insertJob(
           config_snapshot,
           head_ref,
           base_ref,
-          retry_of_job_id
+          retry_of_job_id,
+          review_scope,
+          scope_source_job_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8::jsonb, $9, $10, $11::uuid, $12, $13::uuid)
         RETURNING *
       )
       SELECT i.*, r.owner, r.repo, r.installation_id, r.vcs_provider AS "repositoryVcsProvider", r.workspace AS "repositoryWorkspace", i.status_check_ref
@@ -370,6 +389,8 @@ export async function insertJob(
       input.headRef,
       input.baseRef,
       input.retryOfJobId ?? null,
+      input.reviewScope ?? null,
+      input.scopeSourceJobId ?? null,
     ],
   );
 
