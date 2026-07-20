@@ -415,6 +415,24 @@ describe('FormatterService.formatWalkthrough (WT-02/WT-03/D-04/D-13)', () => {
     expect(rowLines).toHaveLength(1);
   });
 
+  it('renders a summary with a backslash immediately before a pipe with an odd escape count, closing the incomplete-sanitization gap (T-09-11)', () => {
+    const hostile = 'a\\|b';
+    const body = formatter.formatWalkthrough(
+      walkInput({
+        files: [{ path: 'src/x.ts', summary: hostile, counts: zeroCounts() }],
+        severityCounts: zeroCounts(),
+        filesReviewed: 1,
+      }),
+    );
+    // safe form: three backslashes then a correctly-escaped pipe (odd count)
+    expect(body).toContain('a\\\\\\|b');
+    // buggy form: two backslashes then a raw, unescaped pipe (even count) must be absent
+    expect(body).not.toContain('a\\\\|b');
+    // exactly one data row: the table must not be split/broken by the hostile input
+    const rowLines = body.split('\n').filter((l) => l.startsWith('| ') && l.includes('src/x.ts'));
+    expect(rowLines).toHaveLength(1);
+  });
+
   it('caps at WALKTHROUGH_FILE_CAP rows and collapses the remainder (D-04)', () => {
     const CAP = 30;
     const files = Array.from({ length: CAP + 5 }, (_, i) => ({
