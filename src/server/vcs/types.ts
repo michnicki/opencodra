@@ -143,6 +143,33 @@ export interface VcsProvider {
   editPrComment(owner: string, repo: string, ref: string, body: string): Promise<{ ref: string } | null>;
   listPrComments(owner: string, repo: string, prNumber: number): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>>;
 
+  /**
+   * Resolve an actor's effective permission on a repo for command authorization (CMD-08, D-06/D-07).
+   *
+   * `authorId` is the IMMUTABLE provider id (GitHub numeric user id as a string / Bitbucket
+   * `account_id`) — authorization is ALWAYS decided on `authorId`, NEVER on a renameable username
+   * (NREG-02). `authorLogin` is OPTIONAL and used ONLY to form the provider URL where the endpoint
+   * needs a username in the path (GitHub `GET .../collaborators/{login}/permission`); the response's
+   * immutable id is then re-verified against `authorId`.
+   *
+   * Returns the mapped union on success, or `null` on ANY resolution failure (403/404/network, a
+   * login/id mismatch, or — on Bitbucket — the frequent case where a repository access token cannot
+   * query permissions at all, A1). A `null` return means "could not resolve" so the caller fails
+   * CLOSED: only a resolved 'admin'/'write' authorizes a state-changing command; 'read'/'none'/null
+   * are unauthorized and silently ignored (D-07).
+   *
+   * NOTE (Bitbucket, A1): on Bitbucket this is a BEST-EFFORT diagnostic only — the AUTHORITATIVE
+   * Bitbucket authorization is the per-repo allow-list of immutable account_ids evaluated in Plan 03
+   * `authorizeActor` (config.review.interactive.commands.bitbucket_allowed_account_ids). A Bitbucket
+   * `null` here means "defer to the allow-list", not "deny"; membership is NEVER mapped to 'write'.
+   */
+  getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null>;
+
   labels?: {
     ensure(owner: string, repo: string, name: string, color: string): Promise<void>;
     add(owner: string, repo: string, prNumber: number, labels: string[]): Promise<void>;

@@ -56,6 +56,12 @@ export type GitHubFetchMockFixtures = {
   commentListItems?: IssueCommentFixture[];
   /** Scripted status sequence for successive PATCH /issues/comments/{id} calls (review F3/F9). */
   commentEditResponses?: CommentEditResponseScript;
+  /**
+   * Response for GET /repos/{owner}/{repo}/collaborators/{login}/permission (CMD-08). `status`
+   * defaults to 200; `permission` to 'write'; `userId`/`userLogin` populate the returned
+   * `user` object so a spec can prove the adapter re-verifies the immutable id (id-mismatch → null).
+   */
+  permissionResponse?: { status?: number; permission?: string; userId?: number; userLogin?: string };
 };
 
 /**
@@ -159,6 +165,23 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
         return json({ message: 'Comment edit error' }, script.status);
       }
       return json({ id: script.id ?? commentId }, script.status);
+    }
+
+    // GET collaborators/{login}/permission (CMD-08). Returns the effective permission plus the
+    // immutable user.id so the adapter can re-verify it against authorId.
+    if (method === 'GET' && /\/collaborators\/[^/]+\/permission$/.test(url.pathname)) {
+      const pr = fixtures.permissionResponse ?? {};
+      const status = pr.status ?? 200;
+      if (status >= 400) {
+        return json({ message: 'permission lookup error' }, status);
+      }
+      return json(
+        {
+          permission: pr.permission ?? 'write',
+          user: { id: pr.userId ?? 424242, login: pr.userLogin ?? 'author-login' },
+        },
+        200,
+      );
     }
 
     const labelLookup = new RegExp(`^${repoPrefix}/labels/([^/]+)$`).exec(url.pathname);

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GithubAdapter } from '@server/vcs/github';
 import { GitHubService } from '@server/services/github';
-import { GitHubError } from '@server/core/github';
+import { GitHubError, createGithubBotIdentityResolver } from '@server/core/github';
 import { TokenTracker } from '@server/core/token-tracker';
 import { createTestEnv, seedInstallationToken } from './helpers';
 import { installGitHubFetchMock } from './github-fetch-mock';
@@ -344,6 +344,99 @@ describe('GithubAdapter (VcsProvider mapping)', () => {
     } finally {
       restore();
     }
+  });
+
+  it('getUserRepoPermission maps admin/write/read/none when the response user.id matches authorId', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+
+    for (const permission of ['admin', 'write', 'read', 'none'] as const) {
+      const { restore } = installGitHubFetchMock(
+        buildFixtures({ permissionResponse: { permission, userId: 424242 } }),
+      );
+      try {
+        const adapter = new GithubAdapter(env, INSTALLATION_ID);
+        // authorId is the immutable numeric user id as a string; authorLogin only forms the URL.
+        const result = await adapter.getUserRepoPermission(OWNER, REPO, '424242', 'commenter-login');
+        expect(result).toBe(permission);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('getUserRepoPermission returns null on a 404 (not a collaborator), keyed on the immutable id', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(buildFixtures({ permissionResponse: { status: 404 } }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.getUserRepoPermission(OWNER, REPO, '424242', 'commenter-login');
+      expect(result).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('getUserRepoPermission returns null on a 403 (token lacks access) — fail closed', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { restore } = installGitHubFetchMock(buildFixtures({ permissionResponse: { status: 403 } }));
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.getUserRepoPermission(OWNER, REPO, '424242', 'commenter-login');
+      expect(result).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('getUserRepoPermission returns null when the response user.id does NOT match authorId (login reassigned — fail closed)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    // The endpoint resolves the login to user.id 424242, but the webhook-paired immutable authorId
+    // is 999 — a login/id mismatch (a renamed login now points at a different account) → null.
+    const { restore } = installGitHubFetchMock(
+      buildFixtures({ permissionResponse: { permission: 'admin', userId: 424242 } }),
+    );
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.getUserRepoPermission(OWNER, REPO, '999', 'commenter-login');
+      expect(result).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('getUserRepoPermission returns null when no authorLogin is supplied (cannot form the URL)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(buildFixtures());
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.getUserRepoPermission(OWNER, REPO, '424242');
+      expect(result).toBeNull();
+      // No permission request was issued (rejected before any call).
+      expect(calls.some((call) => call.path.includes('/collaborators/'))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('createGithubBotIdentityResolver resolves a non-null immutable accountId from the bot user', async () => {
+    // The resolver wraps GitHubClient.resolveBotUserIdentity; exercise it via a minimal stub so the
+    // test does not depend on the live /users/{slug}[bot] route.
+    const resolver = createGithubBotIdentityResolver({
+      resolveBotUserIdentity: async () => ({ accountId: '191919', login: 'codraapp[bot]' }),
+    });
+    const identity = await resolver.resolveIdentity();
+    expect(identity.accountId).toBe('191919');
+    expect(identity.accountId).not.toBe('');
+    expect(identity.login).toBe('codraapp[bot]');
   });
 
   it('listPrComments OMITS a comment with a missing/invalid author id (review F5)', async () => {

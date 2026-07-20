@@ -1,6 +1,7 @@
 import type { AppBindings } from '@server/env';
 import { withTimeout } from '@server/core/timeout';
 import { logger } from '@server/core/logger';
+import type { BotIdentityResolver } from '@server/core/bot-identity';
 
 export class GitHubError extends Error {
   constructor(
@@ -195,7 +196,7 @@ export class GitHubClient {
   constructor(
     private readonly env: Pick<
       AppBindings,
-      'APP_KV' | 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME'
+      'APP_KV' | 'APP_PRIVATE_KEY' | 'GITHUB_APP_ID' | 'BOT_USERNAME' | 'GITHUB_APP_SLUG'
     >,
     private readonly installationId: string,
     private readonly tracker?: { incrementSubrequests(count?: number): void },
@@ -670,6 +671,82 @@ export class GitHubClient {
     });
   }
 
+  // --- Command-authorization + bot-identity primitives (Phase 11, CMD-07/CMD-08) ---
+
+  /**
+   * Read the caller's effective permission on a repo via
+   * `GET /repos/{owner}/{repo}/collaborators/{login}/permission` (Metadata:read, installation token).
+   *
+   * Returns `{ permission, userId }` where `userId` is the IMMUTABLE numeric id the endpoint
+   * resolved `login` to (the caller re-verifies it against the immutable authorId — a login can be
+   * reassigned). Returns `null` on 403/404 (not-a-collaborator / no access) or ANY network/other
+   * failure, so the authorization caller fails CLOSED (CMD-08, D-06/D-07). Uses `request()` (not
+   * `requestAndCheck()`) so a 403/404 is a control-flow signal, not a thrown error.
+   */
+  async getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorLogin: string,
+  ): Promise<{ permission: string; userId: number | null } | null> {
+    try {
+      return await withRetry(`getUserRepoPermission ${owner}/${repo} ${authorLogin}`, async () => {
+        const response = await this.request(
+          `${repoApiPath(owner, repo)}/collaborators/${encodeURIComponent(authorLogin)}/permission`,
+        );
+        // 403 (token lacks access) / 404 (not a collaborator) → cannot resolve → fail closed.
+        if (response.status === 403 || response.status === 404) {
+          return null;
+        }
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new GitHubError(
+            response.status,
+            errText,
+            `${repoApiPath(owner, repo)}/collaborators/${authorLogin}/permission`,
+            `GitHub permission lookup failed with ${response.status}: ${errText}`,
+          );
+        }
+        const data = (await response.json()) as {
+          permission?: string;
+          user?: { id?: number } | null;
+        };
+        return {
+          permission: data.permission ?? 'none',
+          userId: typeof data.user?.id === 'number' && Number.isFinite(data.user.id) ? data.user.id : null,
+        };
+      });
+    } catch (error) {
+      // Any residual failure (network, timeout, non-gone HTTP error) fails closed to null — the
+      // caller cannot distinguish "unauthorized" from "unresolvable", both are ignored (D-07).
+      logger.warn(`GitHub permission lookup for ${owner}/${repo} returned null (fail-closed)`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the bot's OWN GitHub user (the `${app-slug}[bot]` account) to its IMMUTABLE numeric id
+   * (CMD-07, A4). The self-filter echo-loop defense (D-03) keys on this id, never a renameable login.
+   * Prefers the configured `GITHUB_APP_SLUG`, else falls back to `BOT_USERNAME`; throws if neither
+   * resolves a numeric id (the caller then leaves accountId null and command processing self-disables).
+   */
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    const configuredSlug = normalizeGitHubAppSlug(this.env.GITHUB_APP_SLUG) ?? this.env.BOT_USERNAME;
+    if (!configuredSlug) {
+      throw new Error('Cannot resolve GitHub bot identity: no app slug or bot username configured');
+    }
+    const botLogin = /\[bot\]$/i.test(configuredSlug) ? configuredSlug : `${configuredSlug}[bot]`;
+    return withRetry('resolveBotUserIdentity', async () => {
+      const response = await this.requestAndCheck(`/users/${encodeURIComponent(botLogin)}`);
+      const data = (await response.json()) as { id?: number; login?: string };
+      if (typeof data.id !== 'number' || !Number.isFinite(data.id)) {
+        throw new Error(`GitHub /users/${botLogin} did not return a numeric id`);
+      }
+      return { accountId: String(data.id), login: data.login ?? botLogin };
+    });
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return withRetry(`ensureLabel ${owner}/${repo} ${name}`, async () => {
       const listResponse = await this.request(`${repoApiPath(owner, repo)}/labels/${encodeURIComponent(name)}`);
@@ -764,4 +841,20 @@ export class GitHubClient {
       }
     });
   }
+}
+
+/**
+ * BotIdentityResolver for GitHub (CMD-07). Wraps `GitHubClient.resolveBotUserIdentity()` so
+ * `getBotIdentity(env, 'github', resolver)` can populate a NON-NULL immutable accountId on a cold
+ * cache. Accepts the narrow method interface (not the full client) so callers/tests can supply a
+ * minimal resolver.
+ */
+export function createGithubBotIdentityResolver(
+  client: Pick<GitHubClient, 'resolveBotUserIdentity'>,
+): BotIdentityResolver {
+  return {
+    resolveIdentity() {
+      return client.resolveBotUserIdentity();
+    },
+  };
 }

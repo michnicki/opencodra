@@ -205,6 +205,40 @@ export class GithubAdapter implements VcsProvider {
     return results;
   }
 
+  async getUserRepoPermission(
+    owner: string,
+    repo: string,
+    authorId: string,
+    authorLogin?: string,
+  ): Promise<'admin' | 'write' | 'read' | 'none' | null> {
+    // authorLogin forms the GitHub URL (the endpoint needs a username in the path); without it we
+    // cannot query, so fail closed. authorId is what we AUTHORIZE on (NREG-02) — never the login.
+    if (!authorLogin) {
+      return null;
+    }
+    const result = await this.gh.getUserRepoPermission(owner, repo, authorLogin);
+    if (!result) {
+      return null;
+    }
+    // Re-verify the IMMUTABLE id (review: all-3 HIGH/MED): a login can be reassigned between capture
+    // and check, so the endpoint's resolved user.id MUST equal the authorId we were asked to
+    // authorize. A mismatch (or an unparseable/absent id) fails closed to null.
+    const expectedId = Number(authorId);
+    if (!Number.isFinite(expectedId) || result.userId === null || result.userId !== expectedId) {
+      return null;
+    }
+    switch (result.permission) {
+      case 'admin':
+      case 'write':
+      case 'read':
+      case 'none':
+        return result.permission;
+      default:
+        // An unrecognized permission string fails closed rather than being treated as authorized.
+        return null;
+    }
+  }
+
   labels = {
     ensure: (owner: string, repo: string, name: string, color: string) =>
       this.gh.ensureLabel(owner, repo, name, color),

@@ -52,6 +52,13 @@ export class GitHubService {
     return this.client.updateIssueComment(owner, repo, commentId, body);
   }
 
+  // Command-authorization pass-through (Phase 11, CMD-08): the adapter re-verifies the returned
+  // immutable id against the authorId before trusting the permission. REQUIRED here so the
+  // vi.mock('@server/services/github') seam intercepts.
+  async getUserRepoPermission(owner: string, repo: string, authorLogin: string) {
+    return this.client.getUserRepoPermission(owner, repo, authorLogin);
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return this.client.ensureLabel(owner, repo, name, color);
   }
