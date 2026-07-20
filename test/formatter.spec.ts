@@ -272,6 +272,41 @@ describe('FormatterService.formatReviewOverview', () => {
     expect(withoutOmitted).not.toContain('comments trimmed to');
   });
 
+  // (c2) commands-feature footer (D-10 skipped-for-size line + D-11 commands hint, Plan 11-05)
+  it('adds NOTHING to the footer when the commands feature is off (byte-identical, NREG-01)', () => {
+    const off = formatter.formatReviewOverview(overviewInput());
+    const explicitOff = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: false, skippedForSizeCount: 5 }),
+    );
+    // Even with a non-zero skipped count, a disabled feature renders neither line.
+    expect(explicitOff).toBe(off);
+    expect(off).not.toContain('Commands:');
+    expect(off).not.toContain('skipped for size');
+  });
+
+  it('shows the "Commands: review · pause · help" hint whenever the feature is enabled, regardless of omissions (D-11, Codex 11-05 MED)', () => {
+    const enabledNoSkips = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 0 }),
+    );
+    expect(enabledNoSkips).toContain('Commands: review · pause · help');
+    // With zero omissions ONLY the hint is added, never the skipped line.
+    expect(enabledNoSkips).not.toContain('skipped for size');
+  });
+
+  it('adds the "N files skipped for size — comment @bot review-rest" line only when enabled AND omissions exist (D-10)', () => {
+    const withSkips = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 3, botUsername: 'codra-app' }),
+    );
+    expect(withSkips).toContain('3 files skipped for size — comment @codra-app review-rest');
+    expect(withSkips).toContain('Commands: review · pause · help');
+
+    // Singular file wording.
+    const singular = formatter.formatReviewOverview(
+      overviewInput({ commandsEnabled: true, skippedForSizeCount: 1, botUsername: 'codra-app' }),
+    );
+    expect(singular).toContain('1 file skipped for size — comment @codra-app review-rest');
+  });
+
   // (d) narrative null vs present
   it('starts directly with the recap when narrative is null or empty (no stray blank narrative line)', () => {
     const nullNarrative = formatter.formatReviewOverview(overviewInput({ narrative: null, verdict: 'approve' }));

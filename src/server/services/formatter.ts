@@ -146,6 +146,11 @@ export class FormatterService {
       filesReviewed: number;
       omittedCount: number;
       maxComments: number;
+      // CMD-01/CMD-02 (D-10/D-11, Phase 11): commands-feature footer additions. Both default to
+      // inert (false / 0) so a caller that omits them renders the exact current footer byte-identically
+      // (NREG-01) -- the disabled path never gains a line.
+      commandsEnabled?: boolean;
+      skippedForSizeCount?: number;
     },
     options?: FormatterOptions,
   ) {
@@ -159,6 +164,8 @@ export class FormatterService {
       filesReviewed,
       omittedCount,
     } = input;
+    const commandsEnabled = input.commandsEnabled ?? false;
+    const skippedForSizeCount = input.skippedForSizeCount ?? 0;
 
     const totalFindings = reviewSeverities.reduce((sum, sev) => sum + (severityCounts[sev] ?? 0), 0);
     const zeroFindings = verdict === 'approve' && totalFindings === 0;
@@ -199,6 +206,19 @@ export class FormatterService {
     }
 
     sections.push(footer);
+
+    // CMD-01/CMD-02 footer additions, only when the commands feature is ENABLED (disabled path stays
+    // byte-identical, NREG-01):
+    //   - D-10: a "N files skipped for size — comment @bot review-rest" line ONLY when omissions exist.
+    //   - D-11 (discoverability): the compact "Commands: review · pause · help" hint ALWAYS (regardless
+    //     of omission count -- REVIEW: Codex 11-05 MED: the hint must NOT be gated on omissions).
+    if (commandsEnabled) {
+      if (skippedForSizeCount > 0) {
+        const skippedWord = `${skippedForSizeCount} file${skippedForSizeCount === 1 ? '' : 's'} skipped for size`;
+        sections.push(`_${skippedWord} — comment @${botUsername} review-rest_`);
+      }
+      sections.push('_Commands: review · pause · help_');
+    }
 
     const bodyBlock = sections.join('\n\n');
 
