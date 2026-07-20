@@ -58,13 +58,23 @@ async function dispatchInteractiveMessage(
     throw new Error('Interactive message missing owner/repo/prNumber');
   }
 
-  const config = (
-    await loadRepoConfig(env, {
-      installationId: data.installationId ?? '',
-      owner,
-      repo,
-    })
-  ).parsedJson;
+  // WR-01: prefer the PROVIDER-SAFE config snapshot the webhook route resolved and carried on the
+  // message. Re-deriving it here via loadRepoConfig({ owner, repo }) is unsafe for Bitbucket: `owner`
+  // is the workspace slug and getRepoConfigRecord matches on (owner, repo) with NO vcs_provider
+  // filter (LIMIT 1), so it can return a same-text GitHub repo's config (breaking a legitimate
+  // Bitbucket admin's pause/resume/reject — fail-closed — or silently dropping a Bitbucket Q&A), and
+  // loadRepoConfig additionally triggers a GitHub-shaped getOrCreateRepository side effect. The
+  // carried snapshot is present for every Phase-11 producer; fall back to loadRepoConfig ONLY for
+  // in-flight pre-deploy messages (GitHub is collision-free, so that legacy path stays safe there).
+  const config =
+    interactive.configSnapshot ??
+    (
+      await loadRepoConfig(env, {
+        installationId: data.installationId ?? '',
+        owner,
+        repo,
+      })
+    ).parsedJson;
 
   const provider = await VcsService.forProvider(env, {
     provider: data.provider,

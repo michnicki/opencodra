@@ -271,6 +271,15 @@ export const reviewJobMessageSchema = z.object({
       parentRef: z.string().optional(),
       findingRef: z.string().optional(),
       sourceCommentRef: z.string().optional(),
+      // Phase 11 (WR-01): the PROVIDER-SAFE per-repo config the webhook route already resolved at
+      // classification time (GitHub via loadRepoConfig; Bitbucket via getRepoConfigByRepositoryId +
+      // global-model overlay). Carried on the message so the INLINE consumer
+      // (index.ts::dispatchInteractiveMessage) uses it directly instead of re-deriving via the
+      // owner/repo path — which for Bitbucket collides across providers (getRepoConfigRecord has no
+      // vcs_provider filter) and also triggers loadRepoConfig's GitHub-shaped getOrCreateRepository
+      // side effect. Optional so pre-Phase-11 producers and in-flight messages still validate
+      // (NREG-01); the consumer falls back to the legacy load only when it is absent.
+      configSnapshot: repoConfigSchema.optional(),
     })
     .optional(),
 }).superRefine((message, ctx) => {

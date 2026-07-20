@@ -314,6 +314,9 @@ async function handleCommentEvent(
         authorLogin: ctx.authorLogin,
         body: ctx.body,
         workspace: ctx.workspace,
+        // WR-01: carry the provider-safe config so the inline consumer never re-derives it via the
+        // owner/repo collision path (critical for Bitbucket).
+        configSnapshot: config,
       },
     };
     if (installationId) {
@@ -447,6 +450,9 @@ async function handleCommentEvent(
       parentRef: ctx.parentRef,
       findingRef: command.findingRef ?? ctx.findingRef,
       sourceCommentRef: ctx.commentRef,
+      // WR-01: carry the provider-safe config so the inline consumer never re-derives it via the
+      // owner/repo collision path (critical for Bitbucket pause/resume/reject authorization).
+      configSnapshot: config,
     },
   };
   if (installationId) {
