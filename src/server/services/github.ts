@@ -59,6 +59,13 @@ export class GitHubService {
     return this.client.getUserRepoPermission(owner, repo, authorLogin);
   }
 
+  // Bot-identity pass-through (Phase 11, CMD-07): the adapter surfaces this on the VcsProvider seam
+  // so the Plan 06 dispatch layer builds a BotIdentityResolver from the provider. REQUIRED here so
+  // the vi.mock('@server/services/github') seam intercepts.
+  async resolveBotUserIdentity() {
+    return this.client.resolveBotUserIdentity();
+  }
+
   async ensureLabel(owner: string, repo: string, name: string, color: string) {
     return this.client.ensureLabel(owner, repo, name, color);
   }

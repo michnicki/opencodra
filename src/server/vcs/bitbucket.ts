@@ -394,6 +394,12 @@ export class BitbucketAdapter implements VcsProvider {
     return this.client.getUserRepoPermission(this.job.repositoryWorkspace, repo, authorId);
   }
 
+  // Phase 11 (CMD-07): resolve the bot's own immutable account_id (GET /2.0/user) so the Plan 06
+  // dispatch layer can build a self-filter resolver from this provider. Delegates to the client.
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    return this.client.resolveBotUserIdentity();
+  }
+
   /**
    * Loads the cached diff for this job from KV and parses it once. Mirrors the diff-cache shape
    * that core/review.ts uses (key `diff:<jobId>`). Falls back to a freshly-fetched diff if no

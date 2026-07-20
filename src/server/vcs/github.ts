@@ -239,6 +239,12 @@ export class GithubAdapter implements VcsProvider {
     }
   }
 
+  // Phase 11 (CMD-07): resolve the bot's own immutable identity so the Plan 06 dispatch layer can
+  // build a self-filter resolver from this provider. Delegates to the unchanged GitHubService seam.
+  async resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }> {
+    return this.gh.resolveBotUserIdentity();
+  }
+
   labels = {
     ensure: (owner: string, repo: string, name: string, color: string) =>
       this.gh.ensureLabel(owner, repo, name, color),

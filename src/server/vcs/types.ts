@@ -170,6 +170,19 @@ export interface VcsProvider {
     authorLogin?: string,
   ): Promise<'admin' | 'write' | 'read' | 'none' | null>;
 
+  /**
+   * Resolve the bot's OWN immutable identity for the comment self-filter (Phase 11, CMD-07). Returns
+   * the bot's immutable provider account id (GitHub bot-user numeric id as a string / Bitbucket
+   * `account_id`) plus its optional login.
+   *
+   * Surfaced on the seam so the webhook-ingest dispatch layer (Plan 06) can build a
+   * `BotIdentityResolver` from the already-constructed provider WITHOUT reaching into the private
+   * underlying client — mirroring how `getUserRepoPermission` was exposed through the adapter. The
+   * resolved id is the load-bearing echo-loop defense key (classifyComment self-filters on it before
+   * any parse, D-03).
+   */
+  resolveBotUserIdentity(): Promise<{ accountId: string; login?: string }>;
+
   labels?: {
     ensure(owner: string, repo: string, name: string, color: string): Promise<void>;
     add(owner: string, repo: string, prNumber: number, labels: string[]): Promise<void>;
