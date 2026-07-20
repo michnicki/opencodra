@@ -43,70 +43,74 @@ function encodeKeyComponent(value: string): string {
   return encodeURIComponent(value);
 }
 
-/**
- * Best-effort per-PR hourly rate limit backed by an APP_KV counter keyed
- * `qa-rate:{provider}:{workspace}/{repo}#{pr}:{hourBucket}`. Returns true when the call is within
- * the cap (and records the increment), false when the cap is already reached (silent-drop, D-07).
- *
- * The read-then-write is NOT atomic — under a concurrent burst two invocations could each read the
- * same count and both write count+1. That is acceptable here because the review queue runs with
- * max_concurrency:1, so Q&A invocations for the same PR are effectively serialized; the worst case
- * under a rare race is one extra reply, never a privileged side effect (documented disposition,
- * REVIEW: Codex 11-04 LOW).
- */
-async function checkAndIncrementRateLimit(
-  env: Pick<AppBindings, 'APP_KV'>,
-  ctx: QaContext,
-  cap: number,
-): Promise<boolean> {
+// Compose the per-PR hourly rate-limit KV key `qa-rate:{provider}:{workspace}/{repo}#{pr}:{hourBucket}`.
+// The key embeds the hour bucket so a fresh hour starts a fresh count and the TTL garbage-collects the
+// previous bucket. Kept as a helper so the read (gate) and the increment (record) share ONE key.
+function rateLimitKey(ctx: QaContext): string {
   const hourBucket = Math.floor(Date.now() / (QA_RATE_TTL_SECONDS * 1_000));
-  const key = `qa-rate:${encodeKeyComponent(ctx.provider)}:${encodeKeyComponent(ctx.workspace)}/${encodeKeyComponent(
+  return `qa-rate:${encodeKeyComponent(ctx.provider)}:${encodeKeyComponent(ctx.workspace)}/${encodeKeyComponent(
     ctx.repo,
   )}#${ctx.prNumber}:${hourBucket}`;
+}
 
-  let count = 0;
+/**
+ * Read the current per-PR hourly count (best-effort). A KV read failure is treated as "no prior
+ * calls" (return 0) so a transient KV blip never wedges Q&A.
+ */
+async function readRateLimitCount(env: Pick<AppBindings, 'APP_KV'>, key: string): Promise<number> {
   try {
     const raw = await env.APP_KV.get(key);
     if (raw) {
       const parsed = parseInt(raw, 10);
-      if (Number.isFinite(parsed) && parsed > 0) count = parsed;
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
     }
   } catch (error) {
-    // A KV read failure should not wedge Q&A; treat it as "no prior calls" and proceed. The write
-    // below will still attempt to record the increment.
     logger.warn('Q&A rate-limit KV read failed; proceeding as if uncounted', {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  return 0;
+}
 
-  // Boundary: allow the Nth call (count 0..cap-1) and drop the (N+1)th (count === cap).
-  if (count >= cap) {
-    return false;
-  }
-
+/**
+ * Record one consumed Q&A call (best-effort, non-throwing).
+ *
+ * WR-04: this is called ONLY AFTER a successful reply is posted. The queue consumer retries a
+ * kind='qa' message on a transient failure (getPullRequest / diff fetch / model call), and the OLD
+ * increment-before-fetch order re-consumed the budget on every retry — at `rate_limit_per_hour: 1` a
+ * retried question would see `count >= cap` and self-drop (answered:false). Incrementing only after
+ * the post means a retried-then-succeeded question consumes exactly one unit of budget.
+ *
+ * The read-then-write is NOT atomic, but the review queue runs with max_concurrency:1 so Q&A
+ * invocations for the same PR are effectively serialized; the worst case under a rare race is one
+ * extra reply, never a privileged side effect (documented disposition, REVIEW: Codex 11-04 LOW).
+ */
+async function recordRateLimitIncrement(env: Pick<AppBindings, 'APP_KV'>, key: string): Promise<void> {
+  const count = await readRateLimitCount(env, key);
   try {
     await env.APP_KV.put(key, String(count + 1), { expirationTtl: QA_RATE_TTL_SECONDS });
   } catch (error) {
-    // Best-effort: a failed increment means this call may not be counted, but we still answer.
-    logger.warn('Q&A rate-limit KV write failed; answering without recording the increment', {
+    // Best-effort: a failed increment means this call may not be counted, but we already answered.
+    logger.warn('Q&A rate-limit KV write failed; answered without recording the increment', {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-
-  return true;
 }
 
 /**
  * Answer a free-form PR question. READ-ONLY except the single reply + the KV rate counter.
  *
- * Order of operations (rate-limit FIRST so an over-limit question costs no model call):
+ * Order of operations (rate-limit GATE first so an over-limit question costs no model call, but the
+ * counter INCREMENT happens only after a successful post — WR-04):
  *   1. Gate on config.review.interactive.qa.enabled — return early if off (NREG-01).
- *   2. Enforce the config-driven per-PR hourly KV rate limit — silent no-op if exceeded (D-07).
+ *   2. Read the config-driven per-PR hourly KV count and silent no-op if already at the cap (D-07).
+ *      Do NOT increment here: a transient failure below triggers a queue retry, and incrementing up
+ *      front would burn the budget on every retry (at rate_limit_per_hour:1 it would self-drop the retry).
  *   3. Fetch the PR + diff via the INJECTED provider; a diff-fetch failure degrades to an empty
  *      diff so the model still answers scope-honestly (QA-01/D-04) rather than erroring.
  *   4. Build the capped, fenced prompt (buildQaPrompt) and run ModelService.answerPrQuestion — the
  *      single public prose path; this handler NEVER touches the private selectModel/callResolvedModel.
- *   5. Post the answer via provider.createPrComment.
+ *   5. Post the answer via provider.createPrComment, THEN record the rate-limit increment.
  */
 export async function answerQuestion(
   env: AppBindings,
@@ -119,8 +123,11 @@ export async function answerQuestion(
   }
 
   const cap = config.review.interactive.qa.rate_limit_per_hour;
-  const allowed = await checkAndIncrementRateLimit(env, ctx, cap);
-  if (!allowed) {
+  const key = rateLimitKey(ctx);
+  // Gate on the CURRENT count without incrementing (WR-04). Boundary: allow the Nth call
+  // (count 0..cap-1) and drop the (N+1)th (count === cap).
+  const count = await readRateLimitCount(env, key);
+  if (count >= cap) {
     logger.info('Q&A rate limit reached for PR; dropping question silently', {
       provider: ctx.provider,
       workspace: ctx.workspace,
@@ -159,6 +166,10 @@ export async function answerQuestion(
   const answer = await modelService.answerPrQuestion({ systemPrompt, userPrompt, config });
 
   await provider.createPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer);
+
+  // WR-04: consume budget only now that the reply is posted, so a transient failure above (which the
+  // queue retries) never burns the rate-limit budget or self-drops the retried question.
+  await recordRateLimitIncrement(env, key);
 
   return { answered: true };
 }
