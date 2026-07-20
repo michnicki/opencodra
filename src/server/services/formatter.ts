@@ -34,9 +34,17 @@ const WALKTHROUGH_BODY_MAX = 60_000;
 // existing `file_summary`), so every cell (path AND summary, on both providers) MUST pass through
 // here so a malicious/verbose summary renders as exactly one intact row and cannot inject markup
 // (threat T-09-11).
+//
+// Backslash is escaped FIRST, before `|`/backtick. If it were escaped after (or not at all), an
+// input that already contains a backslash immediately before a pipe (e.g. `a\|b`) would produce an
+// EVEN number of backslashes before the `|` once the pipe-escaping backslash is inserted — the
+// pre-existing backslash pairs with the new one and renders as a single literal `\`, leaving the
+// original `|` unescaped and able to terminate the table cell (CodeQL `js/incomplete-sanitization`,
+// T-09-11). Escaping backslash first guarantees an ODD backslash count before every escaped `|`,
+// so the pipe is always correctly escaped regardless of pre-existing backslashes in the input.
 function formatMarkdownTableCell(value: string): string {
   const flattened = value.replace(/[\r\n]+/g, ' ').trim();
-  const escaped = flattened.replace(/\|/g, '\\|').replace(/`/g, '\\`');
+  const escaped = flattened.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/`/g, '\\`');
   if (escaped.length <= WALKTHROUGH_CELL_MAX) return escaped;
   // Trim a dangling escape backslash so truncation can never leave a `\` that swallows the cell's
   // closing ` |` delimiter.
