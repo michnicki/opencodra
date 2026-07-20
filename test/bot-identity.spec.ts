@@ -93,6 +93,27 @@ describe('getBotIdentity', () => {
     expect(second.accountId).toBe('resolved-acct-789');
   });
 
+  it('LAYER 1: a resolveIdentity() throw degrades to accountId null, does not throw, and is NOT cached', async () => {
+    const env = createTestEnv();
+    const putSpy = vi.spyOn(env.APP_KV, 'put');
+    const client: BotIdentityResolver = {
+      resolveIdentity: vi.fn(async () => {
+        throw new Error('403');
+      }),
+    };
+
+    const identity = await getBotIdentity(env, 'bitbucket', client, { workspace: 'ws', repo: 'r' });
+
+    expect(identity).toEqual({
+      login: env.BOT_USERNAME,
+      accountId: null,
+      provider: 'bitbucket',
+    });
+    expect(client.resolveIdentity).toHaveBeenCalledOnce();
+    // Fail-closed + not cached: a thrown resolution must never reach the KV put (no poisoned cache).
+    expect(putSpy).not.toHaveBeenCalled();
+  });
+
   it('scopes the Bitbucket cache key per repository so two repos do not share a cached identity', async () => {
     const env = createTestEnv();
     const clientA: BotIdentityResolver = {

@@ -106,7 +106,21 @@ export async function getBotIdentity(
 
   if (client) {
     // Cold cache with an authenticated client: resolve the immutable accountId and cache it.
-    const resolved = await client.resolveIdentity();
+    // LAYER 1 (CMD-07, T-sjn-01): a Repository Access Token 403s on Bitbucket `GET /2.0/user`, so
+    // resolveIdentity() can throw. Wrap ONLY the resolution call — on throw, warn and degrade to the
+    // same seed-only { accountId: null } the no-client path returns, so the webhook returns 200
+    // (ignored/identity_unresolved, fail-closed) instead of 500. The failure is NOT cached: the
+    // `put` lives after a successful resolution only, so a later attempt can still succeed.
+    let resolved: { accountId: string; login?: string };
+    try {
+      resolved = await client.resolveIdentity();
+    } catch (error) {
+      logger.warn(
+        `Bot-identity resolution failed for ${provider}; degrading to a seed-only identity (accountId: null)`,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      return { login, accountId: null, provider };
+    }
     const identity: BotIdentity = {
       login: resolved.login ?? login,
       accountId: resolved.accountId,
