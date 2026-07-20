@@ -247,6 +247,23 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
   // seam self-filters (on the bot's immutable account_id) + classifies + authorizes + dispatches (D-03).
   // It never bypasses HMAC/idempotency — both gates already ran above.
   if (parsed.data.eventName === 'pullrequest:comment_created') {
+    // WR-02: classification (classifyComment) and the CMD-06 ignore gate must see the FULL per-repo
+    // `review` config — most importantly a custom `mention_trigger`, but also skip_files /
+    // max_total_diff_chars — otherwise a Bitbucket repo with a custom trigger would have its
+    // commands/Q&A silently never fire (NREG-02 parity break vs GitHub, whose route feeds the full
+    // per-repo config). It also keeps classification consistent with the consumer, which re-loads the
+    // FULL per-repo config at answer time (WR-01). This enriched snapshot is COMMENT-branch-only and
+    // used solely for classification/gating (the actual review job re-loads config), so the shared
+    // `configSnapshot` handed to the AUTO-review branch below stays byte-identical (NREG-01). With no
+    // per-repo row, `?? defaultRepoConfig.review` reproduces the default exactly.
+    // Spread the FULL per-repo `review` (which already carries `interactive`); `model` is preserved
+    // from the shared snapshot (the global-model overlay resolved above — `model` lives outside `review`).
+    const commentConfigSnapshot: RepoConfig = {
+      ...configSnapshot,
+      review: {
+        ...(repoConfigRecord?.parsedJson.review ?? defaultRepoConfig.review),
+      },
+    };
     const comment = parsed.data.comment;
     const commentPrNumber = parsed.data.pullrequest.id;
     const parentId = comment.parent?.id;
@@ -273,7 +290,7 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
 
     const result = await ingestReviewWebhookEvent(c.env, {
       reviewRequest: null,
-      configSnapshot,
+      configSnapshot: commentConfigSnapshot,
       deliveryId: xRequestUUID,
       requestId: c.get('requestId'),
       eventName: xEventKey,
