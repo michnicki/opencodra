@@ -17,6 +17,7 @@ import type {
   ReviewSettings,
   VcsCredentialStatus,
   VcsCredentialStoreInput,
+  VcsProvider,
 } from '@shared/schema';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -195,8 +196,9 @@ export const api = {
   getRepos() {
     return request<RepoConfigsResponse>('/api/repos');
   },
-  getRepo(owner: string, repo: string) {
-    return request<RepoConfigResponse>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config`);
+  getRepo(owner: string, repo: string, vcsProvider?: VcsProvider) {
+    const query = vcsProvider ? `?provider=${vcsProvider}` : '';
+    return request<RepoConfigResponse>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config${query}`);
   },
   getStats(days?: number) {
     const query = days ? `?days=${days}` : '';
@@ -207,8 +209,9 @@ export const api = {
       method: 'POST',
     });
   },
-  updateRepoConfig(owner: string, repo: string, config: RepoConfigPatch) {
-    return request<{ ok: boolean }>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config`, {
+  updateRepoConfig(owner: string, repo: string, config: RepoConfigPatch, vcsProvider?: VcsProvider) {
+    const query = vcsProvider ? `?provider=${vcsProvider}` : '';
+    return request<{ ok: boolean }>(`/api/repos/${pathSegment(owner)}/${pathSegment(repo)}/config${query}`, {
       method: 'PATCH',
       body: JSON.stringify(config),
     });

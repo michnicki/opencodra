@@ -242,6 +242,12 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
     interactive.commands.bitbucket_allowed_account_ids ?? [],
   );
   const [newAccountId, setNewAccountId] = useState('');
+  const [botAccountId, setBotAccountId] = useState(
+    interactive.commands.bitbucket_bot_account_id ?? '',
+  );
+  // Optional/nullable opaque account_id: trim, and an empty/whitespace-only value persists as null
+  // (not '') to preserve the schema's z.string().nullable().default(null) contract. No format validation.
+  const normalizedBotAccountId = botAccountId.trim() || null;
   const [qaEnabled, setQaEnabled] = useState(interactive.qa.enabled);
   // Kept as a string so the number input stays editable; parsed on save.
   const [rateLimit, setRateLimit] = useState(String(interactive.qa.rate_limit_per_hour));
@@ -254,6 +260,7 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
     commandsEnabled !== interactive.commands.enabled ||
     qaEnabled !== interactive.qa.enabled ||
     !stringArraysEqual(accountIds, initialAccountIds) ||
+    normalizedBotAccountId !== interactive.commands.bitbucket_bot_account_id ||
     (rateLimitValid && rateLimitNum !== interactive.qa.rate_limit_per_hour);
 
   // Controlled sub-editor: report the current interactive draft up to the parent modal so its
@@ -265,9 +272,8 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
         commands: {
           enabled: commandsEnabled,
           bitbucket_allowed_account_ids: accountIds,
-          // Preserve the admin-configured Bitbucket bot account_id (CMD-07) — this panel does not
-          // edit it, so pass the loaded value through unchanged rather than resetting it to null.
-          bitbucket_bot_account_id: interactive.commands.bitbucket_bot_account_id,
+          // Editable Bitbucket bot account_id (D-06): report the trimmed value, empty→null.
+          bitbucket_bot_account_id: normalizedBotAccountId,
         },
         qa: {
           enabled: qaEnabled,
@@ -279,7 +285,7 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
     });
     // onChange is a stable setter from the parent; re-report only when an editable field/derived flag changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commandsEnabled, accountIds, qaEnabled, rateLimit, dirty, rateLimitValid]);
+  }, [commandsEnabled, accountIds, botAccountId, qaEnabled, rateLimit, dirty, rateLimitValid]);
 
   const addAccountId = () => {
     const trimmed = newAccountId.trim();
@@ -320,6 +326,31 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
 
       {isBitbucket && (
         <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-background/40 p-3">
+          <label htmlFor="bitbucket-bot-account-id" className="text-sm font-medium text-foreground">
+            Bitbucket bot account ID
+          </label>
+          <p className="text-xs text-muted-foreground">
+            The immutable account_id of the bot user. Lets Codra recognize its own comments on
+            Bitbucket without an API call that repository access tokens can't make. Leave blank if
+            unset.
+          </p>
+          <Input
+            id="bitbucket-bot-account-id"
+            value={botAccountId}
+            onChange={(event) => setBotAccountId(event.target.value)}
+            placeholder="e.g. 557058:1a2b3c4d-…"
+            className="font-mono text-xs"
+          />
+          {(commandsEnabled || qaEnabled) && !normalizedBotAccountId && (
+            <p className="text-warning text-xs">
+              {'Without the bot account ID, Codra cannot verify its identity, so Bitbucket commands and Q&A are ignored.'}
+            </p>
+          )}
+        </div>
+      )}
+
+      {isBitbucket && (
+        <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-background/40 p-3">
           <p className="text-sm font-medium text-foreground">Allowed Bitbucket account IDs</p>
           <p className="text-xs text-muted-foreground">
             These are immutable Bitbucket <code>account_id</code>s authorized to run commands. GitHub
@@ -343,7 +374,11 @@ function InteractivePanel({ repo, onChange }: InteractivePanelProps) {
               Add
             </Button>
           </div>
-          {accountIds.length > 0 && (
+          {accountIds.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No account IDs added yet. Add at least one to authorize command use on Bitbucket.
+            </p>
+          ) : (
             <ul className="flex flex-col gap-1.5">
               {accountIds.map((id) => (
                 <li
@@ -475,7 +510,7 @@ function RepoModelModal({
       if (nextReview) {
         patch.review = nextReview;
       }
-      await api.updateRepoConfig(repo.owner, repo.repo, patch);
+      await api.updateRepoConfig(repo.owner, repo.repo, patch, repo.vcsProvider);
       if (modelDirty) {
         setInitialRoute(route);
         onModelApplied(repo, route);
@@ -508,7 +543,7 @@ function RepoModelModal({
           fallbacks: null,
           size_overrides: null,
         },
-      });
+      }, repo.vcsProvider);
       const globalRoute = getGlobalRoute(globalConfig);
       setRoute(globalRoute);
       setInitialRoute(globalRoute);
@@ -649,7 +684,7 @@ export function ReposPage() {
     setPendingToggles(current => new Set(current).add(targetId));
     const tid = toast.loading(nextEnabled ? 'Enabling code reviews…' : 'Pausing code reviews…');
     try {
-      await api.updateRepoConfig(repo.owner, repo.repo, { enabled: nextEnabled });
+      await api.updateRepoConfig(repo.owner, repo.repo, { enabled: nextEnabled }, repo.vcsProvider);
       mergeRepo(targetId, { enabled: nextEnabled });
       toast.success(
         nextEnabled ? 'Reviews active' : 'Reviews paused',
