@@ -161,6 +161,7 @@ function makeFakeProvider(overrides: Partial<Record<keyof VcsProvider, unknown>>
       'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -0,0 +1 @@\n+const a = 1;\n',
     ),
     createPrComment: vi.fn(async () => ({ ref: '100' })),
+    replyToPrComment: vi.fn(async () => ({ ref: '200' })),
     createStatusCheck: vi.fn(async () => ({ ref: 's' })),
     updateStatusCheck: vi.fn(async () => undefined),
     submitReview: vi.fn(async () => ({ ref: 'r' })),
@@ -256,6 +257,80 @@ describe('answerQuestion (Task 2: read-only, config-rate-limited Q&A)', () => {
     expect(results[3].answered).toBe(false);
     expect(results[3].reason).toBe('rate_limited');
     expect(provider.createPrComment).toHaveBeenCalledTimes(3);
+  });
+
+  it('threads the answer via replyToPrComment when threadable && commentRef (Phase 12, D-01)', async () => {
+    vi.spyOn(ModelService.prototype, 'answerPrQuestion').mockResolvedValue('It adds JWT auth.');
+    const env = createTestEnv();
+    const provider = makeFakeProvider();
+
+    const result = await answerQuestion(
+      env,
+      provider,
+      makeCtx({ threadable: true, commentRef: '42:1997' }),
+      qaConfig(),
+    );
+
+    expect(result.answered).toBe(true);
+    expect(provider.replyToPrComment).toHaveBeenCalledTimes(1);
+    expect(provider.replyToPrComment).toHaveBeenCalledWith('acme', 'widgets', 7, 'It adds JWT auth.', '42:1997');
+    // Threaded post replaces the top-level post, never both.
+    expect(provider.createPrComment).not.toHaveBeenCalled();
+  });
+
+  it('falls back to top-level createPrComment when threadable is falsy or commentRef is absent', async () => {
+    vi.spyOn(ModelService.prototype, 'answerPrQuestion').mockResolvedValue('answer');
+    const env = createTestEnv();
+
+    // threadable true but no commentRef ⇒ top-level.
+    const p1 = makeFakeProvider();
+    await answerQuestion(env, p1, makeCtx({ threadable: true }), qaConfig());
+    expect(p1.createPrComment).toHaveBeenCalledTimes(1);
+    expect(p1.replyToPrComment).not.toHaveBeenCalled();
+
+    // commentRef present but threadable falsy ⇒ top-level (byte-identical to today, NREG-01).
+    const p2 = makeFakeProvider();
+    await answerQuestion(env, p2, makeCtx({ commentRef: '42:1997' }), qaConfig());
+    expect(p2.createPrComment).toHaveBeenCalledTimes(1);
+    expect(p2.replyToPrComment).not.toHaveBeenCalled();
+  });
+
+  it('records the rate-limit increment AFTER a successful threaded post (WR-04 ordering preserved)', async () => {
+    vi.spyOn(ModelService.prototype, 'answerPrQuestion').mockResolvedValue('answer');
+    const env = createTestEnv();
+    const provider = makeFakeProvider();
+    const putSpy = vi.spyOn(env.APP_KV, 'put');
+
+    // Order proof: the reply post must run before the KV increment (WR-04). Assert the put happened
+    // once, for a qa-rate key, and after the threaded post resolved.
+    await answerQuestion(env, provider, makeCtx({ threadable: true, commentRef: '42:1997' }), qaConfig());
+
+    expect(provider.replyToPrComment).toHaveBeenCalledTimes(1);
+    const rateWrites = putSpy.mock.calls.filter(([key]) => String(key).startsWith('qa-rate:'));
+    expect(rateWrites).toHaveLength(1);
+    // The reply resolved before the increment invocation order-wise.
+    const replyOrder = provider.replyToPrComment.mock.invocationCallOrder[0];
+    const putOrder = putSpy.mock.invocationCallOrder[putSpy.mock.invocationCallOrder.length - 1];
+    expect(replyOrder).toBeLessThan(putOrder);
+  });
+
+  it('a thrown threaded post propagates and leaves the KV rate counter UNincremented (WR-04, Codex LOW)', async () => {
+    vi.spyOn(ModelService.prototype, 'answerPrQuestion').mockResolvedValue('answer');
+    const env = createTestEnv();
+    const provider = makeFakeProvider({
+      replyToPrComment: vi.fn(async () => {
+        throw new Error('threaded post failed');
+      }),
+    });
+    const putSpy = vi.spyOn(env.APP_KV, 'put');
+
+    await expect(
+      answerQuestion(env, provider, makeCtx({ threadable: true, commentRef: '42:1997' }), qaConfig()),
+    ).rejects.toThrow('threaded post failed');
+
+    // The failed post consumes no rate-limit budget — no qa-rate KV write happened.
+    const rateWrites = putSpy.mock.calls.filter(([key]) => String(key).startsWith('qa-rate:'));
+    expect(rateWrites).toHaveLength(0);
   });
 
   it('answers scope-honestly when the diff is unavailable (fetch error) rather than erroring', async () => {
