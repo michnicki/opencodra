@@ -352,6 +352,11 @@ async function handleCommentEvent(
         authorLogin: ctx.authorLogin,
         body: ctx.body,
         workspace: ctx.workspace,
+        // Reply target (Phase 12, D-03): the originating comment ref + its threadable capability flag
+        // so the inline consumer's answerQuestion can thread the answer under the comment. Absent on
+        // the qa payload before this plan (Pitfall #4) — undefined ⇒ top-level post (NREG-01).
+        commentRef: ctx.commentRef,
+        threadable: ctx.threadable,
         // WR-01: carry the provider-safe config so the inline consumer never re-derives it via the
         // owner/repo collision path (critical for Bitbucket).
         configSnapshot: config,
@@ -488,6 +493,9 @@ async function handleCommentEvent(
       parentRef: ctx.parentRef,
       findingRef: command.findingRef ?? ctx.findingRef,
       sourceCommentRef: ctx.commentRef,
+      // Threadable capability flag (Phase 12, D-03): so the inline consumer's help reply threads
+      // under the originating comment. undefined ⇒ top-level post (NREG-01).
+      threadable: ctx.threadable,
       // WR-01: carry the provider-safe config so the inline consumer never re-derives it via the
       // owner/repo collision path (critical for Bitbucket pause/resume/reject authorization).
       configSnapshot: config,

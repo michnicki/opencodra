@@ -583,7 +583,12 @@ dbDescribe('ingestReviewWebhookEvent (Phase 11 comment classification)', () => {
   });
 
   it('Test 12: pause command enqueues { kind:command } carrying body + workspace + authorId (D-09)', async () => {
-    const ctx = buildCommentContext({ body: '@codra-app pause', authorId: 'pauser-9', commentRef: 'c-42' });
+    const ctx = buildCommentContext({
+      body: '@codra-app pause',
+      authorId: 'pauser-9',
+      commentRef: 'c-42',
+      threadable: true,
+    });
 
     classifyCommentMock.mockResolvedValue({ kind: 'command', name: 'pause', args: '' });
 
@@ -608,10 +613,17 @@ dbDescribe('ingestReviewWebhookEvent (Phase 11 comment classification)', () => {
     expect(sent[0].interactive.workspace).toBe(ctx.workspace);
     expect(sent[0].interactive.authorId).toBe('pauser-9');
     expect(sent[0].interactive.sourceCommentRef).toBe('c-42');
+    // Phase 12 (D-03): threadable rides the command payload, mirroring the input context.
+    expect(sent[0].interactive.threadable).toBe(ctx.threadable);
+    expect(sent[0].interactive.threadable).toBe(true);
   });
 
   it('Test 13: a qa comment enqueues { kind:qa } and never a job', async () => {
-    const ctx = buildCommentContext({ body: '@codra-app why is this slow?' });
+    const ctx = buildCommentContext({
+      body: '@codra-app why is this slow?',
+      commentRef: 'qa-c-77',
+      threadable: true,
+    });
 
     classifyCommentMock.mockResolvedValue({ kind: 'qa', question: 'why is this slow?' });
 
@@ -631,6 +643,13 @@ dbDescribe('ingestReviewWebhookEvent (Phase 11 comment classification)', () => {
     expect(sent[0].interactive.question).toBe('why is this slow?');
     expect(sent[0].interactive.body).toBe('@codra-app why is this slow?');
     expect(sent[0].interactive.workspace).toBe(ctx.workspace);
+    // Phase 12 (D-03, Pitfall #4): the qa payload now carries BOTH commentRef and threadable — the
+    // reply target the inline consumer's answerQuestion threads under. Neither rode the qa payload
+    // before this plan.
+    expect(sent[0].interactive.commentRef).toBe('qa-c-77');
+    expect(sent[0].interactive.commentRef).toBe(ctx.commentRef);
+    expect(sent[0].interactive.threadable).toBe(ctx.threadable);
+    expect(sent[0].interactive.threadable).toBe(true);
   });
 
   it('Test 14: an unauthorized command review is silently ignored (no job, no queue message)', async () => {

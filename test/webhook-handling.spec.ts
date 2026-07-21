@@ -383,6 +383,8 @@ dbDescribe('Webhook Handling — Phase 11 comment dispatch (GitHub)', () => {
     expect(ctx.prNumber).toBe(5);
     expect(ctx.commentRef).toBe('9001');
     expect(ctx.workspace).toBe('gh-owner');
+    // Phase 12 (D-03): a top-level issue_comment is NOT threadable on GitHub.
+    expect(ctx.threadable).toBe(false);
 
     // The seam enqueues a command message (real ingest) keyed on the numeric id.
     const sent = (env.REVIEW_QUEUE as any).sent;
@@ -406,12 +408,43 @@ dbDescribe('Webhook Handling — Phase 11 comment dispatch (GitHub)', () => {
     expect(ctx.findingRef).toBe('4444');
     expect(ctx.commentRef).toBe('5555');
     expect(ctx.authorId).toBe('42');
+    // Phase 12 (D-03): a pull_request_review_comment is an inline review comment — threadable.
+    expect(ctx.threadable).toBe(true);
 
     const sent = (env.REVIEW_QUEUE as any).sent;
     expect(sent).toHaveLength(1);
     expect(sent[0].kind).toBe('command');
     // findingRef threads through to the command message so the consumer persists it.
     expect(sent[0].interactive.findingRef).toBe('4444');
+    // Phase 12 (D-03): threadable rides the command payload onto the queue.
+    expect(sent[0].interactive.threadable).toBe(true);
+  });
+
+  it('marks a pull_request_review_comment threadable even with NO in_reply_to_id (top-level inline review comment — parentRef undefined, Phase 12 D-03)', async () => {
+    // The exact case the explicit flag exists for (review: Codex LOW): a FIRST inline review comment
+    // carries no in_reply_to_id, so parentRef/findingRef are undefined — yet it is still threadable.
+    // Threadability MUST come from the event type, NOT be inferred from parentRef.
+    classifyCommentMock.mockResolvedValue({ kind: 'qa', question: 'why here?' });
+    const payload = reviewCommentPayload({
+      repo: `gh-rc-top-${Date.now()}`, prNumber: 12, commentId: 6006, userId: 88, login: 'human', body: '@codra-app why here?',
+      // NO inReplyTo — a top-level inline review comment.
+    });
+
+    const response = await postGithub('pull_request_review_comment', payload, `del-rc-top-${Date.now()}`);
+    expect(response.status).toBe(202);
+
+    const ctx = ingestSpy.mock.calls[0][1].commentContext;
+    expect(ctx.findingRef).toBeUndefined();
+    expect(ctx.parentRef).toBeUndefined();
+    // Threadable is set from the event type, not inferred from the (absent) parentRef.
+    expect(ctx.threadable).toBe(true);
+
+    const sent = (env.REVIEW_QUEUE as any).sent;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].kind).toBe('qa');
+    // The qa payload now carries commentRef + threadable (both absent before Phase 12, Pitfall #4).
+    expect(sent[0].interactive.commentRef).toBe('6006');
+    expect(sent[0].interactive.threadable).toBe(true);
   });
 
   it('forwards prBody = pull_request.body on the AUTO pull_request event (CMD-06 ignore gate)', async () => {
