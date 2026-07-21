@@ -43,6 +43,10 @@ export type GitHubFetchMockFixtures = {
   reviewResponses?: ReviewResponseScript;
   /** Comment id the POST /issues/{n}/comments route returns (and the PATCH default id). */
   commentId?: number;
+  /** Comment id the net-new POST /pulls/{n}/comments (review-comment reply) route returns.
+   * Defaults DISTINCT from commentId so a spec can assert the reply ref is the reply's own id,
+   * not the originating comment's id (Phase 12, D-01). */
+  replyCommentId?: number;
   /** Numeric user id the POST/GET comment routes attach as user.id (distinct from login so a
    * spec can assert author.id derives from the immutable numeric id, not the login -- NREG-02). */
   commentUserId?: number;
@@ -80,6 +84,7 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
   // Issue-comment fixtures (net-new routes). Defaults are chosen so commentUserId != any login
   // string, letting the adapter spec prove author.id comes from the immutable numeric user id.
   const commentId = fixtures.commentId ?? 8001;
+  const replyCommentId = fixtures.replyCommentId ?? 8002;
   const commentUserId = fixtures.commentUserId ?? 424242;
   const commentUserLogin = fixtures.commentUserLogin ?? 'commenter-login';
   const commentBody = fixtures.commentBody ?? 'existing comment body';
@@ -148,6 +153,14 @@ export function installGitHubFetchMock(fixtures: GitHubFetchMockFixtures) {
     // POST create: returns the new comment id plus the authoring user { id, login }.
     if (method === 'POST' && url.pathname === `${repoPrefix}/issues/${fixtures.prNumber}/comments`) {
       return json({ id: commentId, user: { id: commentUserId, login: commentUserLogin } }, 201);
+    }
+
+    // POST review-comment reply (net-new, Phase 12 D-01): threads a reply via in_reply_to on the
+    // PULLS comments route (distinct from the ISSUES comments route above). Returns the reply's own
+    // id + authoring user, mirroring the issue-comment POST shape. Without this handler the shared
+    // mock 404s this route (:below), so the reply adapter test cannot exercise the endpoint (Codex MEDIUM).
+    if (method === 'POST' && url.pathname === `${repoPrefix}/pulls/${fixtures.prNumber}/comments`) {
+      return json({ id: replyCommentId, user: { id: commentUserId, login: commentUserLogin } }, 201);
     }
 
     // GET list: single-page fixture. commentListItems may include a user-less entry so a spec can

@@ -240,6 +240,54 @@ describe('GithubAdapter (VcsProvider mapping)', () => {
     }
   });
 
+  it('replyToPrComment posts pulls/{n}/comments with in_reply_to as an integer and returns the reply id as ref (D-01, NREG-02)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(
+      buildFixtures({ commentId: 8001, replyCommentId: 8002 }),
+    );
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      const result = await adapter.replyToPrComment(OWNER, REPO, PR_NUMBER, 'a threaded reply', '1997');
+
+      // GitHub reply ref is the bare comment id of the NEW reply (D-02).
+      expect(result).toEqual({ ref: '8002' });
+      const postCall = calls.find(
+        (call) => call.method === 'POST' && call.path === `/repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments`,
+      );
+      // The reply must hit the PULLS comments route, NOT the ISSUES comments route.
+      expect(postCall).toBeDefined();
+      expect(
+        calls.some((call) => call.method === 'POST' && call.path === `/repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments`),
+      ).toBe(false);
+      // in_reply_to is the integer 1997 (not the string), and body carries the reply text.
+      expect(postCall?.body).toEqual({ body: 'a threaded reply', in_reply_to: 1997 });
+      expect(typeof postCall?.body.in_reply_to).toBe('number');
+    } finally {
+      restore();
+    }
+  });
+
+  it('replyToPrComment throws before any request on a malformed inReplyToRef (T-12-01-2)', async () => {
+    const env = createTestEnv();
+    await seedInstallationToken(env, INSTALLATION_ID);
+    const { calls, restore } = installGitHubFetchMock(buildFixtures());
+
+    try {
+      const adapter = new GithubAdapter(env, INSTALLATION_ID);
+      for (const badRef of ['', '  12  ', '1.5', '-1', '0', '01']) {
+        await expect(adapter.replyToPrComment(OWNER, REPO, PR_NUMBER, 'reply', badRef)).rejects.toThrow();
+      }
+      // No POST to the pulls-comments endpoint was ever issued (rejected before the client call).
+      expect(
+        calls.some((call) => call.method === 'POST' && call.path.includes(`/pulls/${PR_NUMBER}/comments`)),
+      ).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   it('editPrComment patches issues/comments/{id} with body { body } and returns the ref', async () => {
     const env = createTestEnv();
     await seedInstallationToken(env, INSTALLATION_ID);
