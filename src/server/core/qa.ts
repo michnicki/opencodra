@@ -178,7 +178,15 @@ export async function answerQuestion(
   const modelService = new ModelService(env);
   const answer = await modelService.answerPrQuestion({ systemPrompt, userPrompt, config });
 
-  await provider.createPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer);
+  // Caller-decides threading (Phase 12, D-01): thread under the originating comment when the webhook
+  // flagged it threadable AND we carry its opaque ref; otherwise post top-level (byte-identical to
+  // today, NREG-01). A thrown post propagates here — BEFORE the increment below — so a failed post
+  // consumes no rate-limit budget (WR-04).
+  if (ctx.threadable && ctx.commentRef) {
+    await provider.replyToPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer, ctx.commentRef);
+  } else {
+    await provider.createPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer);
+  }
 
   // WR-04: consume budget only now that the reply is posted, so a transient failure above (which the
   // queue retries) never burns the rate-limit budget or self-drops the retried question.
