@@ -356,8 +356,17 @@ export async function executeCommand(
       return;
 
     case 'help': {
-      // Read-only discovery — no authorization (D-11).
-      await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, buildHelpText(config, env.BOT_USERNAME));
+      // Read-only discovery — no authorization (D-11). Caller-decides threading (D-01): when the
+      // webhook flagged the originating comment threadable AND we carry its opaque ref, thread the
+      // help reply under it via replyToPrComment; otherwise post top-level via createPrComment (the
+      // GitHub issue-comment asymmetry — issue comments are not threadable). Ref-absent / flag-off is
+      // byte-identical top-level posting (NREG-01).
+      const body = buildHelpText(config, env.BOT_USERNAME);
+      if (ctx.threadable && ctx.commentRef) {
+        await provider.replyToPrComment(ctx.owner, ctx.repo, ctx.prNumber, body, ctx.commentRef);
+      } else {
+        await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, body);
+      }
       return;
     }
 
