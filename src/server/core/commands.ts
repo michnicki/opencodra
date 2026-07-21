@@ -36,6 +36,12 @@ export type CommandName = 'review' | 'review-rest' | 'pause' | 'resume' | 'help'
  *   for replay idempotency.
  * - `parentRef` / `findingRef` are the reply-thread parent (Bitbucket `comment.parent.id`, GitHub
  *   `pull_request_review_comment.in_reply_to_id`) resolved to the finding the reject dismisses.
+ * - `threadable` is the webhook-set capability flag (Phase 12, D-01): whether the ORIGINATING comment
+ *   can be threaded under. GitHub inline review comment → true; GitHub `issue_comment` (top-level) →
+ *   false; Bitbucket → true (both general + inline thread via `parent:{id}`). Set by the webhook
+ *   builders in Plan 03. When `threadable && commentRef`, `executeCommand`'s help reply threads via
+ *   `provider.replyToPrComment(...)`; otherwise it falls back to top-level `createPrComment` (the
+ *   GitHub issue-comment asymmetry). Absent (undefined) ⇒ top-level, byte-identical to today (NREG-01).
  */
 export type CommentContext = {
   authorId: string;
@@ -48,6 +54,7 @@ export type CommentContext = {
   owner: string;
   repo: string;
   workspace: string;
+  threadable?: boolean;
 };
 
 /**
