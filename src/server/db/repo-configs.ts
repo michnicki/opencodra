@@ -51,12 +51,21 @@ export async function upsertRepoConfig(
     repo: string;
     parsedJson: RepoConfig;
     enabled?: boolean;
+    // D-05: forwarded to getOrCreateRepository so a Bitbucket write uses the Bitbucket branch
+    // (NULL installation_id, ON CONFLICT (vcs_provider, workspace, repo)) and never the GitHub
+    // branch that would bind a bogus installation_id / cross-bind a same-named GitHub row. When
+    // omitted, getOrCreateRepository defaults vcsProvider to 'github' so existing callers (GitHub
+    // PATCH) stay byte-identical (NREG-01).
+    vcsProvider?: 'github' | 'bitbucket';
+    workspace?: string | null;
   },
 ) {
   const repositoryId = await getOrCreateRepository(env, {
-    installationId: input.installationId,
+    installationId: input.installationId ?? '',
     owner: input.owner,
     repo: input.repo,
+    vcsProvider: input.vcsProvider,
+    workspace: input.workspace,
   });
 
   const parsedJson = normalizeRepoConfig(input.parsedJson);
@@ -153,8 +162,18 @@ export async function updateRepoConfigEnabled(
     owner: string;
     repo: string;
     enabled: boolean;
+    // Provider-address the toggle (review: Codex HIGH): when supplied, an `AND r.vcs_provider = $4`
+    // filter is appended so a same-named GitHub+Bitbucket pair does not both toggle. When omitted
+    // the UPDATE is byte-identical to today (NREG-01).
+    vcsProvider?: 'github' | 'bitbucket';
   },
 ) {
+  const params: (string | boolean)[] = [input.owner, input.repo, input.enabled];
+  let providerFilter = '';
+  if (input.vcsProvider) {
+    providerFilter = ' AND r.vcs_provider = $4';
+    params.push(input.vcsProvider);
+  }
   await queryRows(
     env,
     `
@@ -164,9 +183,9 @@ export async function updateRepoConfigEnabled(
       FROM repositories r
       WHERE rc.repository_id = r.id
         AND r.owner = $1
-        AND r.repo = $2
+        AND r.repo = $2${providerFilter}
     `,
-    [input.owner, input.repo, input.enabled],
+    params,
   );
 }
 
