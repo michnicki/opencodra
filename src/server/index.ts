@@ -91,6 +91,10 @@ async function dispatchInteractiveMessage(
       prNumber,
       question: interactive.question ?? interactive.body,
       authorId: interactive.authorId,
+      // Phase 12: thread the reply target through inertly — undefined ⇒ top-level posting until the
+      // producer (Plan 03) sets commentRef/threadable on the queue payload (NREG-01).
+      commentRef: interactive.commentRef,
+      threadable: interactive.threadable,
     };
     await answerQuestion(env, provider, qaCtx, config);
     return;
@@ -108,6 +112,9 @@ async function dispatchInteractiveMessage(
     owner,
     repo,
     workspace: interactive.workspace,
+    // Phase 12: thread the threadability flag through inertly — undefined ⇒ top-level help reply
+    // until the producer (Plan 03) sets it on the queue payload (NREG-01). commentRef already flows above.
+    threadable: interactive.threadable,
   };
   const cmd: ClassifiedCommand = {
     kind: 'command',

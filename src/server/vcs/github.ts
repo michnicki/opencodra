@@ -178,6 +178,30 @@ export class GithubAdapter implements VcsProvider {
     return result ? { ref } : null;
   }
 
+  async replyToPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+    inReplyToRef: string,
+  ): Promise<{ ref: string }> {
+    // Validate the opaque ref STRICTLY before any request (T-12-01-1/T-12-01-2): the canonical
+    // positive safe-integer guard copied from editPrComment (:166). Rejects '', whitespace, decimals,
+    // exponent, sign, leading zeros, zero. inReplyToRef is the ORIGINATING comment's bare id (D-01).
+    if (!/^[1-9][0-9]*$/.test(inReplyToRef) || !Number.isSafeInteger(Number(inReplyToRef))) {
+      throw new Error(`replyToPrComment received a malformed inReplyToRef for ${owner}/${repo}#${prNumber}: ${JSON.stringify(inReplyToRef)}`);
+    }
+    const commentId = Number(inReplyToRef);
+    const { id } = await this.gh.createReviewCommentReply(owner, repo, prNumber, body, commentId);
+    // WR-04 finite-guard (mirrors createPrComment :150): createReviewCommentReply casts its body with
+    // an unchecked `as { id: number }`, so a non-numeric/NaN id would stringify into a corrupt ref.
+    if (typeof id !== 'number' || !Number.isFinite(id)) {
+      throw new Error(`createReviewCommentReply returned a non-numeric id for ${owner}/${repo}#${prNumber}: ${String(id)}`);
+    }
+    // GitHub ref is the bare comment id of the new reply (D-02).
+    return { ref: String(id) };
+  }
+
   async listPrComments(
     owner: string,
     repo: string,

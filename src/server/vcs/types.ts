@@ -144,6 +144,29 @@ export interface VcsProvider {
   listPrComments(owner: string, repo: string, prNumber: number): Promise<Array<{ ref: string; body: string; author: { id: string; login: string } }>>;
 
   /**
+   * Post a provider-native THREADED reply under an existing PR comment (D-01, Phase 12). REQUIRED on
+   * every adapter (not optional) -- both providers implement it (NREG-02). No consumer is wired this
+   * phase; the method is inert until Part A (Plans 02/03) consumes it.
+   *
+   * `inReplyToRef` is the PROVIDER-OPAQUE ref of the ORIGINATING comment, exactly as carried on
+   * `CommentContext.commentRef` -- the adapter alone interprets it, and a numeric provider id must
+   * NEVER cross this seam into `core/` (mirrors the createPrComment/editPrComment contract above).
+   *
+   * Provider threading semantics differ, so the CALLER (not this method) decides threadability via
+   * the payload `threadable` flag:
+   *   - GitHubAdapter: threads ONLY an inline review comment via `in_reply_to` on
+   *     POST /pulls/{n}/comments. A top-level ISSUE comment is NOT threadable on GitHub, so the
+   *     caller falls back to `createPrComment` for those; `inReplyToRef` is the bare comment id.
+   *   - BitbucketAdapter: threads BOTH general and inline comments via `parent:{id}` on
+   *     POST /pullrequests/{n}/comments; `inReplyToRef` is the self-encoding `${prId}:${commentId}`.
+   *
+   * A malformed `inReplyToRef` is rejected BEFORE any HTTP request (GitHub canonical
+   * positive-integer regex + Number.isSafeInteger; Bitbucket parsePrCommentRef, which also rejects a
+   * ref whose encoded prId != the target prNumber). Returns the NEW comment's opaque `{ ref }`.
+   */
+  replyToPrComment(owner: string, repo: string, prNumber: number, body: string, inReplyToRef: string): Promise<{ ref: string }>;
+
+  /**
    * Resolve an actor's effective permission on a repo for command authorization (CMD-08, D-06/D-07).
    *
    * `authorId` is the IMMUTABLE provider id (GitHub numeric user id as a string / Bitbucket

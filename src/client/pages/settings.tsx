@@ -997,7 +997,7 @@ export function SettingsPage() {
               <p className="text-sm font-semibold text-foreground">Version</p>
             </div>
             <Badge variant="default" className="relative z-10 px-3 py-1 text-sm tracking-tight">
-              v{pkg.version}
+              v{__APP_VERSION__}
             </Badge>
           </div>
 

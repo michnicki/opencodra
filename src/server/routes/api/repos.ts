@@ -107,24 +107,31 @@ export function createReposRouter() {
   });
 
   app.get('/:owner/:repo/config', async (c) => {
-    const repo = await getRepoConfigRecord(c.env, c.req.param('owner'), c.req.param('repo'));
+    // Provider-address the read via an optional ?provider query param so a same-named
+    // GitHub+Bitbucket pair is GET-isolated (review: Codex HIGH). When absent — GitHub-only or an
+    // in-flight client that has not yet appended it — behavior is byte-identical to today (NREG-01).
+    const providerQuery = c.req.query('provider');
+    const vcsProvider = providerQuery === 'github' || providerQuery === 'bitbucket' ? providerQuery : undefined;
+    const repo = await getRepoConfigRecord(c.env, c.req.param('owner'), c.req.param('repo'), vcsProvider);
     if (!repo) {
       return jsonError('Repository config not found.', 404);
     }
 
     return c.json({ repo });
   });
-  
+
   app.patch('/:owner/:repo/config', async (c) => {
     const { owner, repo } = c.req.param();
+    const providerQuery = c.req.query('provider');
+    const vcsProvider = providerQuery === 'github' || providerQuery === 'bitbucket' ? providerQuery : undefined;
     const body = await c.req.json();
     const parsedPatch = repoConfigPatchSchema.safeParse(body);
     if (!parsedPatch.success) {
       return jsonError('Invalid repository config patch.', 400);
     }
 
-    const existing = await getRepoConfigRecord(c.env, owner, repo);
-    
+    const existing = await getRepoConfigRecord(c.env, owner, repo, vcsProvider);
+
     if (!existing) {
       return jsonError('Repository config not found.', 404);
     }
@@ -133,10 +140,13 @@ export function createReposRouter() {
     const hasConfigPatch = patch.review !== undefined || patch.model !== undefined;
 
     if (!hasConfigPatch && patch.enabled !== undefined) {
+      // Key the toggle on the RESOLVED provider (not the raw query param) so it touches exactly one
+      // provider's row for a same-named pair.
       await updateRepoConfigEnabled(c.env, {
         owner,
         repo,
         enabled: patch.enabled,
+        vcsProvider: existing.vcsProvider,
       });
       await invalidateRepoConfigCache(c.env, owner, repo);
       return c.json({ ok: true });
@@ -166,6 +176,11 @@ export function createReposRouter() {
       repo,
       parsedJson: parsedConfig.data,
       enabled: patch.enabled,
+      // Thread the resolved provider + workspace so a Bitbucket write routes through the Bitbucket
+      // getOrCreateRepository branch (NULL installation_id, ON CONFLICT (vcs_provider, workspace,
+      // repo)) and never cross-binds a same-named GitHub row (D-05).
+      vcsProvider: existing.vcsProvider,
+      workspace: existing.workspace,
     });
     await invalidateRepoConfigCache(c.env, owner, repo);
 

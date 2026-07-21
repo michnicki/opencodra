@@ -620,6 +620,23 @@ export class GitHubClient {
     });
   }
 
+  // Net-new review-comment reply (Phase 12, D-01). Mirrors createIssueComment EXACTLY but targets
+  // the PULLS comments route with `in_reply_to` (an integer). Per research §API Confirmations,
+  // `in_reply_to` is an integer and all body params except `body` are ignored, so `path`/`line`/
+  // `commit_id` are intentionally omitted.
+  async createReviewCommentReply(owner: string, repo: string, pullNumber: number, body: string, inReplyToId: number) {
+    return withRetry(`createReviewCommentReply ${owner}/${repo}#${pullNumber}`, async () => {
+      const response = await this.requestAndCheck(`${repoApiPath(owner, repo)}/pulls/${pullNumber}/comments`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body, in_reply_to: inReplyToId }),
+      });
+      return (await response.json()) as { id: number; user: { id: number; login: string } };
+    });
+  }
+
   // Single page of 100 issue comments. Two caveats (review F7):
   //   (a) 100-cap: the first 100 comments suffice for any realistic PR (same rationale as
   //       findBotReviewForCommit); a PR needing >100 scanned is pathological.

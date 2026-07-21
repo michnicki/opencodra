@@ -627,6 +627,9 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     expect(ctx.findingRef).toBe('202:900');
     expect(ctx.workspace).toBe(workspace);
     expect(ctx.repo).toBe(repoSlug);
+    // Phase 12 (D-03, provider parity — review: Codex MEDIUM): Bitbucket threads BOTH general and
+    // inline comments, so a PARENTED (in_reply_to present) comment is threadable, proven at the route.
+    expect(ctx.threadable).toBe(true);
   });
 
   // 12. A top-level comment (no parent) yields an UNDEFINED finding ref (nothing to dismiss).
@@ -656,6 +659,10 @@ dbDescribe('Bitbucket webhook route (Wave 3 / Phase 5)', () => {
     expect(ctx.commentRef).toBe('303:777');
     expect(ctx.parentRef).toBeUndefined();
     expect(ctx.findingRef).toBeUndefined();
+    // Phase 12 (D-03, provider parity — review: Codex MEDIUM): a TOP-LEVEL Bitbucket comment (no
+    // parent) is still threadable — threadability is unconditional for Bitbucket, not inferred from
+    // parentRef. Proven at the route, not only by source regex (NREG-02).
+    expect(ctx.threadable).toBe(true);
   });
 
   // 13. The AUTO created branch forwards prBody = pullrequest.description for the CMD-06 ignore gate.

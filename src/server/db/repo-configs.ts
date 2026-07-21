@@ -1,12 +1,16 @@
 import type { AppBindings } from '@server/env';
 import { parseJsonColumn, queryRows } from './client';
 import { defaultRepoConfig, normalizeRepoConfig, repoConfigRecordSchema, repoConfigSchema, type RepoConfig } from '@shared/schema';
-import { getOrCreateRepository } from './repositories';
+import { getOrCreateRepository, findRepositoryByBitbucketIdentity } from './repositories';
 
 type RepoConfigRow = {
-  installation_id: string;
+  // D-04: NULL for Bitbucket rows (Bitbucket has no GitHub-App installation concept). Typed
+  // string | null so a Bitbucket record maps through repoConfigRecordSchema (now nullable) without
+  // throwing the Zod error that 500s the config read.
+  installation_id: string | null;
   owner: string;
   repo: string;
+  workspace: string | null;
   vcs_provider: 'github' | 'bitbucket';
   parsed_json: RepoConfig | string | null;
   updated_at: string;
@@ -24,6 +28,7 @@ function mapRepo(row: RepoConfigRow) {
     installationId: row.installation_id,
     owner: row.owner,
     repo: row.repo,
+    workspace: row.workspace,
     vcsProvider: row.vcs_provider,
     parsedJson,
     updatedAt: row.updated_at,
@@ -39,17 +44,28 @@ function mapRepo(row: RepoConfigRow) {
 export async function upsertRepoConfig(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   input: {
-    installationId: string;
+    // D-04: nullable so the generic PATCH config path can forward a repo record's now-nullable
+    // installationId without a cast; getOrCreateRepository binds it into a nullable column.
+    installationId: string | null;
     owner: string;
     repo: string;
     parsedJson: RepoConfig;
     enabled?: boolean;
+    // D-05: forwarded to getOrCreateRepository so a Bitbucket write uses the Bitbucket branch
+    // (NULL installation_id, ON CONFLICT (vcs_provider, workspace, repo)) and never the GitHub
+    // branch that would bind a bogus installation_id / cross-bind a same-named GitHub row. When
+    // omitted, getOrCreateRepository defaults vcsProvider to 'github' so existing callers (GitHub
+    // PATCH) stay byte-identical (NREG-01).
+    vcsProvider?: 'github' | 'bitbucket';
+    workspace?: string | null;
   },
 ) {
   const repositoryId = await getOrCreateRepository(env, {
-    installationId: input.installationId,
+    installationId: input.installationId ?? '',
     owner: input.owner,
     repo: input.repo,
+    vcsProvider: input.vcsProvider,
+    workspace: input.workspace,
   });
 
   const parsedJson = normalizeRepoConfig(input.parsedJson);
@@ -146,8 +162,18 @@ export async function updateRepoConfigEnabled(
     owner: string;
     repo: string;
     enabled: boolean;
+    // Provider-address the toggle (review: Codex HIGH): when supplied, an `AND r.vcs_provider = $4`
+    // filter is appended so a same-named GitHub+Bitbucket pair does not both toggle. When omitted
+    // the UPDATE is byte-identical to today (NREG-01).
+    vcsProvider?: 'github' | 'bitbucket';
   },
 ) {
+  const params: (string | boolean)[] = [input.owner, input.repo, input.enabled];
+  let providerFilter = '';
+  if (input.vcsProvider) {
+    providerFilter = ' AND r.vcs_provider = $4';
+    params.push(input.vcsProvider);
+  }
   await queryRows(
     env,
     `
@@ -157,13 +183,32 @@ export async function updateRepoConfigEnabled(
       FROM repositories r
       WHERE rc.repository_id = r.id
         AND r.owner = $1
-        AND r.repo = $2
+        AND r.repo = $2${providerFilter}
     `,
-    [input.owner, input.repo, input.enabled],
+    params,
   );
 }
 
 export async function listRepoConfigs(env: Pick<AppBindings, 'HYPERDRIVE'>) {
+  // LIST MATERIALIZATION (review: Codex HIGH #1): the add-bitbucket flow creates a repositories row
+  // + credential but NO repo_config, and the dashboard edit modal reads entirely from this list
+  // record (never a per-repo GET), so a config-less Bitbucket repo would be invisible AND
+  // uneditable. Before the INNER-JOIN read below, materialize a default repo_config for every
+  // Bitbucket repositories row lacking one. Provider-safe (gated on vcs_provider='bitbucket') so a
+  // GitHub-only deployment's list read is byte-identical (NREG-01); idempotent via ON CONFLICT.
+  await queryRows(
+    env,
+    `
+      INSERT INTO repo_configs (repository_id, parsed_json, updated_at, main_model, fallback_models, size_overrides, enabled)
+      SELECT r.id, $1::jsonb, now(), NULL, NULL, NULL, TRUE
+      FROM repositories r
+      WHERE r.vcs_provider = 'bitbucket'
+        AND NOT EXISTS (SELECT 1 FROM repo_configs rc WHERE rc.repository_id = r.id)
+      ON CONFLICT (repository_id) DO NOTHING
+    `,
+    [JSON.stringify(defaultRepoConfig)],
+  );
+
   const rows = await queryRows<RepoConfigRow>(
     env,
     `
@@ -171,6 +216,7 @@ export async function listRepoConfigs(env: Pick<AppBindings, 'HYPERDRIVE'>) {
         r.installation_id,
         r.owner,
         r.repo,
+        r.workspace,
         r.vcs_provider,
         rc.parsed_json,
         rc.updated_at,
@@ -196,14 +242,30 @@ export async function listRepoConfigs(env: Pick<AppBindings, 'HYPERDRIVE'>) {
   return rows.map(mapRepo);
 }
 
-export async function getRepoConfigRecord(env: Pick<AppBindings, 'HYPERDRIVE'>, owner: string, repo: string) {
-  const [row] = await queryRows<RepoConfigRow>(
-    env,
-    `
+export async function getRepoConfigRecord(
+  env: Pick<AppBindings, 'HYPERDRIVE'>,
+  owner: string,
+  repo: string,
+  // Provider-address the read (review: Codex HIGH): when supplied, an `AND r.vcs_provider = $3`
+  // filter is appended so a same-named GitHub+Bitbucket pair (allowed by migration 003) never
+  // collides. When omitted the query is byte-identical to today's owner/repo-only read (NREG-01).
+  vcsProvider?: 'github' | 'bitbucket',
+) {
+  const readRecord = async () => {
+    const params: string[] = [owner, repo];
+    let providerFilter = '';
+    if (vcsProvider) {
+      providerFilter = ' AND r.vcs_provider = $3';
+      params.push(vcsProvider);
+    }
+    const [row] = await queryRows<RepoConfigRow>(
+      env,
+      `
       SELECT
         r.installation_id,
         r.owner,
         r.repo,
+        r.workspace,
         r.vcs_provider,
         rc.parsed_json,
         rc.updated_at,
@@ -222,13 +284,50 @@ export async function getRepoConfigRecord(env: Pick<AppBindings, 'HYPERDRIVE'>, 
         ORDER BY created_at DESC
         LIMIT 1
       ) lj ON true
-      WHERE r.owner = $1 AND r.repo = $2
+      WHERE r.owner = $1 AND r.repo = $2${providerFilter}
       LIMIT 1
     `,
-    [owner, repo],
+      params,
+    );
+    return row;
+  };
+
+  const row = await readRecord();
+  if (row) {
+    return mapRepo(row);
+  }
+
+  // LAZY DEFAULT (review: Codex HIGH #1, secondary safety net for the PATCH's existing-load): a
+  // Bitbucket repo may have a repositories row but no repo_config (add-bitbucket never creates one).
+  // Resolve the repository_id provider-SAFELY via findRepositoryByBitbucketIdentity (filters
+  // vcs_provider='bitbucket', so it can never collide with a same-named GitHub row — Pitfall #3).
+  // Bitbucket's add-repo flow sets owner === workspace, so owner is the workspace here. Gate on
+  // Bitbucket only: when vcsProvider is 'github' we NEVER lazily insert (a missing GitHub config
+  // still returns null); when vcsProvider is omitted the Bitbucket-identity lookup itself gates it.
+  if (vcsProvider === 'github') {
+    return null;
+  }
+
+  const bitbucketRepositoryId = await findRepositoryByBitbucketIdentity(env, {
+    workspace: owner,
+    repoSlug: repo,
+  });
+  if (bitbucketRepositoryId === null) {
+    return null;
+  }
+
+  await queryRows(
+    env,
+    `
+      INSERT INTO repo_configs (repository_id, parsed_json, updated_at, main_model, fallback_models, size_overrides, enabled)
+      VALUES ($1, $2::jsonb, now(), NULL, NULL, NULL, TRUE)
+      ON CONFLICT (repository_id) DO NOTHING
+    `,
+    [bitbucketRepositoryId, JSON.stringify(defaultRepoConfig)],
   );
 
-  return row ? mapRepo(row) : null;
+  const materializedRow = await readRecord();
+  return materializedRow ? mapRepo(materializedRow) : null;
 }
 
 // Provider-SAFE config read keyed on the exact repository row id (Phase 11 / Plan 07). The

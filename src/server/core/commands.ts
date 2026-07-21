@@ -36,6 +36,12 @@ export type CommandName = 'review' | 'review-rest' | 'pause' | 'resume' | 'help'
  *   for replay idempotency.
  * - `parentRef` / `findingRef` are the reply-thread parent (Bitbucket `comment.parent.id`, GitHub
  *   `pull_request_review_comment.in_reply_to_id`) resolved to the finding the reject dismisses.
+ * - `threadable` is the webhook-set capability flag (Phase 12, D-01): whether the ORIGINATING comment
+ *   can be threaded under. GitHub inline review comment → true; GitHub `issue_comment` (top-level) →
+ *   false; Bitbucket → true (both general + inline thread via `parent:{id}`). Set by the webhook
+ *   builders in Plan 03. When `threadable && commentRef`, `executeCommand`'s help reply threads via
+ *   `provider.replyToPrComment(...)`; otherwise it falls back to top-level `createPrComment` (the
+ *   GitHub issue-comment asymmetry). Absent (undefined) ⇒ top-level, byte-identical to today (NREG-01).
  */
 export type CommentContext = {
   authorId: string;
@@ -48,6 +54,7 @@ export type CommentContext = {
   owner: string;
   repo: string;
   workspace: string;
+  threadable?: boolean;
 };
 
 /**
@@ -349,8 +356,17 @@ export async function executeCommand(
       return;
 
     case 'help': {
-      // Read-only discovery — no authorization (D-11).
-      await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, buildHelpText(config, env.BOT_USERNAME));
+      // Read-only discovery — no authorization (D-11). Caller-decides threading (D-01): when the
+      // webhook flagged the originating comment threadable AND we carry its opaque ref, thread the
+      // help reply under it via replyToPrComment; otherwise post top-level via createPrComment (the
+      // GitHub issue-comment asymmetry — issue comments are not threadable). Ref-absent / flag-off is
+      // byte-identical top-level posting (NREG-01).
+      const body = buildHelpText(config, env.BOT_USERNAME);
+      if (ctx.threadable && ctx.commentRef) {
+        await provider.replyToPrComment(ctx.owner, ctx.repo, ctx.prNumber, body, ctx.commentRef);
+      } else {
+        await provider.createPrComment(ctx.owner, ctx.repo, ctx.prNumber, body);
+      }
       return;
     }
 

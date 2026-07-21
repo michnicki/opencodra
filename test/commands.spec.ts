@@ -517,6 +517,90 @@ describe('executeCommand — help (read-only discovery, D-11, no authorization)'
   });
 });
 
+describe('executeCommand — help threading (Phase 12, D-01 caller-decides)', () => {
+  function threadingProvider() {
+    const createPrComment = vi.fn(
+      async (_owner: string, _repo: string, _prNumber: number, _body: string) => ({ ref: 'c-top' }),
+    );
+    const replyToPrComment = vi.fn(
+      async (_owner: string, _repo: string, _prNumber: number, _body: string, _ref: string) => ({ ref: 'c-reply' }),
+    );
+    const getUserRepoPermission = vi.fn(async () => 'read' as const);
+    const provider = makeProvider('github', { createPrComment, replyToPrComment, getUserRepoPermission });
+    return { provider, createPrComment, replyToPrComment, getUserRepoPermission };
+  }
+
+  it('threads the help reply under the originating comment when threadable && commentRef (D-01)', async () => {
+    const env = createTestEnv();
+    const { provider, createPrComment, replyToPrComment } = threadingProvider();
+
+    await executeCommand(
+      env,
+      provider,
+      { kind: 'command', name: 'help', args: '' },
+      ctx({ body: '@codra-app help', threadable: true, commentRef: '1997', owner: 'acme', repo: 'widgets', prNumber: 42 }),
+      cfg(),
+    );
+
+    expect(replyToPrComment).toHaveBeenCalledTimes(1);
+    const [owner, repo, prNumber, body, inReplyToRef] = replyToPrComment.mock.calls[0];
+    expect([owner, repo, prNumber, inReplyToRef]).toEqual(['acme', 'widgets', 42, '1997']);
+    expect(body).toBe(buildHelpText(cfg(), env.BOT_USERNAME));
+    expect(createPrComment).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a top-level createPrComment when threadable is falsy (GitHub asymmetry)', async () => {
+    const env = createTestEnv();
+    const { provider, createPrComment, replyToPrComment } = threadingProvider();
+
+    await executeCommand(
+      env,
+      provider,
+      { kind: 'command', name: 'help', args: '' },
+      ctx({ body: '@codra-app help', commentRef: '1997', owner: 'acme', repo: 'widgets', prNumber: 42 }),
+      cfg(),
+    );
+
+    expect(createPrComment).toHaveBeenCalledTimes(1);
+    expect(createPrComment).toHaveBeenCalledWith('acme', 'widgets', 42, buildHelpText(cfg(), env.BOT_USERNAME));
+    expect(replyToPrComment).not.toHaveBeenCalled();
+  });
+
+  it('falls back to top-level when threadable is true but commentRef is absent', async () => {
+    const env = createTestEnv();
+    const { provider, createPrComment, replyToPrComment } = threadingProvider();
+
+    await executeCommand(
+      env,
+      provider,
+      { kind: 'command', name: 'help', args: '' },
+      ctx({ body: '@codra-app help', threadable: true, owner: 'acme', repo: 'widgets', prNumber: 42 }),
+      cfg(),
+    );
+
+    expect(createPrComment).toHaveBeenCalledTimes(1);
+    expect(replyToPrComment).not.toHaveBeenCalled();
+  });
+
+  it('pause / resume / reject stay silent — no createPrComment and no replyToPrComment (D-02)', async () => {
+    const env = createTestEnv();
+    // An unauthorized actor returns before any DB write; state-changing commands never post a reply
+    // regardless of threadable, so this proves executeCommand emits no bot chatter for them (D-02).
+    for (const name of ['pause', 'resume', 'reject'] as const) {
+      const { provider, createPrComment, replyToPrComment } = threadingProvider();
+      await executeCommand(
+        env,
+        provider,
+        { kind: 'command', name, args: '' },
+        ctx({ body: `@codra-app ${name}`, threadable: true, commentRef: '1997' }),
+        cfg(),
+      );
+      expect(createPrComment).not.toHaveBeenCalled();
+      expect(replyToPrComment).not.toHaveBeenCalled();
+    }
+  });
+});
+
 const dbDescribe = hasConfiguredTestDatabaseUrl() ? describe : describe.skip;
 
 dbDescribe('executeCommand — pause/resume/reject DB effects (authorization + scope)', () => {

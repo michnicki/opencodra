@@ -2,13 +2,15 @@
 //
 // answerQuestion answers a reviewer's free-form (non-command) mention grounded ONLY in the PR title,
 // description, and diff, and posts a single reply. It is a NON-Workflow call (~4 subrequests:
-// getPullRequest + getPullRequestDiff + one model call + createPrComment) invoked directly by the
+// getPullRequest + getPullRequestDiff + one model call + the reply post) invoked directly by the
 // queue consumer (Plan 06) for kind='qa' messages with a provider constructed via
 // VcsService.forProvider (Plan 02 jobless factory).
 //
-// READ-ONLY (QA-02 / T-11-04-4): the ONLY side effects are the single createPrComment reply and the
-// APP_KV rate-limit counter. No job creation, no pause/resume, no status-check or label mutation, no
-// DB write. The whole path is gated behind review.interactive.qa.enabled (default false, NREG-01).
+// READ-ONLY (QA-02 / T-11-04-4): the ONLY side effects are the single reply — posted via the provider
+// comment/reply primitive (createPrComment top-level, or replyToPrComment when threadable, Phase 12) —
+// and the APP_KV rate-limit counter. No job creation, no pause/resume, no status-check or label
+// mutation, no DB write. The whole path is gated behind review.interactive.qa.enabled (default false,
+// NREG-01).
 
 import type { AppBindings } from '../env';
 import type { RepoConfig } from '@shared/schema';
@@ -28,6 +30,15 @@ export type QaContext = {
   prNumber: number;
   question: string;
   authorId: string;
+  // Phase 12 (D-01/D-03): the opaque provider ref of the ORIGINATING comment, threaded through from
+  // the queue payload by the consumer (index.ts). Today Q&A carried no reply target (Pitfall #4).
+  // When `threadable && commentRef` are both present, answerQuestion replies under it via
+  // provider.replyToPrComment; otherwise it falls back to a top-level createPrComment.
+  commentRef?: string;
+  // Phase 12: webhook-set threadability capability flag — true when the originating comment can be
+  // threaded under (GitHub inline review comment / all Bitbucket → true; GitHub issue_comment →
+  // false). Absent (undefined) ⇒ top-level posting, byte-identical to today (NREG-01).
+  threadable?: boolean;
 };
 
 export type QaResult = { answered: boolean; reason?: string };
@@ -110,7 +121,9 @@ async function recordRateLimitIncrement(env: Pick<AppBindings, 'APP_KV'>, key: s
  *      diff so the model still answers scope-honestly (QA-01/D-04) rather than erroring.
  *   4. Build the capped, fenced prompt (buildQaPrompt) and run ModelService.answerPrQuestion — the
  *      single public prose path; this handler NEVER touches the private selectModel/callResolvedModel.
- *   5. Post the answer via provider.createPrComment, THEN record the rate-limit increment.
+ *   5. Post the answer via the provider comment/reply primitive (createPrComment top-level, or
+ *      replyToPrComment when ctx.threadable && ctx.commentRef — Phase 12), THEN record the rate-limit
+ *      increment. A thrown post propagates BEFORE the increment, so a failed post consumes no budget.
  */
 export async function answerQuestion(
   env: AppBindings,
@@ -165,7 +178,15 @@ export async function answerQuestion(
   const modelService = new ModelService(env);
   const answer = await modelService.answerPrQuestion({ systemPrompt, userPrompt, config });
 
-  await provider.createPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer);
+  // Caller-decides threading (Phase 12, D-01): thread under the originating comment when the webhook
+  // flagged it threadable AND we carry its opaque ref; otherwise post top-level (byte-identical to
+  // today, NREG-01). A thrown post propagates here — BEFORE the increment below — so a failed post
+  // consumes no rate-limit budget (WR-04).
+  if (ctx.threadable && ctx.commentRef) {
+    await provider.replyToPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer, ctx.commentRef);
+  } else {
+    await provider.createPrComment(ctx.workspace, ctx.repo, ctx.prNumber, answer);
+  }
 
   // WR-04: consume budget only now that the reply is posted, so a transient failure above (which the
   // queue retries) never burns the rate-limit budget or self-drops the retried question.

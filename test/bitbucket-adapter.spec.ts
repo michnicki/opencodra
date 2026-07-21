@@ -463,6 +463,44 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     expect(post?.body).toEqual({ content: { raw: 'Standalone note' } });
   });
 
+  it('replyToPrComment posts { content: { raw }, parent: { id } } with parent.id the bare decoded integer and returns { ref: "<prNumber>:<newId>" } (D-01)', async () => {
+    const mock = installBitbucketFetchMock({
+      postPullRequestCommentResponses: [{ status: 201, body: { id: 9 } }],
+    });
+    const { adapter } = buildAdapter();
+
+    const result = await adapter.replyToPrComment(WORKSPACE, REPO, PR_NUMBER, 'A threaded reply', `${PR_NUMBER}:1997`);
+    // The new comment's ref self-encodes the PR id with the reply's own id.
+    expect(result).toEqual({ ref: `${PR_NUMBER}:9` });
+
+    const post = mock.calls.find(
+      (call) => call.method === 'POST' && call.path.endsWith(`/pullrequests/${PR_NUMBER}/comments`),
+    );
+    // parent.id is the BARE integer decoded from the opaque `${PR}:${commentId}` ref, never the string.
+    expect(post?.body).toEqual({ content: { raw: 'A threaded reply' }, parent: { id: 1997 } });
+    expect(typeof (post?.body as { parent: { id: unknown } }).parent.id).toBe('number');
+  });
+
+  it('replyToPrComment rejects a malformed opaque ref before any request (T-12-01-1)', async () => {
+    const mock = installBitbucketFetchMock();
+    const { adapter } = buildAdapter();
+
+    for (const ref of ['42', '42:', 'x:y', '42:1:2']) {
+      await expect(adapter.replyToPrComment(WORKSPACE, REPO, PR_NUMBER, 'reply', ref)).rejects.toThrow();
+    }
+    // No HTTP request was issued for any malformed ref (rejected pre-request).
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  it('replyToPrComment throws before any request when the decoded prId != the target prNumber (T-12-01-4)', async () => {
+    const mock = installBitbucketFetchMock();
+    const { adapter } = buildAdapter();
+
+    // ref "43:1997" decodes prId=43 but the target PR is 42 — the encoded PR component must match.
+    await expect(adapter.replyToPrComment(WORKSPACE, REPO, PR_NUMBER, 'reply', `43:1997`)).rejects.toThrow();
+    expect(mock.calls).toHaveLength(0);
+  });
+
   it('editPrComment parses the ref, PUTs { content: { raw } }, and returns the same ref', async () => {
     const mock = installBitbucketFetchMock();
     const { adapter } = buildAdapter();

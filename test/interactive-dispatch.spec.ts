@@ -77,6 +77,7 @@ const commandBody = {
     parentRef: 'p1',
     findingRef: 'f1',
     sourceCommentRef: 'c1',
+    threadable: true,
   },
 };
 
@@ -93,6 +94,8 @@ const qaBody = {
     authorId: 'u1',
     body: '@codra-app why is this slow?',
     workspace: 'octo',
+    commentRef: 'qa-c1',
+    threadable: true,
   },
 };
 
@@ -132,6 +135,9 @@ dbDescribe('queue consumer — interactive kind branch (11-06)', () => {
     expect(ctx.workspace).toBe('octo');
     expect(ctx.authorId).toBe('u1');
     expect(ctx.prNumber).toBe(12);
+    // Phase 12: the reply target threads through to the reconstructed CommentContext (D-01).
+    expect(ctx.commentRef).toBe('c1');
+    expect(ctx.threadable).toBe(true);
     const cmd = executeCommandMock.mock.calls[0][2];
     expect(cmd.name).toBe('reject');
 
@@ -152,6 +158,9 @@ dbDescribe('queue consumer — interactive kind branch (11-06)', () => {
     expect(qaCtx.question).toBe('why is this slow?');
     expect(qaCtx.workspace).toBe('octo');
     expect(qaCtx.prNumber).toBe(12);
+    // Phase 12: the reply target threads through to the reconstructed QaContext (D-01/D-03).
+    expect(qaCtx.commentRef).toBe('qa-c1');
+    expect(qaCtx.threadable).toBe(true);
 
     expect(executeCommandMock).not.toHaveBeenCalled();
     expect((env.REVIEW_WORKFLOW as any).created).toHaveLength(0);
