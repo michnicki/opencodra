@@ -39,7 +39,9 @@ function mapRepo(row: RepoConfigRow) {
 export async function upsertRepoConfig(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   input: {
-    installationId: string;
+    // D-04: nullable so the generic PATCH config path can forward a repo record's now-nullable
+    // installationId without a cast; getOrCreateRepository binds it into a nullable column.
+    installationId: string | null;
     owner: string;
     repo: string;
     parsedJson: RepoConfig;

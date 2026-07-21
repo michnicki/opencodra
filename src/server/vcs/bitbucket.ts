@@ -339,6 +339,28 @@ export class BitbucketAdapter implements VcsProvider {
     return { ref: `${prNumber}:${posted.id}` };
   }
 
+  async replyToPrComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    body: string,
+    inReplyToRef: string,
+  ): Promise<{ ref: string }> {
+    // Decode BOTH parts via parsePrCommentRef (never split(':') — Pitfall #1); this throws on a
+    // malformed ref BEFORE any request (T-12-01-1). The opaque ref self-encodes the PR id, so
+    // validate the decoded prId against the target prNumber and reject a mismatch — the encoded PR
+    // component must not be silently discarded (T-12-01-4; mirrors how editPrComment trusts prId).
+    const { prId, commentId } = parsePrCommentRef(inReplyToRef);
+    if (prId !== prNumber) {
+      throw new Error(
+        `replyToPrComment ref PR mismatch for ${repo}: decoded prId ${prId} != target prNumber ${prNumber} (ref ${JSON.stringify(inReplyToRef)})`,
+      );
+    }
+    const posted = await this.client.replyToPullRequestComment(this.job.repositoryWorkspace, repo, prNumber, commentId, body);
+    void owner;
+    return { ref: `${prNumber}:${posted.id}` };
+  }
+
   async editPrComment(
     owner: string,
     repo: string,

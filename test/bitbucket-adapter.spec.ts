@@ -478,7 +478,7 @@ describe('BitbucketAdapter (VcsProvider mapping)', () => {
     );
     // parent.id is the BARE integer decoded from the opaque `${PR}:${commentId}` ref, never the string.
     expect(post?.body).toEqual({ content: { raw: 'A threaded reply' }, parent: { id: 1997 } });
-    expect(typeof post?.body.parent.id).toBe('number');
+    expect(typeof (post?.body as { parent: { id: unknown } }).parent.id).toBe('number');
   });
 
   it('replyToPrComment rejects a malformed opaque ref before any request (T-12-01-1)', async () => {

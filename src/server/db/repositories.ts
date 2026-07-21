@@ -13,7 +13,9 @@ export type RepositoryRow = {
 export async function getOrCreateRepository(
   env: Pick<AppBindings, 'HYPERDRIVE'>,
   input: {
-    installationId: string;
+    // D-04: nullable so a Bitbucket-origin caller (NULL installation_id) type-checks. The bitbucket
+    // branch already ignores it; the github branch binds it parametrically into a nullable column.
+    installationId: string | null;
     owner: string;
     repo: string;
     vcsProvider?: 'github' | 'bitbucket' | string;

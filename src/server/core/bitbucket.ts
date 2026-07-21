@@ -247,6 +247,23 @@ export class BitbucketClient {
     return (await response.json()) as { id: number };
   }
 
+  // Net-new threaded reply (Phase 12, D-01). Mirrors postPullRequestComment's content-only branch
+  // but attaches `parent:{id}` so Bitbucket threads the reply under the originating comment. The
+  // payload local is named `requestBody` (NOT `body`) because `body` is already the string parameter
+  // in this scope — a second `const body` would be a compile-time redeclaration (review: Codex MEDIUM).
+  async replyToPullRequestComment(
+    workspace: string,
+    repoSlug: string,
+    prNumber: number,
+    commentId: number,
+    body: string,
+  ): Promise<{ id: number }> {
+    const path = `${repositoryPath(workspace, repoSlug)}/pullrequests/${prNumber}/comments`;
+    const requestBody = { content: { raw: body }, parent: { id: commentId } };
+    const response = await this.request('POST', path, requestBody);
+    return (await response.json()) as { id: number };
+  }
+
   async editPullRequestComment(
     workspace: string,
     repoSlug: string,
