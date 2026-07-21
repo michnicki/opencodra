@@ -48,6 +48,10 @@ export class GitHubService {
     return this.client.listIssueComments(owner, repo, issueNumber);
   }
 
+  async createReviewCommentReply(owner: string, repo: string, pullNumber: number, body: string, inReplyToId: number) {
+    return this.client.createReviewCommentReply(owner, repo, pullNumber, body, inReplyToId);
+  }
+
   async updateIssueComment(owner: string, repo: string, commentId: number, body: string) {
     return this.client.updateIssueComment(owner, repo, commentId, body);
   }
