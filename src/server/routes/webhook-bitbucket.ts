@@ -287,6 +287,9 @@ export async function handleBitbucketWebhook(c: Context<AppEnv>) {
       owner: workspace,
       repo: repoSlug,
       workspace,
+      // Bitbucket threads BOTH general and inline comments, so every Bitbucket comment is threadable
+      // regardless of whether it is a reply (parentRef present) or top-level (D-03).
+      threadable: true,
     };
 
     // WR-03: a TRANSIENT failure in the synchronous comment path (bot-identity resolve / PR

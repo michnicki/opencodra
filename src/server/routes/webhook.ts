@@ -47,11 +47,18 @@ function buildMentionReviewRequest(input: {
 // NEVER the renameable login. `in_reply_to_id` maps to findingRef so a reply left under an inline
 // finding dismisses that finding (D-09, parity with Bitbucket comment.parent.id). workspace = owner
 // login (the canonical GitHub pause-key workspace).
+//
+// `isInline` (Phase 12, D-03) is the webhook-set threadable capability flag. It is passed EXPLICITLY
+// from the event type — true for `pull_request_review_comment` (inline review comments thread) and
+// false for `issue_comment` (top-level PR comments are NOT threadable on GitHub) — and is NOT inferred
+// from parentRef/findingRef, which are undefined for the common top-level-inline case (a first inline
+// review comment carries no in_reply_to_id) and so are an unreliable proxy (research Pitfall #2).
 function buildGithubCommentContext(input: {
   prNumber: number;
   owner: string;
   repo: string;
   comment: { id: number; body: string; user: { id: number; login: string }; in_reply_to_id?: number };
+  isInline: boolean;
 }): CommentContext {
   const inReplyTo = input.comment.in_reply_to_id;
   const findingRef = inReplyTo !== undefined ? String(inReplyTo) : undefined;
@@ -66,6 +73,7 @@ function buildGithubCommentContext(input: {
     owner: input.owner,
     repo: input.repo,
     workspace: input.owner,
+    threadable: input.isInline,
   };
 }
 
@@ -207,6 +215,8 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         owner,
         repo,
         comment: reviewComment.comment,
+        // pull_request_review_comment is an inline review comment — threadable (D-03).
+        isInline: true,
       });
       return ingestCommentEventOrRetry(c, deliveryId, {
         reviewRequest: buildMentionReviewRequest({ installationId, owner, repo, prNumber }),
@@ -232,6 +242,8 @@ export async function handleGitHubWebhook(c: Context<AppEnv>) {
         owner,
         repo,
         comment: issueComment.comment,
+        // issue_comment is a top-level PR comment — NOT threadable on GitHub (D-03).
+        isInline: false,
       });
       return ingestCommentEventOrRetry(c, deliveryId, {
         reviewRequest: buildMentionReviewRequest({ installationId, owner, repo, prNumber }),
