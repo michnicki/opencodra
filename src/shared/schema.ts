@@ -276,6 +276,12 @@ export const reviewJobMessageSchema = z.object({
       parentRef: z.string().optional(),
       findingRef: z.string().optional(),
       sourceCommentRef: z.string().optional(),
+      // Phase 12 (D-01): whether the originating comment can be threaded via a provider-native
+      // reply. GitHub threads ONLY inline review comments (in_reply_to); a top-level issue comment
+      // is NOT threadable, so the CALLER decides via this flag and falls back to createPrComment.
+      // Additive + optional (no default) so reviewJobMessageSchema and ReviewJobMessage =
+      // z.input<...> stay byte-identical (NREG-01).
+      threadable: z.boolean().optional(),
       // Phase 11 (WR-01): the PROVIDER-SAFE per-repo config the webhook route already resolved at
       // classification time (GitHub via loadRepoConfig; Bitbucket via getRepoConfigByRepositoryId +
       // global-model overlay). Carried on the message so the INLINE consumer
@@ -491,9 +497,17 @@ export const jobDetailSchema = jobSummarySchema.extend({
 });
 
 export const repoConfigRecordSchema = z.object({
-  installationId: z.string(),
+  // D-04: nullable so a Bitbucket record (NULL installation_id — Bitbucket has no GitHub-App
+  // installation concept) parses without throwing the Zod error that 500s the config read.
+  installationId: z.string().nullable(),
   owner: z.string(),
   repo: z.string(),
+  // OPTIONAL (not a bare nullable): the collision-proof source for the provider-aware PATCH
+  // threaded in Plan 04. `mapRepo` (db/repo-configs.ts, 12-04 scope) and the RepoConfigRecord
+  // fixtures at test/browser/repos.spec.tsx + test/repository-provider-contract.spec.ts all OMIT
+  // workspace today, so a required nullable key would make every parse throw and fail this plan's
+  // own typecheck/test gate before 12-04 populates it (review: Codex HIGH #2).
+  workspace: z.string().nullable().optional(),
   vcsProvider: z.enum(vcsProviders),
   parsedJson: repoConfigSchema,
   updatedAt: dateStringSchema,
