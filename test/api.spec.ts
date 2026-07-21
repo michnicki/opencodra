@@ -2,7 +2,8 @@ import { createApp } from '@server/app';
 import { getJobForProcessing, insertJob } from '@server/db/jobs';
 import { insertFileReview } from '@server/db/file-reviews';
 import { queryRows } from '@server/db/client';
-import { getRepoConfigRecord } from '@server/db/repo-configs';
+import { getRepoConfigRecord, upsertRepoConfig } from '@server/db/repo-configs';
+import { getOrCreateRepository } from '@server/db/repositories';
 import { loadRepoConfig, updateGlobalConfig } from '@server/core/config';
 import { GitHubClient } from '@server/core/github';
 import { defaultRepoConfig, reviewJobMessageSchema } from '@shared/schema';
@@ -1007,5 +1008,92 @@ describe('Dashboard API Suite', () => {
     });
 
     expect(parsed.success).toBe(true);
+  });
+
+  // ── 12-04: Bitbucket repo-config route surface (materialization + provider-addressed GET/PATCH) ──
+
+  it('lists a freshly-added config-less Bitbucket repo in GET /api/repos (list materialization)', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const ws = `bb-list-${Date.now()}`;
+    const repo = 'materialize-me';
+
+    try {
+      // Mirrors POST /bitbucket: a repositories row (NULL installation_id) with NO repo_config.
+      await getOrCreateRepository(env, { installationId: '', vcsProvider: 'bitbucket', owner: ws, repo, workspace: ws });
+
+      const response = await app.request('/api/repos', {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(response.status).toBe(200);
+      const data = await response.json() as RepoConfigsResponse;
+      const found = data.repos.find((r) => r.owner === ws && r.repo === repo);
+      expect(found).toBeDefined();
+      expect(found?.vcsProvider).toBe('bitbucket');
+      expect(found?.installationId).toBeNull();
+    } finally {
+      await queryRows(env, `DELETE FROM repo_configs WHERE repository_id IN (SELECT id FROM repositories WHERE owner = $1)`, [ws]);
+      await queryRows(env, `DELETE FROM repositories WHERE owner = $1`, [ws]);
+    }
+  });
+
+  it('GET /:owner/:repo/config?provider isolates a same-named GitHub+Bitbucket pair', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const name = `bb-getiso-${Date.now()}`;
+
+    try {
+      await upsertRepoConfig(env, { installationId: '7777', owner: name, repo: name, parsedJson: defaultRepoConfig, enabled: true });
+      await upsertRepoConfig(env, { vcsProvider: 'bitbucket', workspace: name, installationId: null, owner: name, repo: name, parsedJson: defaultRepoConfig, enabled: true });
+
+      const bbRes = await app.request(`/api/repos/${name}/${name}/config?provider=bitbucket`, {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(bbRes.status).toBe(200);
+      const bbData = await bbRes.json() as { repo: { vcsProvider: string; installationId: string | null } };
+      expect(bbData.repo.vcsProvider).toBe('bitbucket');
+      expect(bbData.repo.installationId).toBeNull();
+
+      const ghRes = await app.request(`/api/repos/${name}/${name}/config?provider=github`, {
+        headers: { Cookie: `codra_session=${token}` },
+      }, env);
+      expect(ghRes.status).toBe(200);
+      const ghData = await ghRes.json() as { repo: { vcsProvider: string; installationId: string | null } };
+      expect(ghData.repo.vcsProvider).toBe('github');
+      expect(ghData.repo.installationId).toBe('7777');
+    } finally {
+      await queryRows(env, `DELETE FROM repo_configs WHERE repository_id IN (SELECT id FROM repositories WHERE owner = $1)`, [name]);
+      await queryRows(env, `DELETE FROM repositories WHERE owner = $1`, [name]);
+    }
+  });
+
+  it('enabled-only PATCH ?provider=bitbucket toggles exactly one provider row', async () => {
+    const env = createTestEnv();
+    const token = await getAuthCookie(env);
+    const name = `bb-patchiso-${Date.now()}`;
+
+    try {
+      await upsertRepoConfig(env, { installationId: '8888', owner: name, repo: name, parsedJson: defaultRepoConfig, enabled: true });
+      await upsertRepoConfig(env, { vcsProvider: 'bitbucket', workspace: name, installationId: null, owner: name, repo: name, parsedJson: defaultRepoConfig, enabled: true });
+
+      const patch = await app.request(`/api/repos/${name}/${name}/config?provider=bitbucket`, {
+        method: 'PATCH',
+        headers: {
+          Cookie: `codra_session=${token}`,
+          'x-requested-with': 'XMLHttpRequest',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ enabled: false }),
+      }, env);
+      expect(patch.status).toBe(200);
+
+      const bb = await getRepoConfigRecord(env, name, name, 'bitbucket');
+      const gh = await getRepoConfigRecord(env, name, name, 'github');
+      expect(bb?.enabled).toBe(false); // toggled
+      expect(gh?.enabled).toBe(true); // untouched
+    } finally {
+      await queryRows(env, `DELETE FROM repo_configs WHERE repository_id IN (SELECT id FROM repositories WHERE owner = $1)`, [name]);
+      await queryRows(env, `DELETE FROM repositories WHERE owner = $1`, [name]);
+    }
   });
 });
