@@ -309,7 +309,7 @@ describe('answerQuestion (Task 2: read-only, config-rate-limited Q&A)', () => {
     const rateWrites = putSpy.mock.calls.filter(([key]) => String(key).startsWith('qa-rate:'));
     expect(rateWrites).toHaveLength(1);
     // The reply resolved before the increment invocation order-wise.
-    const replyOrder = provider.replyToPrComment.mock.invocationCallOrder[0];
+    const replyOrder = vi.mocked(provider.replyToPrComment).mock.invocationCallOrder[0];
     const putOrder = putSpy.mock.invocationCallOrder[putSpy.mock.invocationCallOrder.length - 1];
     expect(replyOrder).toBeLessThan(putOrder);
   });
