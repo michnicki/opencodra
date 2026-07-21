@@ -69,7 +69,7 @@ describe('ReposPage repository management', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Pause reviews for acme/widgets' }));
 
     await waitFor(() => {
-      expect(api.updateRepoConfig).toHaveBeenCalledWith('acme', 'widgets', { enabled: false });
+      expect(api.updateRepoConfig).toHaveBeenCalledWith('acme', 'widgets', { enabled: false }, 'github');
     });
   });
 
