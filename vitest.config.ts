@@ -4,6 +4,13 @@ import { playwright } from '@vitest/browser-playwright';
 import { resolve } from 'path';
 
 export default defineConfig({
+  // The real build-time value is computed in vite.config.ts from `git describe`, but the
+  // vitest node/browser projects never load vite.config.ts, so settings.tsx's ambient
+  // `__APP_VERSION__` read is otherwise undefined at render time. A static stand-in is enough —
+  // no test asserts the actual version string.
+  define: {
+    __APP_VERSION__: JSON.stringify('test'),
+  },
   plugins: [react()],
   resolve: {
     alias: {
